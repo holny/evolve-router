@@ -57,7 +57,6 @@ if [[ "${1:-}" == "--install" ]]; then
 PLIST
     launchctl bootout gui/$(id -u)/ai.evolve-router.tray 2>/dev/null || true
     launchctl bootstrap gui/$(id -u) "$TRAY_PLIST"
-)
     echo "完成：菜单栏出现分支图标即运行中（登录自启可在 系统设置 → 通用 → 登录项 添加）"
 else
     echo "[3/3] 跳过安装（--install 可装到 /Applications 并启动）"

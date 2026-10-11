@@ -6,7 +6,7 @@ set -euo pipefail
 
 BIN_SRC="target/release/evo-router"
 BIN_DST="$HOME/.local/bin/evo-router"
-LABEL="ai.evolve.gateway"
+LABEL="ai.evolve-router.gateway"
 
 if [[ "${1:-}" != "--no-build" ]]; then
     echo "[1/4] cargo build --release ..."
