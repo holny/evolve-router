@@ -130,16 +130,44 @@ struct PanelView: View {
                 }
             }
             Divider()
-            Button {
-                NSWorkspace.shared.open(URL(string: Config.baseURL)!)
-            } label: {
-                Label("打开完整面板", systemImage: "gauge.with.needle").frame(maxWidth: .infinity)
+            // 网关控制（LaunchAgent ai.evolve-router.gateway）
+            HStack(spacing: 8) {
+                Text("网关").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
+                Button("启动") { shell("launchctl bootstrap gui/\(getuid())/ai.evolve-router.gateway") }
+                Button("重启") { shell("launchctl kickstart -k gui/\(getuid())/ai.evolve-router.gateway") }
+                Button("停止") { shell("launchctl bootout gui/\(getuid())/ai.evolve-router.gateway") }
+                    .foregroundColor(.red)
             }
-            .controlSize(.small)
+            .controlSize(.mini)
+            HStack(spacing: 8) {
+                // GitHub：安全审计与开源贡献入口
+                Link(destination: URL(string: "https://github.com/holny/evolve-router")!) {
+                    Label("GitHub · 审计与贡献", systemImage: "link")
+                        .font(.system(size: 11))
+                }
+                Spacer()
+                Button {
+                    NSWorkspace.shared.open(URL(string: Config.baseURL)!)
+                } label: {
+                    Label("完整面板", systemImage: "gauge.with.needle").font(.system(size: 11))
+                }
+                .controlSize(.small)
+            }
         }
         .padding(12)
         .frame(width: 300)
         .task { await state.poll() }
+    }
+
+    private func shell(_ cmd: String) {
+        Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-c", cmd]
+            try? p.run()
+            p.waitUntilExit()
+            // 状态由 PanelView 的 3s 轮询循环自动刷新
+        }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
