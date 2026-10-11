@@ -26,7 +26,11 @@ fi
 
 echo "[2/4] 部署到 $BIN_DST ..."
 # 原地 cp 覆盖已签名二进制 → macOS 代码签名失效 → exec 被 SIGKILL。
-# 必须 rm（换 inode）+ codesign 临时重签
+# 必须 rm（换 inode）+ codesign 临时重签。
+# review 修复：LaunchAgent 启动会做 Launch Constraint 签名校验——
+# quarantine 属性与签名失效都会被 SIGKILL（Code Signature Invalid），
+# 先清属性再重签（与 tray 的 LaunchAgent 同坑）
+xattr -cr "$BIN_DST" 2>/dev/null || true
 rm -f "$BIN_DST"
 cp "$BIN_SRC" "$BIN_DST"
 codesign --force --sign - "$BIN_DST" 2>/dev/null || true
