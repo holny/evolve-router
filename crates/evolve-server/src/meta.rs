@@ -907,13 +907,25 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     for m in &snap_all {
         if !seen_providers.insert(m.provider.clone()) { continue; }
         if manual_idents.contains(&(m.base_url.clone(), group_fp(&m.provider))) { continue; }
+        // review：网关自身（self endpoint）不是上游——不出现在 Provider 管理
+        let self_ep = format!("127.0.0.1:{}", st.config.server.port);
+        let self_ep2 = format!("localhost:{}", st.config.server.port);
+        if m.base_url.contains(&self_ep) || m.base_url.contains(&self_ep2) { continue; }
         let profile = evolve_core::plans::plan_for(&m.base_url);
         let plan_key = profile.map(|p| p.key.to_string()).unwrap_or_default();
         let pov = ov.plans.get(&plan_key);
+        // tier 回退链：面板档位设置 → 同 plan_key 的手动条目档位（同方案多账号
+        // 档位一致，如 opencode-go 与 -github）→ 空（无配额展示，诚实）
         let tier = pov.and_then(|p| p.tier.clone())
+            .or_else(|| ov.providers.iter()
+                .filter(|(_, p)| !p.disabled && !p.tier.is_empty()
+                    && evolve_core::plans::plan_for(&p.base_url).map(|pp| pp.key.to_string()).unwrap_or_default() == plan_key)
+                .map(|(_, p)| p.tier.clone())
+                .next())
             .unwrap_or_default();
-        let allowance_5h = budgets.get(&plan_key).copied();
-        let tier_str = pov.and_then(|p| p.tier.clone()).unwrap_or_default();
+        let tier_str = tier.clone();
+        let allowance_5h = budgets.get(&plan_key).copied()
+            .or_else(|| evolve_core::plans::tier_allowance_by_key(&plan_key, &tier_str, 0));
         let allowance_weekly = evolve_core::plans::tier_allowance_by_key(&plan_key, &tier_str, 1);
         let allowance_monthly = evolve_core::plans::tier_allowance_by_key(&plan_key, &tier_str, 2);
         // 用量：该 provider（账号）全部模型的 5h 积分合计——同端点多账号按
