@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/evolve_tray.d",
+    "object": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/evolve_tray.o",
+    "swift-dependencies": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/primary.swiftdeps"
+  },
+  "/Users/hly/Documents/01_work/code/model-route/apps/tray/Sources/evolve-tray/main.swift": {
+    "object": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/main.swift.o",
+    "swiftmodule": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/main.swiftdeps",
+    "diagnostics": "/Users/hly/Documents/01_work/code/model-route/apps/tray/.build/arm64-apple-macosx/release/evolve_tray.build/main.dia"
+  }
+}
