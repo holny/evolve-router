@@ -1,11 +1,11 @@
 #!/bin/bash
-# EvolveTray 构建：SwiftPM 编译 → 组 .app bundle → 可选安装
+# EvolveRouter 构建：SwiftPM 编译 → 组 .app bundle → 可选安装
 # 用法: apps/tray/build.sh [--install]
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="EvolveTray"
-BUNDLE_ID="ai.evolve.tray"
+APP_NAME="EvolveRouter"
+BUNDLE_ID="ai.evolve.router.tray"
 
 echo "[1/3] swift build --release ..."
 swift build -c release
@@ -13,7 +13,7 @@ swift build -c release
 echo "[2/3] 组装 ${APP_NAME}.app ..."
 APP_DIR="build/${APP_NAME}.app/Contents"
 mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-cp .build/release/evolve-tray "$APP_DIR/MacOS/${APP_NAME}"
+cp .build/release/evolve-router-tray "$APP_DIR/MacOS/${APP_NAME}"
 
 cat > "$APP_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
