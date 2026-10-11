@@ -1,108 +1,84 @@
-// EvolveTray — EvolveRouter 菜单栏伴侣
-// 图标实时反映网关健康（绿=正常 / 红=异常），点击在图标下方弹出迷你监测窗：
+// EvolveRouter 菜单栏伴侣（SwiftUI MenuBarExtra 原生实现）
+// 图标实时反映网关健康（分支绿=正常 / 警告红=异常），点击弹出迷你监测窗：
 // 网关状态、请求与成功率、Tokens、各方案 5h 用量、最近决策、完整面板入口。
-// 数据源：本地网关 http://127.0.0.1:8787（3s 轮询，与网关解耦、离线静默重试）。
+// 数据源：本地网关（3s 轮询，EVOLVE_URL env 可覆盖，离线静默重试）。
 
 import SwiftUI
-import AppKit
 
-let baseURL = ProcessInfo.processInfo.environment["EVOLVE_URL"] ?? "http://127.0.0.1:8787"
+enum Config {
+    static let baseURL = ProcessInfo.processInfo.environment["EVOLVE_URL"] ?? "http://127.0.0.1:8787"
+}
 
 // MARK: - 状态
 
 @MainActor
 final class AppState: ObservableObject {
-    @Published var healthy = false
+    @Published var healthy = true
     @Published var requests = 0
     @Published var successRate = 0
     @Published var tokensK = "-"
     @Published var plans: [(String, Int)] = []
     @Published var recent: [(String, Int, Int)] = []   // (model, status, total_ms)
     @Published var lastSync: Date?
-    @Published var syncing = false
 
-    func apply(status: Int) {
-        healthy = (200..<300).contains(status)
-    }
-}
-
-// MARK: - 轮询
-
-@MainActor
-final class Poller {
-    private var timer: Timer?
-
-    func start(state: AppState, onHealthy: @escaping (Bool) -> Void) {
-        let task = { Task { await self.tick(state: state, onHealthy: onHealthy) } }
-        task()
-        timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in task() }
-    }
-
-    private func tick(state: AppState, onHealthy: @escaping (Bool) -> Void) {
-        if state.syncing { return }
-        state.syncing = true
-        Task {
-            defer { Task { @MainActor in state.syncing = false } }
-            // healthz：图标状态源
-            if let hz = try? await get("/healthz") {
-                let ok = hz.0 == 200
-                state.healthy = ok
-                onHealthy(ok)
-            } else {
-                state.healthy = false
-                onHealthy(false)
-            }
-            // /api/stats：HashMap<model, stats> 聚合
-            if case (200, let data)?? = try? await get("/api/stats"),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                var reqs = 0, ok = 0, toks = 0
-                for (_, s) in obj {
-                    guard let s = s as? [String: Any] else { continue }
-                    reqs += (s["requests"] as? Int) ?? Int((s["requests"] as? Double) ?? 0)
-                    ok += (s["success"] as? Int) ?? Int((s["success"] as? Double) ?? 0)
-                    toks += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
-                    toks += (s["completion_tokens"] as? Int) ?? Int((s["completion_tokens"] as? Double) ?? 0)
-                }
-                state.requests = reqs
-                state.successRate = reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0
-                state.tokensK = toks >= 1_000_000 ? String(format: "%.1fM", Double(toks)/1e6)
-                              : toks >= 1_000 ? String(format: "%.0fk", Double(toks)/1e3) : "\(toks)"
-            }
-            // /api/providers：各方案 5h 用量占比
-            if case (200, let data)?? = try? await get("/api/providers"),
-               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                var byPlan: [String: Int] = [:]
-                for p in arr {
-                    let kind = (p["plan_kind"] as? String) ?? "-"
-                    let short = ["coding": "CP", "go": "GO", "agent": "AP", "token": "TOK"][kind] ?? nil
-                    guard let short else { continue }
-                    guard let windows = p["windows"] as? [String: Any],
-                          let allow = (windows["5h"] as? Double) ?? (windows["5h"] as? Int).map(Double.init), allow > 0 else { continue }
-                    let used = (p["used_5h"] as? Double) ?? (p["used_5h"] as? Int).map(Double.init) ?? 0
-                    let pct = Int(round(100 * used / allow))
-                    byPlan[short] = max(byPlan[short] ?? 0, pct)
-                }
-                state.plans = byPlan.sorted { $0.value > $1.value }
-            }
-            // /api/events?limit=5：最近决策
-            if case (200, let data)?? = try? await get("/api/events?limit=8"),
-               let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                var rows: [(String, Int, Int)] = []
-                for ev in arr where (ev["kind"] as? String) == "chat" {
-                    let model = (ev["chosen"] as? String) ?? "-"
-                    let status = (ev["status"] as? Int) ?? Int((ev["status"] as? Double) ?? 0)
-                    let ms = (ev["total_ms"] as? Int) ?? Int((ev["total_ms"] as? Double) ?? 0)
-                    rows.append((model, status, ms))
-                    if rows.count >= 5 { break }
-                }
-                state.recent = rows
-            }
-            state.lastSync = Date()
+    func poll() async {
+        // healthz：图标状态源
+        if let resp = try? await get("/healthz") {
+            healthy = resp.0 == 200
+        } else {
+            healthy = false
         }
+        // /api/stats：HashMap<model, stats> 聚合
+        if case (200, let data)? = try? await get("/api/stats"),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            var reqs = 0, ok = 0, toks = 0
+            for (_, s) in obj {
+                guard let s = s as? [String: Any] else { continue }
+                reqs += (s["requests"] as? Int) ?? Int((s["requests"] as? Double) ?? 0)
+                ok += (s["success"] as? Int) ?? Int((s["success"] as? Double) ?? 0)
+                toks += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
+                toks += (s["completion_tokens"] as? Int) ?? Int((s["completion_tokens"] as? Double) ?? 0)
+            }
+            requests = reqs
+            successRate = reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0
+            tokensK = toks >= 1_000_000 ? String(format: "%.1fM", Double(toks)/1e6)
+                    : toks >= 1_000 ? String(format: "%.0fk", Double(toks)/1e3) : "\(toks)"
+        }
+        // /api/providers：各方案 5h 用量占比
+        if case (200, let data)? = try? await get("/api/providers"),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            var byPlan: [String: Int] = [:]
+            for p in arr {
+                let kind = (p["plan_kind"] as? String) ?? "-"
+                let short = ["coding": "CP", "go": "GO", "agent": "AP", "token": "TOK"][kind]
+                guard let short else { continue }
+                guard let windows = p["windows"] as? [String: Any],
+                      let allow = (windows["5h"] as? Double) ?? (windows["5h"] as? Int).map(Double.init),
+                      allow > 0 else { continue }
+                let used = (p["used_5h"] as? Double) ?? (p["used_5h"] as? Int).map(Double.init) ?? 0
+                let pct = Int(round(100 * used / allow))
+                byPlan[short] = max(byPlan[short] ?? 0, pct)
+            }
+            plans = byPlan.sorted { $0.value > $1.value }
+        }
+        // /api/events?limit=8：最近决策
+        if case (200, let data)? = try? await get("/api/events?limit=8"),
+           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            var rows: [(String, Int, Int)] = []
+            for ev in arr where (ev["kind"] as? String) == "chat" {
+                let model = (ev["chosen"] as? String) ?? "-"
+                let status = (ev["status"] as? Int) ?? Int((ev["status"] as? Double) ?? 0)
+                let ms = (ev["total_ms"] as? Int) ?? Int((ev["total_ms"] as? Double) ?? 0)
+                rows.append((model, status, ms))
+                if rows.count >= 5 { break }
+            }
+            recent = rows
+        }
+        lastSync = Date()
     }
 
     private func get(_ path: String) async throws -> (Int, Data) {
-        let (data, resp) = try await URLSession.shared.data(from: URL(string: baseURL + path)!)
+        let (data, resp) = try await URLSession.shared.data(from: URL(string: Config.baseURL + path)!)
         return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
     }
 }
@@ -155,7 +131,7 @@ struct PanelView: View {
             }
             Divider()
             Button {
-                NSWorkspace.shared.open(URL(string: baseURL)!)
+                NSWorkspace.shared.open(URL(string: Config.baseURL)!)
             } label: {
                 Label("打开完整面板", systemImage: "gauge.with.needle").frame(maxWidth: .infinity)
             }
@@ -163,6 +139,7 @@ struct PanelView: View {
         }
         .padding(12)
         .frame(width: 300)
+        .task { await state.poll() }
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
@@ -194,54 +171,27 @@ struct ProgressBar: View {
     }
 }
 
-// MARK: - AppKit shell（状态栏项 + Popover）
+// MARK: - App（MenuBarExtra 原生，系统全托管）
 
-@MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    let state = AppState()
-    let poller = Poller()
-    var statusItem: NSStatusItem!
-    var popover: NSPopover!
+@main
+struct EvolveRouterTrayApp: App {
+    @StateObject private var state = AppState()
+    @State private var timer: Timer?
 
-    func applicationDidFinishLaunching(_ note: Notification) {
-        NSApp.setActivationPolicy(.accessory) // 不进 Dock
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let btn = statusItem.button {
-            if let img = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "EvolveRouter") {
-                btn.image = img
-            } else {
-                btn.title = "EV" // symbol 不可用时的文字兜底
-            }
-            btn.contentTintColor = .systemGreen
-            btn.action = #selector(togglePopover)
-            btn.target = self
+    var body: some Scene {
+        MenuBarExtra {
+            PanelView(state: state)
+                .task {
+                    while !Task.isCancelled {
+                        await state.poll()
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    }
+                }
+        } label: {
+            Image(systemName: state.healthy
+                  ? "arrow.triangle.branch"
+                  : "exclamationmark.triangle.fill")
         }
-        let root = NSHostingView(rootView: PanelView(state: state))
-        root.frame = NSRect(x: 0, y: 0, width: 300, height: 380)
-        let vc = NSViewController()
-        vc.view = root
-        popover = NSPopover()
-        popover.contentViewController = vc
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 300, height: 380)
-        poller.start(state: state) { [weak self] healthy in
-            self?.statusItem.button?.contentTintColor = healthy ? .systemGreen : .systemRed
-        }
+        .menuBarExtraStyle(.window)
     }
-
-    @objc func togglePopover() {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else if let btn = statusItem.button {
-            popover.show(relativeTo: btn.bounds, of: btn, preferredEdge: .minY)
-        }
-    }
-}
-
-// main.swift 顶层入口
-let app = NSApplication.shared
-MainActor.assumeIsolated {
-    let delegate = AppDelegate()
-    app.delegate = delegate
-    app.run()
 }
