@@ -205,7 +205,8 @@ struct PanelView: View {
             p.arguments = ["-c", cmd]
             try? p.run()
             p.waitUntilExit()
-            // 状态由 PanelView 的 3s 轮询循环自动刷新
+            // 控制动作后立即刷新状态（不等 3s 轮询周期）——@MainActor 自动跳线程
+            await state.poll()
         }
     }
 
@@ -243,17 +244,20 @@ struct ProgressBar: View {
 @main
 struct EvolveRouterTrayApp: App {
     @StateObject private var state = AppState()
-    @State private var timer: Timer?
+
+    init() {
+        // 轮询必须挂在 App 级（常驻）——挂在 popover 内容的 .task 上会在
+        // 窗口关闭时被暂停，状态冻结导致按钮卡死（"启动没反应"根因）
+        let s = _state.wrappedValue
+        let t = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            Task { @MainActor in await s.poll() }
+        }
+        RunLoop.main.add(t, forMode: .common)
+    }
 
     var body: some Scene {
         MenuBarExtra {
             PanelView(state: state)
-                .task {
-                    while !Task.isCancelled {
-                        await state.poll()
-                        try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    }
-                }
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: state.healthy
@@ -265,3 +269,4 @@ struct EvolveRouterTrayApp: App {
         .menuBarExtraStyle(.window)
     }
 }
+
