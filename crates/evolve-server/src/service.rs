@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const LABEL: &str = "ai.evolve.gateway";
+pub const LABEL: &str = "ai.evolve-router.gateway";
 const DEFAULT_PORT: u16 = 8787;
 
 fn home() -> PathBuf {
@@ -203,9 +203,11 @@ pub fn install(port: u16) -> anyhow::Result<()> {
     }
     write_plist(&bin, &config, port)?;
     let domain = gui_domain()?;
-    // review#8 修复：改名前旧 label（ai.evo-router.gateway）可能仍加载着——
+    // 历代旧 label 全量卸载（ai.evo-router.gateway / ai.evolve.gateway）——
     // 不卸载会与新实例争抢 8787 端口。忽略失败（旧 agent 不存在属正常）。
-    let _ = launchctl(&["bootout", &format!("{domain}/ai.evo-router.gateway")]);
+    for old in ["ai.evo-router.gateway", "ai.evolve.gateway"] {
+        let _ = launchctl(&["bootout", &format!("{domain}/{old}")]);
+    }
     if is_loaded() {
         launchctl(&["kickstart", "-k", &format!("{domain}/{LABEL}")])?;
     } else {
