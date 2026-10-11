@@ -188,9 +188,12 @@ struct EvolveRouterTrayApp: App {
                     }
                 }
         } label: {
-            Image(systemName: state.healthy
-                  ? "arrow.triangle.branch"
-                  : "exclamationmark.triangle.fill")
+            HStack(spacing: 3) {
+                Image(systemName: state.healthy
+                      ? "arrow.triangle.branch"
+                      : "exclamationmark.triangle.fill")
+                Text("Router")
+            }
         }
         .menuBarExtraStyle(.window)
     }

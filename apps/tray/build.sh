@@ -37,7 +37,27 @@ if [[ "${1:-}" == "--install" ]]; then
     rm -rf "/Applications/${APP_NAME}.app"
     cp -R "build/${APP_NAME}.app" /Applications/
     open "/Applications/${APP_NAME}.app"
-    echo "完成：菜单栏出现分支图标即运行中（登录自启可在 系统设置 → 通用 → 登录项 添加）"
+    # 登录自启 + 崩溃拉起（LaunchAgent）
+    TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve.tray.plist"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$TRAY_PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>ai.evolve.tray</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/${APP_NAME}.app/Contents/MacOS/${APP_NAME}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><dict><key>Crashed</key><true/></dict>
+</dict>
+</plist>
+PLIST
+    launchctl bootout gui/$(id -u)/ai.evolve.tray 2>/dev/null || true
+    launchctl bootstrap gui/$(id -u) "$TRAY_PLIST"
+)    echo "完成：菜单栏出现分支图标即运行中（登录自启可在 系统设置 → 通用 → 登录项 添加）"
 else
     echo "[3/3] 跳过安装（--install 可装到 /Applications 并启动）"
     echo "产物: apps/tray/build/${APP_NAME}.app"
