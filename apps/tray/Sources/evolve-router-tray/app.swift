@@ -336,9 +336,21 @@ struct EvolveRouterTrayApp: App {
             PanelView(state: state)
         } label: {
             HStack(spacing: 3) {
-                Image(systemName: state.healthy
-                      ? "arrow.triangle.branch"
-                      : "exclamationmark.triangle.fill")
+                Image(nsImage: {
+                    let candidates = [36, 18]
+                    for px in candidates {
+                        if let img = NSImage(named: "tray-icon@\(px)x") ?? NSImage(named: "tray-icon") {
+                            return img
+                        }
+                    }
+                    // 资源加载：SwiftPM bundle 中的 tray-icon（@2x 优先）
+                    if let url = Bundle.module.url(forResource: "tray-icon@2x", withExtension: "png"),
+                       let img = NSImage(contentsOf: url) {
+                        img.isTemplate = true
+                        return img
+                    }
+                    return NSImage()
+                }())
                 Text("Router")
             }
         }

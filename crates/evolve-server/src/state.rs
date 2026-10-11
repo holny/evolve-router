@@ -401,6 +401,13 @@ impl Inner {
 
 pub fn build_router(state: AppState) -> axum::Router {
     axum::Router::new()
+        // favicon：面板浏览器标签图标（SVG 编译进二进制）
+        .route("/favicon.svg", axum::routing::get(|| async {
+            (
+                [(axum::http::header::CONTENT_TYPE, "image/svg+xml")],
+                include_bytes!("../assets/favicon.svg").to_vec(),
+            )
+        }))
         .route("/api/weight", axum::routing::post(crate::meta::api_weight))
         .route(
             "/api/policy-weights",
