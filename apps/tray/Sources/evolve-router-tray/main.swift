@@ -1,5 +1,6 @@
-// EvolveRouter 菜单栏伴侣（SwiftUI MenuBarExtra 原生实现，.menu 样式）
-// 点菜单栏图标弹原生菜单：状态行、启停控制、开机自启、开源地址、退出。
+// EvolveRouter 菜单栏伴侣（SwiftUI MenuBarExtra 原生实现，.window 面板样式）
+// 图标实时反映网关健康；点击弹出迷你面板：状态、方案 5h 用量、最近决策、
+// 智能启停控制、开机自启、开源地址与完整面板入口。
 // 数据源：本地网关（App 级 3s 轮询常驻，EVOLVE_URL env 可覆盖）。
 
 import SwiftUI
@@ -21,6 +22,7 @@ final class AppState: ObservableObject {
     @Published var tokensK = "-"
     @Published var plans: [(String, Int)] = []
     @Published var recent: [(String, Int, Int)] = []   // (model, status, total_ms)
+    @Published var lastSync: Date?
 
     func poll() async {
         if let resp = try? await get("/healthz") {
@@ -78,66 +80,125 @@ final class AppState: ObservableObject {
     }
 }
 
-// MARK: - App（.menu 原生菜单）
+// MARK: - 迷你面板
 
-@main
-struct EvolveRouterTrayApp: App {
-    @StateObject private var state = AppState()
-    // 开机自启：launchctl enable/disable（持久）；默认开
-    @State private var autostart: Bool
+struct PanelView: View {
+    @ObservedObject var state: AppState
+    @State private var autostart: Bool = UserDefaults.standard.object(forKey: "ev-autostart") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "ev-autostart")
+    @State private var showExitConfirm = false
 
-    init() {
-        let saved = UserDefaults.standard.object(forKey: "ev-autostart")
-        _autostart = State(initialValue: saved == nil ? true : UserDefaults.standard.bool(forKey: "ev-autostart"))
-        applyAutostart(_autostart.wrappedValue)
-        // 轮询挂 App 级常驻 Timer——不随菜单开闭暂停
-        let s = _state.wrappedValue
-        let t = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
-            Task { @MainActor in await s.poll() }
-        }
-        RunLoop.main.add(t, forMode: .common)
-    }
-
-    var body: some Scene {
-        MenuBarExtra {
-            // ── 状态区（灰字） ──
-            Text(state.healthy ? "● 网关运行中 · 8787" : "● 网关已停止")
-            Text("请求 \(state.requests) · 成功率 \(state.successRate)% · \(state.tokensK) tok")
-            if !state.plans.isEmpty {
-                Text("方案 " + state.plans.map { "\($0.0) \($0.1)%" }.joined(separator: " · "))
-            }
-            ForEach(Array(state.recent.enumerated()), id: \.offset) { _, row in
-                Text("\(row.1 == 200 ? "✓" : "✗") \(row.0) · \(row.2)ms")
-            }
-            Divider()
-            // ── 控制 ──
-            Button(state.healthy ? "停止 EvolveRouter" : "启动 EvolveRouter") {
-                Task { await toggleGateway() }
-            }
-            Toggle("开机自动启动", isOn: Binding(
-                get: { autostart },
-                set: { on in
-                    autostart = on
-                    applyAutostart(on)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Circle().fill(state.healthy ? Color.green : Color.red).frame(width: 8, height: 8)
+                Text(state.healthy ? "网关运行中 · 8787" : "网关已停止")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                if let t = state.lastSync {
+                    Text(t, style: .time).font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-            ))
+            }
+            HStack(spacing: 14) {
+                stat("请求", "\(state.requests)")
+                stat("成功率", "\(state.successRate)%")
+                stat("Tokens", state.tokensK)
+            }
+            if !state.plans.isEmpty {
+                section("方案 5h 用量") {
+                    ForEach(state.plans, id: \.0) { name, pct in
+                        HStack {
+                            Text(name).font(.system(size: 11, weight: .medium)).frame(width: 36, alignment: .leading)
+                            ProgressBar(pct: pct)
+                            Text("\(pct)%").font(.system(size: 11, design: .monospaced)).frame(width: 34, alignment: .trailing)
+                        }
+                    }
+                }
+            }
+            if !state.recent.isEmpty {
+                section("最近决策") {
+                    ForEach(Array(state.recent.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: 6) {
+                            Circle().fill(row.1 == 200 ? Color.green : Color.red).frame(width: 5, height: 5)
+                            Text(row.0).font(.system(size: 10.5)).lineLimit(1)
+                            Spacer()
+                            Text(row.1 == 200 ? "\(row.2)ms" : "fail")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(row.1 == 200 ? .secondary : Color.red)
+                        }
+                    }
+                }
+            }
             Divider()
-            Button("打开完整面板") { NSWorkspace.shared.open(URL(string: Config.baseURL)!) }
-            Button("开源地址") { NSWorkspace.shared.open(Config.githubURL) }
-            Divider()
-            Button("彻底退出…") { confirmExit() }
-        } label: {
-            HStack(spacing: 3) {
-                Image(systemName: state.healthy
-                      ? "arrow.triangle.branch"
-                      : "exclamationmark.triangle.fill")
-                Text("Router")
+            // 控制区（小尺寸，不喧宾夺主）
+            Toggle(isOn: $autostart) {
+                Text("开机自动启动").font(.system(size: 11))
+            }
+            .controlSize(.small)
+            .onChange(of: autostart) { on in
+                UserDefaults.standard.set(on, forKey: "ev-autostart")
+                applyAutostart(on)
+            }
+            Button {
+                Task { await toggleGateway() }
+            } label: {
+                Label(state.healthy ? "停止网关" : "启动网关",
+                      systemImage: state.healthy ? "stop.circle" : "play.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.small)
+            HStack(spacing: 8) {
+                Link(destination: Config.githubURL) {
+                    Label("开源地址", systemImage: "link")
+                        .font(.system(size: 11))
+                }
+                Spacer()
+                Button {
+                    NSWorkspace.shared.open(URL(string: Config.baseURL)!)
+                } label: {
+                    Label("完整面板", systemImage: "gauge.with.needle")
+                        .font(.system(size: 11))
+                }
+                Button(role: .destructive) {
+                    showExitConfirm = true
+                } label: {
+                    Label("退出", systemImage: "power")
+                        .font(.system(size: 11))
+                }
             }
         }
-        .menuBarExtraStyle(.menu)
+        .padding(12)
+        .frame(width: 300)
+        .task { await state.poll() }
+        .confirmationDialog("确定彻底退出 EvolveRouter 吗？", isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button("退出（网关与菜单栏将全部关闭）", role: .destructive) {
+                shell("launchctl bootout gui/\(getuid())/\(Config.gatewayLabel)")
+                // 分离延迟收掉托盘自身（app 退出后执行）
+                shell("(sleep 1; launchctl bootout gui/\(getuid())/\(Config.trayLabel)) >/dev/null 2>&1 &")
+                NSApp.terminate(nil)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("重新打开方式：双击 应用程序 → EvolveRouter，或在终端执行 open -a EvolveRouter")
+        }
     }
 
-    // ── 网关控制（launchctl，状态由 3s 轮询自动反馈） ──
+    private func stat(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 14, weight: .semibold, design: .monospaced))
+        }
+    }
+
+    private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    // ── 控制（launchctl） ──
 
     private func toggleGateway() async {
         await state.poll() // 先取当前真实状态
@@ -147,7 +208,7 @@ struct EvolveRouterTrayApp: App {
         } else {
             shell("launchctl bootstrap gui/\(uid)/\(Config.gatewayLabel)")
         }
-        await state.poll()
+        await state.poll() // 立即反馈
     }
 
     private func applyAutostart(_ on: Bool) {
@@ -160,26 +221,57 @@ struct EvolveRouterTrayApp: App {
     }
 
     private func shell(_ cmd: String) {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-c", cmd]
-        try? p.run()
+        Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-c", cmd]
+            try? p.run()
+            p.waitUntilExit()
+        }
+    }
+}
+
+struct ProgressBar: View {
+    let pct: Int
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                Capsule().fill(pct >= 85 ? AnyShapeStyle(Color.orange) : AnyShapeStyle(Color.accentColor))
+                    .frame(width: max(3, w * CGFloat(min(100, max(0, pct))) / 100))
+            }
+        }.frame(height: 6)
+    }
+}
+
+// MARK: - App（App 级轮询常驻）
+
+@main
+struct EvolveRouterTrayApp: App {
+    @StateObject private var state = AppState()
+
+    init() {
+        // 轮询必须挂在 App 级（常驻）——挂在面板内容的 .task 上会在
+        // 面板关闭时被暂停，状态冻结导致按钮卡死（实测根因）
+        let s = _state.wrappedValue
+        let t = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { _ in
+            Task { @MainActor in await s.poll() }
+        }
+        RunLoop.main.add(t, forMode: .common)
     }
 
-    // 彻底退出：引擎 + 托盘全停；同步 NSAlert 告知重开方式（menu 上下文
-    // 不支持 SwiftUI confirmationDialog）
-    private func confirmExit() {
-        let a = NSAlert()
-        a.messageText = "确定彻底退出 EvolveRouter 吗？"
-        a.informativeText = "网关引擎与菜单栏将全部关闭。\n重新打开：双击 应用程序 → EvolveRouter，或终端执行 open -a EvolveRouter"
-        a.addButton(withTitle: "退出")
-        a.addButton(withTitle: "取消")
-        if a.runModal() == .alertFirstButtonReturn {
-            let uid = getuid()
-            shell("launchctl bootout gui/\(uid)/\(Config.gatewayLabel)")
-            // 分离延迟收掉托盘自身（app 退出后执行）
-            shell("(sleep 1; launchctl bootout gui/\(uid)/\(Config.trayLabel)) >/dev/null 2>&1 &")
-            NSApp.terminate(nil)
+    var body: some Scene {
+        MenuBarExtra {
+            PanelView(state: state)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: state.healthy
+                      ? "arrow.triangle.branch"
+                      : "exclamationmark.triangle.fill")
+                Text("Router")
+            }
         }
+        .menuBarExtraStyle(.window)
     }
 }
