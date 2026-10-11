@@ -14,6 +14,16 @@ enum Config {
 
 // MARK: - 状态 + 轮询
 
+struct RecentDecision {
+    let model: String
+    let status: Int
+    let totalMs: Int
+    let ttftMs: Int?
+    let tokS: Double?
+    let agent: String
+    let time: String
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published var healthy = true
@@ -21,7 +31,8 @@ final class AppState: ObservableObject {
     @Published var successRate = 0
     @Published var tokensK = "-"
     @Published var plans: [(String, Int)] = []
-    @Published var recent: [(String, Int, Int)] = []   // (model, status, total_ms)
+    @Published var recent: [RecentDecision] = []
+    @Published var providers: [(String, Bool, Int)] = []   // (key, enabled, 5h 用量%)
     @Published var lastSync: Date?
 
     func poll() async {
@@ -48,26 +59,41 @@ final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/providers"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             var byPlan: [String: Int] = [:]
+            var provs: [(String, Bool, Int)] = []
             for p in arr {
+                let key = (p["key"] as? String) ?? "-"
+                let disabled = (p["disabled"] as? Bool) ?? false
+                let windows = p["windows"] as? [String: Any]
+                let allow = ((windows?["5h"] as? Double) ?? (windows?["5h"] as? Int).map(Double.init))
+                    ?? ((p["allowance_5h"] as? Double) ?? (p["allowance_5h"] as? Int).map(Double.init))
+                let used = (p["used_5h"] as? Double) ?? (p["used_5h"] as? Int).map(Double.init) ?? 0
                 let kind = (p["plan_kind"] as? String) ?? "-"
                 let short = ["coding": "CP", "go": "GO", "agent": "AP", "token": "TOK"][kind]
-                guard let short else { continue }
-                guard let windows = p["windows"] as? [String: Any],
-                      let allow = (windows["5h"] as? Double) ?? (windows["5h"] as? Int).map(Double.init),
-                      allow > 0 else { continue }
-                let used = (p["used_5h"] as? Double) ?? (p["used_5h"] as? Int).map(Double.init) ?? 0
-                byPlan[short] = max(byPlan[short] ?? 0, Int(round(100 * used / allow)))
+                if let allow, allow > 0 {
+                    let pct = Int(round(100 * used / allow))
+                    byPlan[short ?? key] = max(byPlan[short ?? key] ?? 0, pct)
+                }
+                provs.append((key, !disabled, allow != nil ? Int(round(100 * used / (allow ?? 1))) : -1))
             }
             plans = byPlan.sorted { $0.value > $1.value }
+            providers = Array(provs.prefix(6))
         }
         if case (200, let data)? = try? await get("/api/events?limit=8"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            var rows: [(String, Int, Int)] = []
+            var rows: [RecentDecision] = []
             for ev in arr where (ev["kind"] as? String) == "chat" {
                 let model = (ev["chosen"] as? String) ?? "-"
                 let status = (ev["status"] as? Int) ?? Int((ev["status"] as? Double) ?? 0)
-                let ms = (ev["total_ms"] as? Int) ?? Int((ev["total_ms"] as? Double) ?? 0)
-                rows.append((model, status, ms))
+                let total = (ev["total_ms"] as? Int) ?? Int((ev["total_ms"] as? Double) ?? 0)
+                let ttft = (ev["ttft_ms"] as? Int) ?? Int((ev["ttft_ms"] as? Double) ?? -1)
+                let out = (ev["completion_tokens"] as? Int) ?? Int((ev["completion_tokens"] as? Double) ?? 0)
+                let gen = max(1, total - max(0, ttft))
+                let tokS = out > 0 ? Double(out) / (Double(gen) / 1000.0) : nil
+                let agent = ((ev["agent"] as? String) ?? "-").split(separator: "/").first.map(String.init) ?? "-"
+                let time = Date(timeIntervalSince1970: ((ev["ts"] as? Double) ?? 0)/1000).formatted(date: .omitted, time: .shortened)
+                rows.append(RecentDecision(model: model, status: status, totalMs: total,
+                                           ttftMs: ttft > 0 ? ttft : nil, tokS: tokS,
+                                           agent: agent, time: time))
                 if rows.count >= 5 { break }
             }
             recent = rows
@@ -95,6 +121,21 @@ struct PanelView: View {
                 Circle().fill(state.healthy ? Color.green : Color.red).frame(width: 8, height: 8)
                 Text(state.healthy ? "网关运行中 · 8787" : "网关已停止")
                     .font(.system(size: 12, weight: .semibold))
+                // 复制接入配置（baseURL/model/provider——agent 接入三要素）
+                Button {
+                    let cfg = """
+                    baseURL  = \(Config.baseURL)/v1
+                    model    = auto
+                    provider = evo-router
+                    """
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cfg, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("复制接入配置（baseURL / model / provider）")
                 Spacer()
                 if let t = state.lastSync {
                     Text(t, style: .time).font(.system(size: 10)).foregroundStyle(.secondary)
@@ -118,14 +159,39 @@ struct PanelView: View {
             }
             if !state.recent.isEmpty {
                 section("最近决策") {
-                    ForEach(Array(state.recent.enumerated()), id: \.offset) { _, row in
+                    ForEach(Array(state.recent.enumerated()), id: \.offset) { _, r in
                         HStack(spacing: 6) {
-                            Circle().fill(row.1 == 200 ? Color.green : Color.red).frame(width: 5, height: 5)
-                            Text(row.0).font(.system(size: 10.5)).lineLimit(1)
+                            Circle().fill(r.status == 200 ? Color.green : Color.red).frame(width: 5, height: 5)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(r.model).font(.system(size: 10.5)).lineLimit(1)
+                                HStack(spacing: 5) {
+                                    Text(r.time).font(.system(size: 9)).foregroundStyle(.secondary)
+                                    if let tt = r.ttftMs { Text("TTFT \(tt)ms").font(.system(size: 9)).foregroundStyle(.secondary) }
+                                    if let s = r.tokS, s > 0 { Text(String(format: "%.0f tok/s", s)).font(.system(size: 9)).foregroundStyle(.secondary) }
+                                    Text(r.agent).font(.system(size: 9, weight: .medium)).foregroundStyle(.tertiary)
+                                }
+                            }
                             Spacer()
-                            Text(row.1 == 200 ? "\(row.2)ms" : "fail")
+                            Text(r.status == 200 ? "\(r.totalMs)ms" : "fail")
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(row.1 == 200 ? .secondary : Color.red)
+                                .foregroundStyle(r.status == 200 ? .secondary : Color.red)
+                        }
+                    }
+                }
+            }
+            if !state.providers.isEmpty {
+                section("Provider") {
+                    ForEach(state.providers, id: \.0) { name, enabled, pct in
+                        HStack(spacing: 6) {
+                            Circle().fill(enabled ? Color.green : Color.gray).frame(width: 5, height: 5)
+                            Text(name).font(.system(size: 10.5)).lineLimit(1)
+                            Spacer()
+                            if pct >= 0 {
+                                ProgressBar(pct: pct).frame(width: 60)
+                                Text("\(pct)%").font(.system(size: 10, design: .monospaced)).frame(width: 30, alignment: .trailing)
+                            } else {
+                                Text("—").font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
