@@ -1732,8 +1732,10 @@ es.onmessage = ev => { try { addRow(JSON.parse(ev.data)); } catch(_){} };
   const sun = document.getElementById('theme-sun');
   const moon = document.getElementById('theme-moon');
   // 图标表示当前模式：白天 ☀ / 黑夜 🌙；点击切换到另一模式
+  // （从 dataset 读当前值——闭包常量不会随点击更新，图标会卡死）
   const sync = () => {
-    const light = theme === 'light';
+    const cur = document.documentElement.dataset.theme;
+    const light = cur === 'light';
     if (sun) sun.style.display = light ? '' : 'none';
     if (moon) moon.style.display = light ? 'none' : '';
     btn.title = light ? '白天模式（点击切换黑夜）' : '黑夜模式（点击切换白天）';
