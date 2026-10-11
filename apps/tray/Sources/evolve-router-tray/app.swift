@@ -335,24 +335,21 @@ struct EvolveRouterTrayApp: App {
         MenuBarExtra {
             PanelView(state: state)
         } label: {
-            HStack(spacing: 3) {
-                Image(nsImage: {
-                    let candidates = [36, 18]
-                    for px in candidates {
-                        if let img = NSImage(named: "tray-icon@\(px)x") ?? NSImage(named: "tray-icon") {
-                            return img
-                        }
-                    }
-                    // 资源加载：SwiftPM bundle 中的 tray-icon（@2x 优先）
-                    if let url = Bundle.module.url(forResource: "tray-icon@2x", withExtension: "png"),
-                       let img = NSImage(contentsOf: url) {
-                        img.isTemplate = true
+            // 只留图标——template 模式系统自动适配菜单栏深浅
+            Image(nsImage: {
+                let candidates = [36, 18]
+                for px in candidates {
+                    if let img = NSImage(named: "tray-icon@\(px)x") ?? NSImage(named: "tray-icon") {
                         return img
                     }
-                    return NSImage()
-                }())
-                Text("Router")
-            }
+                }
+                if let url = Bundle.module.url(forResource: "tray-icon@2x", withExtension: "png"),
+                   let img = NSImage(contentsOf: url) {
+                    img.isTemplate = true
+                    return img
+                }
+                return NSImage()
+            }())
         }
         .menuBarExtraStyle(.window)
     }

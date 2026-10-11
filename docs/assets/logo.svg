@@ -35,13 +35,13 @@
     <!-- 左右对称循环飞轮弧（左逆右顺，末端箭头对称） -->
     <path d="M 118 138 A 168 168 0 0 0 112 350"/>
     <path d="M 394 138 A 168 168 0 0 1 400 350"/>
-    <use href="#av" transform="translate(118,138) rotate(-30)"/>
-    <use href="#av" transform="translate(400,350) rotate(150)"/>
+    <path d="M 84 152 L 118 138 L 130 174"/>
+    <path d="M 434 336 L 400 350 L 390 316"/>
   </g>
 
   <!-- 底部入站线 + 端点 -->
   <g stroke="currentColor" stroke-width="26" stroke-linecap="round" fill="none">
-    <path d="M 256 372 L 256 440"/>
+    <path d="M 256 372 L 256 424"/>
   </g>
-  <circle cx="256" cy="468" r="22" fill="currentColor"/>
+  <circle cx="256" cy="452" r="20" fill="currentColor"/>
 </svg>
