@@ -87,6 +87,10 @@ final class AppState: ObservableObject {
 
 struct PanelView: View {
     @ObservedObject var state: AppState
+    @State private var autostart: Bool = UserDefaults.standard.object(forKey: "ev-autostart") == nil
+        ? true
+        : UserDefaults.standard.bool(forKey: "ev-autostart")
+    @State private var showExitConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -131,32 +135,67 @@ struct PanelView: View {
             }
             Divider()
             // 网关控制（LaunchAgent ai.evolve-router.gateway）
-            HStack(spacing: 8) {
-                Text("网关").font(.system(size: 10)).foregroundStyle(.secondary).frame(width: 30, alignment: .leading)
-                Button("启动") { shell("launchctl bootstrap gui/\(getuid())/ai.evolve-router.gateway") }
-                Button("重启") { shell("launchctl kickstart -k gui/\(getuid())/ai.evolve-router.gateway") }
-                Button("停止") { shell("launchctl bootout gui/\(getuid())/ai.evolve-router.gateway") }
-                    .foregroundColor(.red)
+            Divider()
+            // 智能主按钮：状态驱动——运行中显示"停止"，已停止显示"启动"
+            Button {
+                if state.healthy {
+                    shell("launchctl bootout gui/\(getuid())/ai.evolve-router.gateway")
+                } else {
+                    shell("launchctl bootstrap gui/\(getuid())/ai.evolve-router.gateway")
+                }
+            } label: {
+                Label(state.healthy ? "停止 EvolveRouter" : "启动 EvolveRouter",
+                      systemImage: state.healthy ? "stop.circle" : "play.circle")
+                    .frame(maxWidth: .infinity)
             }
-            .controlSize(.mini)
+            .keyboardShortcut(.defaultAction)
+            Divider()
+            Toggle(isOn: $autostart) {
+                Text("开机自动启动").font(.system(size: 11))
+            }
+            .onChange(of: autostart) { on in
+                UserDefaults.standard.set(on, forKey: "ev-autostart")
+                let uid = getuid()
+                let labels = ["ai.evolve-router.tray", "ai.evolve-router.gateway"]
+                for lb in labels {
+                    shell(on ? "launchctl enable gui/\(uid)/\(lb)"
+                             : "launchctl disable gui/\(uid)/\(lb)")
+                }
+            }
             HStack(spacing: 8) {
-                // GitHub：安全审计与开源贡献入口
                 Link(destination: URL(string: "https://github.com/holny/evolve-router")!) {
-                    Label("GitHub · 审计与贡献", systemImage: "link")
+                    Label("开源地址", systemImage: "link")
                         .font(.system(size: 11))
                 }
                 Spacer()
                 Button {
                     NSWorkspace.shared.open(URL(string: Config.baseURL)!)
                 } label: {
-                    Label("完整面板", systemImage: "gauge.with.needle").font(.system(size: 11))
+                    Label("完整面板", systemImage: "gauge.with.needle")
+                        .font(.system(size: 11))
                 }
-                .controlSize(.small)
+                Button(role: .destructive) {
+                    showExitConfirm = true
+                } label: {
+                    Label("退出", systemImage: "power")
+                        .font(.system(size: 11))
+                }
             }
         }
         .padding(12)
         .frame(width: 300)
         .task { await state.poll() }
+        .confirmationDialog("确定彻底退出 EvolveRouter 吗？", isPresented: $showExitConfirm, titleVisibility: .visible) {
+            Button("退出（网关与菜单栏将全部关闭）", role: .destructive) {
+                shell("launchctl bootout gui/\(getuid())/ai.evolve-router.gateway")
+                // 分离延迟收掉托盘自身（app 退出后执行）
+                shell("(sleep 1; launchctl bootout gui/\(getuid())/ai.evolve-router.tray) >/dev/null 2>&1 &")
+                NSApp.terminate(nil)
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("重新打开方式：双击 应用程序 → EvolveRouter，或在终端执行 open -a EvolveRouter")
+        }
     }
 
     private func shell(_ cmd: String) {
