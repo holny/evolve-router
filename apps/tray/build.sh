@@ -2,7 +2,7 @@
 # EvolveRouter 构建：SwiftPM 编译 → 组 .app bundle → 可选安装
 # 用法: apps/tray/build.sh [--install]
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(cd "$(dirname "$0")" && pwd)"
 
 SRC_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP_NAME="EvolveRouter"
