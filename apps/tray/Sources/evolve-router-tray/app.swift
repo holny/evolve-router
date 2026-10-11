@@ -348,7 +348,7 @@ struct EvolveRouterTrayApp: App {
                     img.isTemplate = true
                     // 菜单栏规范尺寸 18pt（@2x 位图 72px 渲染时被按原像素当 pt 用，
                     // 撑爆菜单栏——显式归一到 18pt）
-                    img.size = NSSize(width: 18, height: 18)
+                    img.size = NSSize(width: 22, height: 22)
                     return img
                 }
                 return NSImage()
