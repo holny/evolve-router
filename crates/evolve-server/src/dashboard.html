@@ -572,6 +572,8 @@ const T = {
   profile:    {zh:'预设', en:'profile', ko:'프로필', ja:'プロファイル', es:'perfil', fr:'profil'},
   chip_cost:  {zh:'累计费用', en:'cost', ko:'누적 비용', ja:'累計費用', es:'coste', fr:'coût'},
   chip_active:{zh:'活跃模型', en:'active', ko:'활성 모델', ja:'アクティブ', es:'activos', fr:'actifs'},
+  chip_tokens:{zh:'Tokens 用量', en:'tokens used', ko:'토큰 사용량', ja:'トークン使用量', es:'tokens usados', fr:'tokens utilisés'},
+  chip_plans: {zh:'套餐 5h 用量', en:'plan 5h usage', ko:'플랜 5h 사용량', ja:'プラン 5h 使用量', es:'uso 5h del plan', fr:'utilisation 5h du plan'},
   s_in:   {zh:'入', en:' in', ko:'입', ja:'入', es:' ent', fr:' entr'},
   s_out:  {zh:'出', en:' out', ko:'출', ja:'出', es:' sal', fr:' sor'},
   s_read: {zh:'读', en:'r', ko:'읽', ja:'読', es:'lee', fr:'lect'},
@@ -1275,8 +1277,24 @@ function renderChips(){
   const active = all.filter(s => (s.requests||0) > 0).length;
   const rate = reqs ? Math.round(100*ok/reqs) : null;
   const rateCls = rate===null ? '' : (rate >= 95 ? ' good' : (rate < 90 ? ' warn' : ''));
+  const toks = all.reduce((a,s) => a+(s.prompt_tokens||0)+(s.completion_tokens||0), 0);
+  // 套餐用量：按方案聚合 5h 消耗/额度占比，取最紧套餐展示
+  // （数据源与 Provider 卡同源 state.providers——providersStatus 轮询缺 windows 字段）
+  const byPlan = {};
+  (state.providers||[]).forEach(p => {
+    const k = PK_SHORT[p.plan_kind] || p.plan_kind || '-';
+    const allow = (p.windows && p.windows['5h']) || p.allowance;
+    if (!allow) return;
+    byPlan[k] = Math.max(byPlan[k]||0, Math.round(100*(p.used_5h||0)/allow));
+  });
+  const planTxt = Object.entries(byPlan).length
+    ? Object.entries(byPlan).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
+        '<b class="'+(v>=85?'warn':v>=60?'':'')+'" style="font-size:13px'+(v>=85?'':';color:var(--fg)')+'">'+k+' '+v+'%</b>').join(' <span class="dim2">·</span> ')
+    : '-';
   document.getElementById('chips').innerHTML =
     '<span class="chip"><span>'+t('chip_reqs')+'</span><b>'+reqs+(rate!==null?' <b class="'+rateCls.trim()+'" style="font-size:12px">'+rate+'%</b>':'')+'</b></span>' +
+    '<span class="chip"><span>'+t('chip_tokens')+'</span><b style="font-size:13px">'+fmtK(toks)+'</b></span>' +
+    '<span class="chip"><span>'+t('chip_plans')+'</span><b style="font-size:13px;font-weight:600">'+planTxt+'</b></span>' +
     '<span class="chip"><span>'+t('chip_cost')+'</span><b style="font-size:13px">'+cost+'</b></span>' +
     '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>';
   renderPwPanel();
@@ -1326,11 +1344,24 @@ function renderProviders(){
       ? '<span class="pbadge">'+esc(t('pv_source_manual'))+'</span>'
       : '<span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(t('pv_source_scanned'))+'</span>';
     const kindBadge = (PK_LABEL[p.plan_kind] || 'pk_api') && t(PK_LABEL[p.plan_kind] || 'pk_api') || p.plan_kind;
-    const docs = p.docs_url ? ' <a href="'+esc(p.docs_url)+'" target="_blank" rel="noopener" style="color:var(--blue)">↗</a>' : '';
+    const docs = p.docs_url ? ' <a href="'+esc(p.docs_url)+'" target="_blank" rel="noopener" title="'+esc(t('pv_docs'))+'" style="color:var(--dim);display:inline-flex;vertical-align:middle"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>' : '';
+    // review：tier 名显示原档位；配额带单位——opencode-go 的 plan_kind 是
+    // 'go'（美元制），与 'dollar' 同为 $ 计价
     const tName = p.tier || '-';
-    const tShow = tName !== '-';
-    const tVal = (p.allowance != null ? Math.round(p.allowance) : '-') + (p.allowance != null ? ' / 5h' : '');
-    const fetch = p.fetched_models || p.model_count || 0;
+    const isDollar = p.plan_kind === 'dollar' || p.plan_kind === 'go';
+    const qUnit = {credits:'cr', afp:'AFP', token:'tok'}[p.plan_kind] || '';
+    const fq = v => v == null ? '-' : (isDollar ? '$'+fmtK(v) : fmtK(v) + (qUnit ? ' '+qUnit : ''));
+    const fetchN = typeof p.fetched_models === 'number' ? p.fetched_models
+      : (typeof p.model_count === 'number' ? p.model_count
+      : (p.fetched_models ? String(p.fetched_models).split(',').filter(s => s.trim()).length : 0));
+    // review：档位徽章化（lite/pro/max/go/go-plus），额度并入右侧窗口栏——
+    // 不再用 "(pro · -)" 文字摘要（- 是空额度，用户不可读）
+    const tierColors = {lite:'#64748b', pro:'var(--blue)', max:'var(--amber)', go:'var(--green)', 'go-plus':'var(--green)'};
+    const tierColor = tierColors[p.tier] || 'var(--dim)';
+    const tierBadge = p.tier
+      ? '<span class="pbadge" style="background:var(--card2);color:'+tierColor+'">'+esc(tName)+'</span>'
+      : '';
+    const fetch = fetchN;
     // 配额展示：5h 额度 + 已用 + 进度条 + 下次重置
     const allowance = (p.windows && p.windows['5h']) || p.allowance;
     const used = p.used_5h || 0;
@@ -1419,7 +1450,7 @@ function renderProviders(){
         + '<button class="lang-btn" data-pv-reconcile="'+esc(p.key)+'" style="font-size:10px;padding:1px 6px">🔄 '+esc(t('pv_reconcile'))+'</button>'
         + '</div>';
     }
-    const summary = tName === '-' ? '' : ' <span class="dim2">('+esc(tName)+' · '+esc(tVal)+')</span>';
+    const summary = tierBadge;
     // 实时状态（providersStatus 轮询数据，按 key 匹配）
     const stat = ((state.providersStatus||{}).providers||[]).find(s => s.key === p.key) || {};
     const onCool = stat.cooldown_remaining_ms && stat.cooldown_remaining_ms > 0;
@@ -1430,7 +1461,7 @@ function renderProviders(){
     const wk = p.windows && p.windows['weekly'];
     const mo = p.windows && p.windows['monthly'];
     const winInfo = (allowance || wk || mo)
-      ? '<span class="dim2" style="font-size:10px;margin-left:4px">5h:'+(allowance??'-')+' 周:'+(wk??'-')+' 月:'+(mo??'-')+'</span>'
+      ? '<span class="dim2" style="font-size:10px;margin-left:4px">5h:'+fq(allowance)+' 周:'+fq(wk)+' 月:'+fq(mo)+'</span>'
       : '';
     return '<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px'+(p.disabled?';opacity:.5':'')+'">'
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
