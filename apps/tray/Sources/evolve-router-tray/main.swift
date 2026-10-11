@@ -56,8 +56,10 @@ final class AppState: ObservableObject {
             tokensK = toks >= 1_000_000 ? String(format: "%.1fM", Double(toks)/1e6)
                     : toks >= 1_000 ? String(format: "%.0fk", Double(toks)/1e3) : "\(toks)"
         }
+        // /api/providers 返回 { "providers": [...] } 包裹对象（非裸数组）
         if case (200, let data)? = try? await get("/api/providers"),
-           let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+           let wrapper = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = wrapper["providers"] as? [[String: Any]] {
             var byPlan: [String: Int] = [:]
             var provs: [(String, Bool, Int)] = []
             for p in arr {
@@ -80,8 +82,10 @@ final class AppState: ObservableObject {
         }
         if case (200, let data)? = try? await get("/api/events?limit=8"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            // review：事件流按时间序追加（旧→新）——反转迭代取最新在前，
+            // 面板从上到下 = 最近→更早
             var rows: [RecentDecision] = []
-            for ev in arr where (ev["kind"] as? String) == "chat" {
+            for ev in arr.reversed() where (ev["kind"] as? String) == "chat" {
                 let model = (ev["chosen"] as? String) ?? "-"
                 let status = (ev["status"] as? Int) ?? Int((ev["status"] as? Double) ?? 0)
                 let total = (ev["total_ms"] as? Int) ?? Int((ev["total_ms"] as? Double) ?? 0)
