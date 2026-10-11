@@ -13,14 +13,27 @@
 </script>
 <style>
 :root {
-  --bg:#0d1117; --card:#161b22; --card2:#1c2129; --border:#30363d; --border-hover:#484f58;
-  --fg:#c9d1d9; --dim:#8b949e; --green:#3fb950; --red:#f85149; --amber:#d29922; --blue:#58a6ff;
-  --row-line:#21262d; --group-h:#1a2029; --input-bg:#0d1117; --feed-detail-bg:#12161d;
-  --tab-on-bg:#1c2d45; --badge-ok-bg:#12261e; --badge-dead-bg:#3d1618; --pbadge-bg:#1c2431;
-  --pbadge-warn-bg:#2d1a1c; --hl-from:#264d2b; --selection:#264d78;
-  --t1:#e6edf3; --t2:#58a6ff; --wf-text:#0d1117;
-  --shadow:0 1px 3px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.2);
+  --bg:#0f172a; --card:#1b2336; --card2:#272f42; --border:#2a3549; --border-hover:#475569;
+  --fg:#f8fafc; --dim:#94a3b8; --green:#22c55e; --red:#ef4444; --amber:#eab308; --blue:#60a5fa;
+  --row-line:#232c42; --group-h:#202a40; --input-bg:#0f172a; --feed-detail-bg:#151d30;
+  --tab-on-bg:#1e3a5f; --badge-ok-bg:#12261e; --badge-dead-bg:#3d1a1c; --pbadge-bg:#1e2c47;
+  --pbadge-warn-bg:#3d1a1c; --hl-from:#14352a; --selection:#1e3a5f;
+  --t1:#f8fafc; --t2:#60a5fa; --wf-text:#0f172a;
+  --shadow:0 1px 3px rgba(0,0,0,.35), 0 6px 18px rgba(0,0,0,.25);
+  --glass:rgba(27,35,54,.72); --glass-border:rgba(148,163,184,.18);
+  --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,monospace;
   color-scheme: dark;
+}
+:root[data-theme="light"] {
+  --bg:#f1f5f9; --card:#ffffff; --card2:#f1f5f9; --border:#e2e8f0; --border-hover:#94a3b8;
+  --fg:#0f172a; --dim:#64748b; --green:#16a34a; --red:#dc2626; --amber:#d97706; --blue:#2563eb;
+  --row-line:#eef2f7; --group-h:#f8fafc; --input-bg:#ffffff; --feed-detail-bg:#f8fafc;
+  --tab-on-bg:#dbeafe; --badge-ok-bg:#dcfce7; --badge-dead-bg:#fee2e2; --pbadge-bg:#dbeafe;
+  --pbadge-warn-bg:#fee2e2; --hl-from:#dcfce7; --selection:#bfdbfe;
+  --t1:#0f172a; --t2:#2563eb; --wf-text:#ffffff;
+  --shadow:0 1px 3px rgba(15,23,42,.06), 0 6px 18px rgba(15,23,42,.05);
+  --glass:rgba(255,255,255,.78); --glass-border:rgba(15,23,42,.08);
+  color-scheme: light;
 }
 :root[data-theme="light"] {
   --bg:#f6f8fa; --card:#ffffff; --card2:#f3f4f6; --border:#d0d7de; --border-hover:#8c959f;
@@ -41,10 +54,13 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
 ::-webkit-scrollbar-thumb:hover { background:var(--border-hover); }
 ::-webkit-scrollbar-track { background:transparent; }
 
-.topbar { display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:16px;
-          padding-bottom:14px; border-bottom:1px solid var(--border); }
+.topbar { position:sticky; top:0; z-index:100; display:flex; align-items:center; gap:16px; flex-wrap:wrap;
+          margin:0 -24px 16px; padding:14px 24px 12px; border-bottom:1px solid var(--glass-border);
+          background:var(--glass); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }
+body { padding-top:0; }
 .topbar h1 { font-size:19px; letter-spacing:.2px;
              background:linear-gradient(90deg,var(--t1),var(--t2) 140%); -webkit-background-clip:text; background-clip:text; color:transparent; }
+:focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:4px; }
 .sub { color:var(--dim); font-size:12px; display:flex; align-items:center; gap:6px; }
 .dot { width:8px; height:8px; border-radius:50%; background:var(--amber); display:inline-block; }
 .dot.ok { background:var(--green); box-shadow:0 0 6px color-mix(in srgb, var(--green) 60%, transparent); }
@@ -57,7 +73,7 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
         font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; display:flex; flex-direction:column; gap:1px;
         transition:border-color .15s; min-width:96px; }
 .chip:hover { border-color:var(--border-hover); }
-.chip b { color:var(--fg); font-weight:600; font-size:15px; }
+.chip b { color:var(--fg); font-weight:600; font-size:15px; font-family:var(--mono); }
 .chip b.good { color:var(--green); } .chip b.warn { color:var(--amber); }
 .lang-sel, .lang-btn { background:var(--card); color:var(--fg); border:1px solid var(--border); border-radius:10px; padding:5px 10px; font-size:12px; cursor:pointer; transition:border-color .15s; }
 .lang-sel:hover, .lang-btn:hover { border-color:var(--border-hover); }
@@ -68,7 +84,8 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
 /* A-decision：决策流 + 解剖面板主从布局 */
 .duo { display:grid; grid-template-columns: 1.25fr 1fr; gap:14px; align-items:start; margin-bottom:14px; }
 @media (max-width:1280px){ .duo { grid-template-columns:1fr; } }
-.autopsy { position:sticky; top:14px; max-height:calc(100vh - 32px); overflow-y:auto; }
+.autopsy { position:sticky; top:76px; max-height:calc(100vh - 92px); overflow-y:auto;
+           background:var(--glass); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }
 .au-hint { margin-bottom:8px; }
 .au-sec { margin:12px 0 4px; }
 .au-sec-t { font-size:11px; color:var(--dim); letter-spacing:.4px; margin-bottom:6px;
@@ -223,7 +240,10 @@ table.mx tr.win td { color:var(--green); }
     <div class="sub"><span class="dot" id="sse-dot"></span><span id="sse-status" data-i18n="sse_conn">SSE 连接中…</span></div>
   </div>
   <div class="chips" id="chips"></div>
-  <button class="lang-sel" id="theme-btn" title="Theme" style="padding:5px 12px"><span id="theme-ico">☀</span></button>
+  <button class="lang-sel" id="theme-btn" title="Theme" style="padding:5px 11px;display:inline-flex;align-items:center">
+    <svg id="theme-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+    <svg id="theme-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+  </button>
   <select class="lang-sel" id="lang-sel"></select>
 </header>
 <main>
@@ -250,7 +270,7 @@ table.mx tr.win td { color:var(--green); }
     <section class="card">
       <h2 style="display:flex;align-items:center;justify-content:space-between">
         <span data-i18n="wheel">飞轮 · 经验学习与自进化（参与路由决策的因素）</span>
-        <button class="lang-btn" id="pw-btn" style="text-transform:none">⚖ <span data-i18n="l_weights">公式权重</span></button>
+        <button class="lang-btn" id="pw-btn" style="text-transform:none"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M2 16l3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z"/><path d="M7 21h10"/><path d="M12 3v6"/><path d="M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2"/></svg> <span data-i18n="l_weights">公式权重</span></button>
       </h2>
       <div class="pw-panel" id="pw-panel"></div>
       <table id="wheel"><thead></thead><tbody></tbody></table>
@@ -268,7 +288,7 @@ table.mx tr.win td { color:var(--green); }
       <span data-i18n="provider_card">Provider 管理</span>
       <span style="display:flex;gap:6px">
         <button class="lang-btn" id="pv-add-btn" data-i18n="pv_add">+ 新增 Provider</button>
-        <button class="lang-btn" id="pv-scan-btn" data-i18n="pv_scan">🔍 全局扫描</button>
+        <button class="lang-btn" id="pv-scan-btn" data-i18n="pv_scan">全局扫描</button>
       </span>
     </h2>
     <div class="sub" style="margin-bottom:8px" data-i18n="provider_sub">手动维护 provider 凭据 / 档位 / 窗口额度 · 扫描发现自动展示</div>
@@ -465,7 +485,7 @@ const T = {
   pv_field_rates: {zh:'模型系数表（model|in,cached,out / 行）', en:'Model rates (model|in,cached,out / line)', ko:'모델 계수 (model|in,cached,out / 줄)', ja:'モデル係数 (model|in,cached,out / 行)', es:'Tasas por modelo (model|in,cached,out / línea)', fr:'Taux par modèle (model|in,cached,out / ligne)'},
   pv_field_disabled: {zh:'已禁用', en:'Disabled', ko:'비활성', ja:'無効', es:'Deshabilitado', fr:'Désactivé'},
   pv_available: {zh:'可用', en:'available', ko:'사용 가능', ja:'利用可能', es:'disponible', fr:'disponible'},
-  pv_scan: {zh:'🔍 全局扫描', en:'🔍 Scan all', ko:'🔍 전체 스캔', ja:'🔍 全スキャン', es:'🔍 Escanear todo', fr:'🔍 Tout scanner'},
+  pv_scan: {zh:'全局扫描', en:'Scan all', ko:'전체 스캔', ja:'全スキャン', es:'Escanear todo', fr:'Tout scanner'},
   pv_prov_obs: {zh:'Provider 测', en:'Provider live', ko:'Provider 실측', ja:'Provider 実測', es:'Proveedor en vivo', fr:'Provider direct'},
   pv_reconcile: {zh:'对账', en:'Sync', ko:'동기화', ja:'同期', es:'Sincronizar', fr:'Synchroniser'},
   pv_confirm_delete_disc: {zh:'删除该扫描发现的 Provider？其全部模型将移出目录（重启/扫描不会自动加回，可重新扫描恢复）。', en:"Delete this scanned provider? All its models leave the catalog (won't come back on restart/scan; re-add via scan after restore).", ko:'이 스캔된 Provider를 삭제하시겠습니까? 모든 모델이 목록에서 제거됩니다(재스캔으로 복원 가능).', ja:'このスキャン検出 Provider を削除しますか？全モデルがカタログから削除されます（再スキャンで復元可能）。', es:'¿Eliminar este provider escaneado? Todos sus modelos salen del catálogo (restaurable re-escaneando).', fr:'Supprimer ce provider scanné ? Tous ses modèles quittent le catalogue (restaurable en re-scan).'},
@@ -1705,14 +1725,18 @@ es.onmessage = ev => { try { addRow(JSON.parse(ev.data)); } catch(_){} };
 // 主题：localStorage 记忆 > 跟随系统 prefers-color-scheme；按钮循环切换
 (function initTheme(){
   const saved = localStorage.getItem('ev-theme');
-  const sys = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
-  const theme = saved || sys;
+  const sysLight = matchMedia('(prefers-color-scheme: light)').matches;
+  const theme = saved || (sysLight ? 'light' : 'dark');
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-btn');
+  const sun = document.getElementById('theme-sun');
+  const moon = document.getElementById('theme-moon');
+  // 图标表示当前模式：白天 ☀ / 黑夜 🌙；点击切换到另一模式
   const sync = () => {
-    // 图标表示当前模式：白天 ☀ / 黑夜 🌙；点击切换到另一模式
-    document.getElementById('theme-ico').textContent = theme === 'light' ? '☀' : '🌙';
-    btn.title = theme === 'light' ? '白天模式（点击切换黑夜）' : '黑夜模式（点击切换白天）';
+    const light = theme === 'light';
+    if (sun) sun.style.display = light ? '' : 'none';
+    if (moon) moon.style.display = light ? 'none' : '';
+    btn.title = light ? '白天模式（点击切换黑夜）' : '黑夜模式（点击切换白天）';
   };
   sync();
   btn.addEventListener('click', () => {
