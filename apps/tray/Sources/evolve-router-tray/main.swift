@@ -207,7 +207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory) // 不进 Dock
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let btn = statusItem.button {
-            btn.image = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "EvolveRouter")
+            if let img = NSImage(systemSymbolName: "arrow.triangle.branch", accessibilityDescription: "EvolveRouter") {
+                btn.image = img
+            } else {
+                btn.title = "EV" // symbol 不可用时的文字兜底
+            }
             btn.contentTintColor = .systemGreen
             btn.action = #selector(togglePopover)
             btn.target = self
