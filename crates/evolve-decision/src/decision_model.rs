@@ -20,6 +20,10 @@ pub struct GenericHttpModel {
     pub headers: Vec<(String, String)>,
     pub timeout_ms: u64,
     pub client: reqwest::Client,
+    /// 审查 #2（隐私红线）：true 时 digest.last_user_text 不出本机——
+    /// session.current_head 以分桶占位替代。接入 generic-http 的部署必须显式
+    /// 确认该后端可信（默认 true 保守）。
+    pub redact: bool,
 }
 
 #[async_trait]
@@ -37,7 +41,7 @@ impl Judge for GenericHttpModel {
                     "est_tokens": features.est_input_tokens,
                 },
                 "session": {
-                    "current_head": digest.last_user_text.chars().take(400).collect::<String>(),
+                    "current_head": if self.redact { "[text]".to_string() } else { digest.last_user_text.chars().take(400).collect::<String>() },
                     "continues_topic": digest.has_deixis || digest.overlap_ratio > 0.15,
                 },
             }

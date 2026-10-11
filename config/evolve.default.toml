@@ -8,7 +8,7 @@ port = 8787
 [policy]
 default = "balanced"
 weights = { quality = 0.35, speed = 0.15, cost = 0.25, stability = 0.15, headroom = 0.10 }
-sticky_turns = 6
+sticky_turns = 2
 confidence_gate = 0.35
 
 [decision]
@@ -28,42 +28,13 @@ dir = "~/.evolve"
 # Models: declare every upstream model the router may pick.
 # M1: user-declared entries only (builtin catalog merges as priors).
 # ---------------------------------------------------------------------------
-[[models]]
-id = "mini"
-provider = "mock"
-protocol = "openai"
-base_url = "http://127.0.0.1:9101/v1"
-api_key_env = "MOCK_MINI_KEY"
-upstream_model = "mock-mini"
-context_window = 32000
-max_output = 4096
-cost = { input = 0.10, output = 0.40 }   # USD per Mtok
-tiers = { reasoning = 0.25, coding = 0.45, vision = 0.0, agentic = 0.5 }
-speed_tier = 0.95
-source_note = "cheap fast worker"
 
-[[models]]
-id = "standard"
-provider = "mock"
-protocol = "openai"
-base_url = "http://127.0.0.1:9101/v1"
-api_key_env = "MOCK_STD_KEY"
-upstream_model = "mock-standard"
-context_window = 128000
-max_output = 8192
-cost = { input = 0.60, output = 2.40 }
-tiers = { reasoning = 0.65, coding = 0.75, vision = 0.5, agentic = 0.8 }
-speed_tier = 0.7
-
-[[models]]
-id = "frontier"
-provider = "mock"
-protocol = "openai"
-base_url = "http://127.0.0.1:9101/v1"
-api_key_env = "MOCK_FRONTIER_KEY"
-upstream_model = "mock-frontier"
-context_window = 200000
-max_output = 16384
-cost = { input = 3.00, output = 15.00 }
-tiers = { reasoning = 0.97, coding = 0.95, vision = 0.95, agentic = 0.95 }
-speed_tier = 0.4
+# [[models]]
+# id = "zhipuai-coding-plan/glm-5.3"
+# provider = "zhipuai-coding-plan"
+# base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+# api_key_env = "ZHIPU_API_KEY"
+# upstream_model = "glm-5.3"
+# context_window = 1024000
+# cost = { input = 0.0, output = 0.0 }   # plan 模型边际成本 ≈ 0
+# （也可不配置任何模型——网关会自动扫描 opencode / codex 等本地 agent 配置）

@@ -79,6 +79,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 telemetry: &telemetry,
                 quota: &quota_view,
                 plan_pressure: &plan_pressure,
+                redact: st.config.decision.redact,
             };
             let d = st.engine.decide(input);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
@@ -171,6 +172,14 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     let mut dead_routes: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (cand_idx, cand) in attempts.iter().enumerate() {
         let Some(record) = st.catalog_get(cand) else { continue };
+        // 自递归防护（与 relay 同规则，审查 #5）：候选指向自身监听地址时出局——
+        // 否则 Claude Code 用户按 quickstart 接入后，anthropic 入口可被选中并
+        // POST 自己，无限自递归
+        let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
+        if record.base_url.contains(&self_addr) || record.base_url.contains("127.0.0.1:8787") {
+            skipped.push(format!("{cand}(self-loop: points back at this gateway)"));
+            continue;
+        }
         if dead_providers.contains(&record.provider) {
             skipped.push(format!("{cand}(provider {} account-level failure)", record.provider));
             continue;
@@ -405,7 +414,10 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 st.quota.clone(),
                 st.bus.clone(),
                 parsed.clone(),
-                false,
+                // review#9 修复：解析模式跟随上游协议——上游本就是 anthropic
+                // 时按 openai 形状解析会导致 choices/usage 全部丢失（用量不入
+                // 账、预算保护与 L3 确认对该链路失效）
+                !to_openai,
             );
             let client_stream: futures::stream::BoxStream<'static, Result<bytes::Bytes, axum::Error>> =
                 if to_openai {
@@ -599,7 +611,9 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
 }
 
 fn fallback_eligible(status: u16) -> bool {
-    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 429) || status >= 500
+    // review#6：补 413（上下文超限→ContextOverflow 换模型）与 451（上游 WAF
+    // 地域拦截——此前走"成功"路径被 mark_ok，实际上游根本不可用）
+    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
 }
 
 fn map_status(s: reqwest::StatusCode) -> StatusCode {

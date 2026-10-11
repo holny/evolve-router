@@ -144,9 +144,21 @@ fn backtest(
         bias_gain: gain_b,
     };
 
-    // A3b：judge_samples > 0 时构建 LLM-as-a-Judge asker（System One Noul——
-    // "该响应是否充分回答了查询"）。无 DECISION_MODEL_API_KEY（或旧名 TYPESAFE_API_KEY）或 samples=0 时跳过。
+    // A3b：judge_samples > 0 时构建 LLM-as-a-Judge asker。
+    // 审查 #11：事件流不含 query 正文（redact）——judge 被问"event#N 是否
+    // 充分"是纯噪声。前置校验：仅 telemetry.response_digest=true 且事件带
+    // resp_digest 时才有意义；否则拒绝执行而非污染 A/B 裁决。
     let report = if judge_samples > 0 {
+        let has_digest = expanded.join("events.jsonl").exists() && {
+            std::fs::read_to_string(expanded.join("events.jsonl"))
+                .map(|s| s.contains("\"resp_digest\""))
+                .unwrap_or(false)
+        };
+        anyhow::ensure!(
+            has_digest,
+            "--judge-samples 需要 resp_digest 数据：先在 evolve.toml 开启 \
+             [telemetry] response_digest = true 积累事件后再用"
+        );
         let backend = evolve_decision::decision_backend::DecisionModelBackend::from_env()
             .ok_or_else(|| anyhow::anyhow!("--judge-samples 需要 DECISION_MODEL_API_KEY（兼容旧名 TYPESAFE_API_KEY）"))?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;

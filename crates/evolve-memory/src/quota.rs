@@ -253,6 +253,7 @@ impl QuotaLedger {
                         continue;
                     }
                 if let Some(rem) = w.remaining {
+                    // 跨 key 取 best（max）——"哪个 key 余量最多就用哪个"
                     best = Some(match best {
                         Some(b) => b.max(rem),
                         None => rem,
@@ -265,7 +266,7 @@ impl QuotaLedger {
 
     /// Bulk model view for the engine pre-check (one pass over the ledger).
     pub fn best_remaining_by_models(&self) -> std::collections::HashMap<String, u64> {
-        let mut out = std::collections::HashMap::new();
+        let mut out = std::collections::HashMap::new();        let mut scoped: std::collections::HashMap<String, std::collections::HashMap<String, u64>> = std::collections::HashMap::new();
         let m = self.inner.lock();
         let Ok(m) = m else { return out };
         let now = now_ms();
@@ -293,10 +294,22 @@ impl QuotaLedger {
                     _ => {}
                 }
                 if let Some(rem) = w.remaining {
-                    let e = out.entry(model_id.to_string()).or_insert(0);
+                    // review#8 两级聚合：同 (model, scope) 跨 key 取 max（哪个
+                    // key 余量多用哪个）；跨 scope 最终取 min——配额约束是
+                    // "每个窗口都不能超"，任一窗口耗尽即紧张
+                    let e = scoped
+                        .entry(model_id.to_string())
+                        .or_insert_with(HashMap::new)
+                        .entry(w.scope.clone())
+                        .or_insert(0);
                     *e = (*e).max(rem);
                 }
             }
+        }
+        // 跨 scope 收敛为 model 级余量（min）
+        for (model_id, scopes) in scoped {
+            let tightest = scopes.values().copied().min().unwrap_or(0);
+            out.insert(model_id, tightest);
         }
         out
     }
@@ -317,6 +330,11 @@ pub fn health_model_id(health_id: &str) -> &str {
 
 /// RFC3339 (Z suffix) -> epoch ms. Minimal parser: 2026-09-29T12:34:56Z.
 fn parse_rfc3339_ms(s: &str) -> Option<u64> {
+    // review#3：上游 reset 头完全受上游控制——短于 RFC3339 日期段（10 字节）
+    // 直接放弃，不 panic（畸形值如 "bad"、"x" 等）
+    if s.len() < 10 {
+        return None;
+    }
     // Tolerant RFC3339: accepts fractional seconds and +HH:MM/-HH:MM/Z offsets.
     // 偏移只会出现在时间部分（index ≥ 10）——从日期分隔符之后起找，
     // 否则 "2026-10-07" 的 '-' 命中 index 4，时区偏移被永久丢弃

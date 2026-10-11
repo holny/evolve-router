@@ -171,7 +171,7 @@ struct StreamAcc {
     ant_tool_args: BTreeMap<u32, String>,
 }
 
-const CONTENT_CAP: usize = 64 * 1024;
+const CONTENT_CAP: usize = 1024 * 1024; // review#10：64KB 截断会让 agent 大参数（write_file）产出非法 JSON——质量误判+双倍计费；1MB 覆盖常态
 
 impl StreamAcc {
     fn new(anthropic_mode: bool) -> Self {

@@ -17,6 +17,8 @@ pub struct RoutingInput<'a> {
     pub quota: &'a QuotaView,
     /// 订阅方案预算压力（plan_key → 消耗占比 0-1）
     pub plan_pressure: &'a HashMap<String, f32>,
+    /// 隐私红线：true 时用户原文不得离开本机（advisor 兜底路径禁用等）
+    pub redact: bool,
 }
 
 /// Linear blend of tier fields: conf 1.0 -> new, 0.0 -> base.
@@ -485,6 +487,11 @@ impl Engine {
             // 非占位符（历史协议直接给 id）：保持原值走下方加分匹配
         }
         if j.route_recommendation.is_none() {
+        // 审查 #1（隐私红线）：此回退路径的 task_summary 是用户原文——
+        // redact=true 时原文不得离开本机，advisor 整体禁用（判定主链路的
+        // 分桶脱敏不受影响；advisor 只在 redact=false 或未来提供分桶摘要
+        // 语义时才走独立调用）。Fan-Out 主路径（judge 合并返回）不受此限。
+        if !input.redact {
         if let Some(advisor) = &self.route_advisor {
             let task_summary: String = input.digest.last_user_text.chars().take(600).collect();
             // 只送 top-8 候选，且 id 用本地占位符 candidate_N：
@@ -517,6 +524,7 @@ impl Engine {
             }
         }
         }
+        } // end redact gate
 
         // Jev cookbook intent-routing 加分：route_recommendation 高置信度时
         // 对推荐模型加分（最高 +15%）并重排。model_id 归一化（trim + 大小写）
@@ -571,7 +579,7 @@ impl Engine {
                     ^ 0x5EED;
                 let mut next_rand = || {
                     seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                    ((seed >> 33) as f64) / (u32::MAX as f64)
+                    ((seed >> 33) as f64) / ((u32::MAX >> 1) as f64)
                 };
                 let nu0 = 8.0f32;
                 // 先验均值 μ₀ 用 q 的候选集内相对位次（min-max → [0.15,0.85]）：
@@ -966,6 +974,7 @@ mod tests {
             telemetry: &EMPTY_TELEM,
             quota: &EMPTY_QUOTA,
             plan_pressure: &EMPTY_PRESSURE,
+            redact: true, // 测试默认走 redact 语义（advisor 禁用），与生产默认一致
         }
     }
 
@@ -1089,7 +1098,7 @@ mod tests {
         let mut seed = 42u64;
         let mut rand = move || {
             seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((seed >> 33) as f64) / (u32::MAX as f64)
+            ((seed >> 33) as f64) / ((u32::MAX >> 1) as f64)
         };
         // Beta(2.6, 7.4) 期望 0.26：2000 样本均值应落在 ±0.03
         let n = 2000;

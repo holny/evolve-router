@@ -126,6 +126,7 @@ pub async fn chat_completions(
                 telemetry: &telemetry,
                 quota: &quota_view,
                 plan_pressure: &plan_pressure,
+                redact: st.config.decision.redact,
             };
             let d = st.engine.decide(input);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
@@ -360,8 +361,12 @@ pub async fn chat_completions(
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                         .map(|n| {
+                            // review#20：秒级 epoch（1e9–1e12）会被旧阈值当 ms 用成 ~0——
+                            // 分档判断：>1e12 为 ms；1e9–1e12 为秒 ×1000；更小为相对秒
                             if n > 1_000_000_000_000 {
-                                n.saturating_sub(evolve_memory::health::now())
+                                n
+                            } else if n > 1_000_000_000 {
+                                n * 1000
                             } else {
                                 n
                             }
@@ -371,8 +376,10 @@ pub async fn chat_completions(
             let snippet =
                 String::from_utf8_lossy(&err_body.slice(..err_body.len().min(MAX_ERROR_BODY))).into_owned();
             // 400 响应体入日志——上游拒绝原因需要可见（用户裁决：不可黑盒）
+            // review#4：按字符截断——字节切片会在多字节字符（中文错误体）中间 panic
             if status.as_u16() == 400 {
-                tracing::warn!(model = %cand, status = 400, body = %snippet[..snippet.len().min(300)], "upstream 400 — request rejected");
+                let head: String = snippet.chars().take(300).collect();
+                tracing::warn!(model = %cand, status = 400, body = %head, "upstream 400 — request rejected");
             }
             let failure = classify_failure(status.as_u16(), &snippet, retry_after_ms);
             tracing::warn!(model = %cand, status = status.as_u16(), kind = failure.kind.label(), "upstream failure, marking health");
@@ -429,13 +436,16 @@ pub async fn chat_completions(
         if let Some(pk) = evolve_core::plans::plan_key_for(&record.base_url) {
             st.quota.observe_provider(pk, &windows);
         }
-        // success path
+        // success path（review#15：仅 2xx 记健康——409/422/451 等非 fallback
+        // 状态码此前 mark_ok 会清零冷却并掩盖上游异常）
         let success_health_id = if keys.is_empty() {
             cand.clone()
         } else {
             format!("{cand}{KEY_SEP}{key_idx}")
         };
-        st.health.mark_ok(&success_health_id);
+        if status.is_success() {
+            st.health.mark_ok(&success_health_id);
+        }
         decision.chosen = cand.clone();
         decision.upstream_model = record.upstream_model.clone();
         decision.id = format!("{}-{}", decision.id, skipped.len());
@@ -793,7 +803,9 @@ pub async fn chat_completions(
 }
 
 fn fallback_eligible(status: u16) -> bool {
-    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 429) || status >= 500
+    // review#6：补 413（上下文超限→ContextOverflow 换模型）与 451（上游 WAF
+    // 地域拦截——此前走"成功"路径被 mark_ok，实际上游根本不可用）
+    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
 }
 
 fn insert_header(h: &mut axum::http::HeaderMap, k: &'static str, v: &str) {
