@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
 
-SRC_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC_ROOT="$(cd .. && pwd)"
 APP_NAME="EvolveRouter"
 BUNDLE_ID="ai.evolve.router.tray"
 
