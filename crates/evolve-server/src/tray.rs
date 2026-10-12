@@ -564,6 +564,7 @@ unsafe fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
 
     let _ = prologue_menu_items(&menu);
 
+    // （menu 全部挂到已迟到注册的 SINK 上）
     let _ = UI.set(UiRefs {
         gw_line: MainItem(Retained::as_ptr(&gw_line) as *mut NSMenuItem),
         st_line: MainItem(Retained::as_ptr(&st_line) as *mut NSMenuItem),
@@ -695,6 +696,9 @@ unsafe fn update_menu(s: &Snapshot) {
 unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     // 状态项＋图标（template：自动明暗；纯 logo alpha 展示，不 tint）
     let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+    // 先建 ActionSink（动作汇桩）
+    let sink = ActionSink::new(mtm);
+    let _ = SINK.set(sink.clone());
     let icon = load_icon(mtm);
     if let Some(button) = status_item.button(mtm) {
         button.setImage(Some(&icon));
