@@ -811,7 +811,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     popover.setContentViewController(Some(&vc));
     {
         let sz = NSSize::new(340.0, 680.0);
-        let _: () = msg_send![&popover, setPreferredContentSize: sz];
+        let _: () = msg_send![&popover, setContentSize: sz];
     }
 
     let _ = UI.set(UiRefs {
@@ -828,7 +828,9 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
     let block = block2::RcBlock::new(move || {
+        eprintln!("[T] tick");
         let poll_tx = TX.get().cloned();
+        eprintln!("[T] tick-2 send-target ok");
         let n = TICK.fetch_add(1, Ordering::Relaxed);
         if n % 4 == 1 {
             if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
@@ -859,7 +861,9 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
         } else {
             PULSE.store(false, Ordering::Relaxed);
         }
+        eprintln!("[T] before icon");
         apply_icon(&s, PULSE.load(Ordering::Relaxed));
+        eprintln!("[T] after icon");
         // 健康态变化即时刷新按钮文案
         if s.healthy != LAST_HEALTHY.load(Ordering::Relaxed) {
             LAST_HEALTHY.store(s.healthy, Ordering::Relaxed);
