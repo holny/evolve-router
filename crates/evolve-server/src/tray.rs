@@ -437,8 +437,8 @@ fn toggle_panel() {
         return;
     };
     unsafe {
-        let panel = &*pr.panel.0;
-        if panel.isVisible() {
+        let p = &*pr.panel.0;
+        if p.isVisible() {
             hide_panel(false);
         } else {
             // 刚被外部点击收起（resign ≤350ms 内）：本次点击视为"收起"，不重弹
@@ -461,9 +461,23 @@ fn toggle_panel() {
             if x + 340.0 > md.origin.x + md.size.width {
                 x = md.origin.x + md.size.width - 344.0;
             }
-            panel.setFrameTopLeftPoint(NSPoint::new(x, sc.origin.y - 4.0));
-            panel.orderFrontRegardless();
-            panel.makeKeyAndOrderFront(None);
+            p.setFrameTopLeftPoint(NSPoint::new(x, sc.origin.y - 4.0));
+            p.orderFrontRegardless();
+            p.makeKeyAndOrderFront(None);
+            // 探针：500ms 后回报 key 状态
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Some(prg) = unsafe { panel() } {
+                    unsafe {
+                        let pn = &*prg.panel.0;
+                        let key: bool = msg_send![pn, isKeyWindow];
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+                            let _ = writeln!(f, "[probe] panel isKeyWindow={}", key);
+                        }
+                    }
+                }
+            });
         }
     }
 }
