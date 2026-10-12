@@ -1,47 +1,31 @@
 <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- EvolveRouter logo：线描决策大脑 + 顶部双路分发 + 底部入站 + 左右对称循环飞轮 -->
+  <!-- EvolveRouter logo v4：圆盘即循环——双 C 弧 + 缺口箭头（自进化）+ 白 ER（智能核心）
+       循环方向：顺时针（正循环）。渐变沿圆周从青绿到蓝。 -->
   <defs>
-    <path id="av" d="M -15 13 L 0 0 L 15 13" fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
-    <!-- 左脑轮廓（右脑镜像复用） -->
-    <path id="lobe" d="
-      M 248 158
-      C 226 132 184 130 166 158
-      C 138 158 118 188 128 218
-      C 108 240 112 286 136 304
-      C 132 342 168 372 204 360
-      C 216 374 240 372 248 358
-      Z"/>
-    <path id="gyri" d="M 168 200 C 186 186 208 192 216 210 M 150 262 C 170 250 194 258 204 278 M 178 330 C 194 316 216 320 226 336"/>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <path id="av" d="M -17 15 L 0 0 L 17 15" fill="none" stroke="url(#grad)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
   </defs>
 
-  <g fill="none" stroke="currentColor" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
-    <!-- 大脑：中缝 + 双半球轮廓 + 脑回 -->
-    <path d="M 256 152 L 256 366"/>
-    <use href="#lobe"/>
-    <use href="#lobe" transform="translate(512,0) scale(-1,1)"/>
-    <path d="M 168 200 C 186 186 208 192 216 210"/>
-    <path d="M 150 262 C 170 250 194 258 204 278"/>
-    <path d="M 178 330 C 194 316 216 320 226 336"/>
-    <path d="M 344 200 C 326 186 304 192 296 210"/>
-    <path d="M 362 262 C 342 250 318 258 308 278"/>
-    <path d="M 334 330 C 318 316 296 320 286 336"/>
-
-    <!-- 顶部双路分发箭头 -->
-    <path d="M 244 148 C 226 112 208 92 186 66"/>
-    <path d="M 268 148 C 286 112 304 92 326 66"/>
-    <use href="#av" transform="translate(186,66) rotate(-35)"/>
-    <use href="#av" transform="translate(326,66) rotate(35)"/>
-
-    <!-- 左右对称循环飞轮弧（左逆右顺，末端箭头对称） -->
-    <path d="M 118 138 A 168 168 0 0 0 112 350"/>
-    <path d="M 394 138 A 168 168 0 0 1 400 350"/>
-    <path d="M 84 152 L 118 138 L 130 174"/>
-    <path d="M 434 336 L 400 350 L 390 316"/>
+  <!-- 双 C 弧（r=204，缺口在 -45° 与 135° 方向，各 ~50°） -->
+  <g fill="none" stroke="url(#grad)" stroke-width="88">
+    <!-- 大弧：160° → -70°（经 180/270/0，逆时针大弧） -->
+    <path d="M 64 326 A 204 204 0 1 0 326 64"/>
+    <!-- 小弧：-20° → 110° -->
+    <path d="M 448 187 A 204 204 0 0 1 186 448"/>
   </g>
 
-  <!-- 底部入站线 + 端点 -->
-  <g stroke="currentColor" stroke-width="26" stroke-linecap="round" fill="none">
-    <path d="M 256 372 L 256 424"/>
-  </g>
-  <circle cx="256" cy="452" r="20" fill="currentColor"/>
+  <!-- 缺口箭头（指向顺时针 = 进化方向） -->
+  <use href="#av" transform="translate(326,64) rotate(35)"/>
+  <use href="#av" transform="translate(186,448) rotate(215)"/>
+
+  <!-- 深色内核（白 ER 的衬底；黑底主题下与背景融合） -->
+  <circle cx="256" cy="256" r="158" fill="#0f172a"/>
+
+  <!-- 白 ER 悬浮中央 -->
+  <text x="256" y="322" text-anchor="middle"
+        font-family="Arial Black, Arial, Helvetica, sans-serif" font-weight="900"
+        font-size="200" fill="#ffffff">ER</text>
 </svg>
