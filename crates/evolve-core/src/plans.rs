@@ -277,8 +277,10 @@ pub fn credit_multipliers(base_url: &str, model_id: &str) -> Option<(f64, f64, f
             if m.contains("flash") { Some((2.3, 0.56, 8.0)) } else { Some((6.9, 1.7, 24.0)) }
         }
         "opencode-go" => {
-            // model_rates 单价 ($/1M: in/cached/out) × 100 → 美元折算系数
-            const PRICE_X100: &[(&str, f64, f64, f64)] = &[
+            // model_rates 单价 ($/1M: in/cached/out)。公式 credits=tokens×k/1e4，
+            // 要使 credits=美元（与 tier_allowance 同单位）：k = price/100。
+            // 历史错位：曾存 price×100 → credits=美元×1e4（$4 档显示 2.5 万"超限"）。
+            const PRICE_PER_1M: &[(&str, f64, f64, f64)] = &[
                 ("glm-5.3-flash", 15.0, 3.0, 50.0),
                 ("glm-5.3", 140.0, 26.0, 440.0),
                 ("glm-5.2", 140.0, 26.0, 440.0),
@@ -294,9 +296,9 @@ pub fn credit_multipliers(base_url: &str, model_id: &str) -> Option<(f64, f64, f
                 ("gpt-6-luna", 10.0, 1.0, 50.0),
                 ("longcat-2.0", 30.0, 0.6, 120.0),
             ];
-            PRICE_X100.iter()
+            PRICE_PER_1M.iter()
                 .find(|(name, _, _, _)| m.contains(name))
-                .map(|(_, ki, kc, ko)| (*ki, *kc, *ko))
+                .map(|(_, ki, kc, ko)| (ki / 10_000.0, kc / 10_000.0, ko / 10_000.0))
         }
         "volces-coding" | "volces-agent" => {
             let k = if m.contains("kimi-k3") {
