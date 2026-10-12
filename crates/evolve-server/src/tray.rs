@@ -15,7 +15,7 @@ use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
     NSFont, NSImage, NSPanel, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField, NSView,
-    NSWindowStyleMask, NSWorkspace,
+    NSWindowStyleMask, NSWorkspace, NSWindow,
 };
 use objc2_foundation::{
     NSArray, NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString,
@@ -311,6 +311,12 @@ impl ActionSink {
     }
 }
 
+impl PanelDelegate {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        unsafe { msg_send![Self::class(), new] }
+    }
+}
+
 fn register(tag: isize, f: impl Fn() + Send + 'static) {
     ACTIONS.lock().unwrap().insert(tag, Box::new(f));
 }
@@ -433,18 +439,64 @@ fn toggle_panel() {
     unsafe {
         let panel = &*pr.panel.0;
         if panel.isVisible() {
-            panel.orderOut(None);
+            hide_panel(false);
         } else {
-            // 定位：主屏右上 · 菜单栏正下（level 87 已盖通知气泡）
+            // 刚被外部点击收起（resign ≤350ms 内）：本次点击视为"收起"，不重弹
+            if let Some(t) = *LAST_OUT.lock().unwrap() {
+                if t.elapsed() < std::time::Duration::from_millis(350) {
+                    return;
+                }
+            }
+            // 定位：跟随状态栏图标——按钮矩形转屏幕坐标，面板左上贴按钮左下（右缘防溢出）
+            let st = STATUS_ITEM.get().unwrap();
+            let item = &*st.0;
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            let Some(bbtn) = item.button(mtm) else { return };
+            let fr: NSRect = msg_send![&bbtn, frame];
+            let win: Retained<NSWindow> = msg_send![&bbtn, window];
+            let sc: NSRect = msg_send![&win, convertRectToScreen: fr];
             let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
             let md: NSRect = msg_send![main, frame];
-            let x = md.origin.x + md.size.width - 360.0;
-            let y = md.origin.y + md.size.height - 50.0 - 470.0;
-            panel.setFrameTopLeftPoint(NSPoint::new(x, y));
+            let mut x = sc.origin.x + 8.0;
+            if x + 340.0 > md.origin.x + md.size.width {
+                x = md.origin.x + md.size.width - 344.0;
+            }
+            panel.setFrameTopLeftPoint(NSPoint::new(x, sc.origin.y - 4.0));
             panel.orderFrontRegardless();
+            panel.makeKeyAndOrderFront(None);
         }
     }
 }
+
+// ── 面板 delegate：失焦（key resign）→ orderOut（点击外部自动隐藏）──
+
+static LAST_OUT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+fn hide_panel(resign: bool) {
+    let Some(pr) = (unsafe { panel() }) else { return };
+    unsafe {
+        let panel = &*pr.panel.0;
+        panel.orderOut(None);
+    }
+    if resign {
+        *LAST_OUT.lock().unwrap() = Some(std::time::Instant::now());
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "EvoPanelDelegate"]
+    struct PanelDelegate;
+
+    impl PanelDelegate {
+        #[unsafe(method(windowDidResignKey:))]
+        fn window_did_resign_key(&self, _cmd: objc2::runtime::Sel, _note: *mut AnyObject) {
+            hide_panel(true);
+        }
+    }
+);
+
+static PANEL_DELEGATE: OnceLock<Retained<PanelDelegate>> = OnceLock::new();
 
 // ── 面板（NSPanel + frame 布局文字块 + 按钮行）──
 
@@ -458,7 +510,7 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> UnsafePanelRefs {
     );
     panel.setLevel(87);
     panel.setHidesOnDeactivate(false);
-    panel.setBecomesKeyOnlyIfNeeded(true);
+    panel.setBecomesKeyOnlyIfNeeded(false);
     panel.setOpaque(true);
     panel.setHasShadow(true);
     let bg: *mut AnyObject = msg_send![objc2_app_kit::NSColor::class(), windowBackgroundColor];
@@ -502,6 +554,10 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> UnsafePanelRefs {
         content.addSubview(&b);
         b
     };
+    let dlg = PanelDelegate::new(mtm);
+    let _ = PANEL_DELEGATE.set(dlg.clone());
+    let _: () = msg_send![&panel, setDelegate: Retained::as_ptr(&dlg) as *mut AnyObject];
+
     let gw_btn = mkbtn(14.0, 56.0, 150.0, "停止网关", TAG_GW_TOGGLE);
     let auto_btn = mkbtn(176.0, 56.0, 150.0, "自启：开", TAG_SWITCH);
     let _copy = mkbtn(14.0, 24.0, 100.0, "复制配置", TAG_COPY);
