@@ -167,7 +167,9 @@ fn apply_windowed(s: &mut evolve_memory::flywheel::ModelStats, view: &serde_json
     }
     s.cached_tokens = g("cached_tok");
     s.prompt_tokens = g("in_tok");
-    s.completion_tokens = view.get("avg_rate_tok_s").and_then(|v| v.as_u64()).unwrap_or(0);
+    // review 修复：此处原错映射为 avg_rate_tok_s（tok/s 速率）——24h 视图
+    // tokens 显示成个位数；窗口视图已输出 out_tok 合计，直接对齐
+    s.completion_tokens = g("out_tok");
     s.tc_total = view
         .get("tool_calls")
         .and_then(|t| t.get("total"))

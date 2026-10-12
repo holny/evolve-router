@@ -80,10 +80,13 @@ final class AppState: ObservableObject {
 
     /// 低频明细轮询（3s）：统计/Provider/事件
     func pollData() async {
-        if case (200, let data)? = try? await get("/api/stats"),
+        // 统计口径：最近 24h（服务端窗口聚合，与完整面板 24h 视图同源同算法）
+        if case (200, let data)? = try? await get("/api/stats?window=24h"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // 端点返回 {"models": {model_id: {...}}} 包裹结构——逐模型累加
+            let models = (obj["models"] as? [String: Any]) ?? obj
             var reqs = 0, ok = 0, toks = 0
-            for (_, s) in obj {
+            for (_, s) in models {
                 guard let s = s as? [String: Any] else { continue }
                 reqs += (s["requests"] as? Int) ?? Int((s["requests"] as? Double) ?? 0)
                 ok += (s["success"] as? Int) ?? Int((s["success"] as? Double) ?? 0)
