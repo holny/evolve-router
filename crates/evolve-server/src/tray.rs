@@ -14,14 +14,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{define_class, msg_send, ns_string, sel, MainThreadMarker};
+use objc2::{define_class, msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSButton, NSColor,
     NSControlStateValue, NSFont, NSImage, NSLayoutAttribute, NSPopover, NSPopoverBehavior,
     NSProgressIndicator, NSStackView, NSStatusBar, NSStatusItem, NSSwitch, NSTextField,
     NSUserInterfaceLayoutOrientation, NSView, NSWorkspace,
 };
-use objc2_foundation::{NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer, NSUserDefaults};
+use objc2_foundation::{NSArray, NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer, NSUserDefaults};
 use serde_json::Value;
 
 use crate::config;
@@ -30,13 +30,13 @@ use crate::config;
 
 static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static SNAP: Mutex<Option<Snapshot>> = Mutex::new(None);
-static ACTIONS: Mutex<HashMap<isize, Box<dyn Fn() + Send>>> = Mutex::new(HashMap::new());
+static ACTIONS: std::sync::LazyLock<Mutex<HashMap<isize, Box<dyn Fn() + Send>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 static GW_TX: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
 static TRAY_CFG: Mutex<Option<(Option<std::path::PathBuf>, u16)>> = Mutex::new(None);
 static PULSE: AtomicBool = AtomicBool::new(false);
 static TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_HEALTHY: AtomicBool = AtomicBool::new(true);
-static BASE_ICON: OnceLock<Retained<NSImage>> = OnceLock::new();
 static SINK: OnceLock<Retained<ActionSink>> = OnceLock::new();
 static TX: OnceLock<mpsc::Sender<Snapshot>> = OnceLock::new();
 
@@ -241,8 +241,8 @@ async fn poll_data(tx: mpsc::Sender<Snapshot>) {
                 let total = e["total_ms"].as_i64().unwrap_or(0);
                 let ttft_raw = e["ttft_ms"].as_i64().unwrap_or(-1);
                 let out = e["completion_tokens"].as_u64().unwrap_or(0);
-                let gen = (total - ttft_raw.max(0)).max(1) as f64;
-                let tok_s = if out > 0 { Some(out as f64 / (gen / 1000.0)) } else { None };
+                let gen_ms = (total - ttft_raw.max(0)).max(1) as f64;
+                let tok_s = if out > 0 { Some(out as f64 / (gen_ms / 1000.0)) } else { None };
                 let agent = e["agent"]
                     .as_str()
                     .unwrap_or("-")
@@ -307,7 +307,7 @@ define_class!(
 
     impl ActionSink {
         #[unsafe(method(fire:))]
-        fn fire(&self, _cmd: objc2::sel::Sel, sender: *mut AnyObject) {
+        fn fire(&self, _cmd: objc2::runtime::Sel, sender: *mut AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some(f) = ACTIONS.lock().unwrap().get(&tag) {
                 f();
@@ -327,24 +327,25 @@ fn register(tag: isize, f: impl Fn() + Send + 'static) {
 }
 
 fn shell(cmd: &str) {
+    let owned = cmd.to_string();
     std::thread::spawn(move || {
-        let _ = std::process::Command::new("/bin/zsh").arg("-c").arg(cmd).output();
+        let _ = std::process::Command::new("/bin/zsh").arg("-c").arg(owned).output();
     });
 }
 
 // ── UI helpers ──
 
-unsafe fn label(text: &str, size: f64, bold: bool, mono: bool) -> Retained<NSTextField> {
+unsafe fn label(text: impl AsRef<str>, size: f64, bold: bool, mono: bool) -> Retained<NSTextField> {
     let mtm = MainThreadMarker::new().unwrap();
-    let ns = NSString::from_str(text);
-    let l = NSTextField::labelWithString(mtm, &ns);
+    let ns = NSString::from_str(text.as_ref());
+    let l = NSTextField::labelWithString(&ns, mtm);
     let weight = if bold { 0.5 } else { 0.0 };
     let font = if mono {
         NSFont::monospacedSystemFontOfSize_weight(size, weight)
     } else {
         NSFont::systemFontOfSize_weight(size, weight)
     };
-    l.setFont(&font);
+    l.setFont(Some(&font));
     l
 }
 
@@ -353,12 +354,12 @@ unsafe fn colored(l: &NSTextField, c: &NSColor) {
 }
 
 fn rv(v: &NSView) -> Retained<NSView> {
-    unsafe { Retained::retain(v) }
+    unsafe { Retained::retain(v as *const NSView as *mut NSView).unwrap() }
 }
 
 unsafe fn hrow(views: Vec<Retained<NSView>>, spacing: f64) -> Retained<NSStackView> {
     let arr = NSArray::from_retained_slice(&views);
-    let row = NSStackView::stackViewWithViews(&arr).unwrap();
+    let row = NSStackView::stackViewWithViews(&arr, MainThreadMarker::new().unwrap());
     row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
     row.setSpacing(spacing);
     row.setAlignment(NSLayoutAttribute::CenterY);
@@ -367,7 +368,7 @@ unsafe fn hrow(views: Vec<Retained<NSView>>, spacing: f64) -> Retained<NSStackVi
 
 unsafe fn vstack(views: Vec<Retained<NSView>>, spacing: f64) -> Retained<NSStackView> {
     let arr = NSArray::from_retained_slice(&views);
-    let col = NSStackView::stackViewWithViews(&arr).unwrap();
+    let col = NSStackView::stackViewWithViews(&arr, MainThreadMarker::new().unwrap());
     col.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     col.setSpacing(spacing);
     col.setAlignment(NSLayoutAttribute::Leading);
@@ -400,7 +401,7 @@ unsafe fn make_button(title: &str, tag: isize, small: bool) -> Retained<NSButton
     b.setTitle(&ns);
     if small {
         b.setControlSize(objc2_app_kit::NSControlSize::Small);
-        b.setFont(&NSFont::systemFontOfSize_weight(11.0, 0.0));
+        b.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, 0.0)));
     }
     let sink = sink_of();
     let _: () = msg_send![&b, setTarget: sink];
@@ -437,6 +438,11 @@ impl AsNsView for NSStackView {
         unsafe { &*(std::ptr::from_ref::<NSStackView>(self) as *const NSView) }
     }
 }
+impl AsNsView for Retained<NSView> {
+    fn as_nsview(&self) -> &NSView {
+        self
+    }
+}
 
 // ── 图标四态 ──
 
@@ -468,13 +474,13 @@ unsafe fn apply_icon(s: &Snapshot, pulse: bool) {
 
 unsafe fn section_title(t: &str) -> Retained<NSView> {
     let l = label(t, 10.0, true, false);
-    colored(&l, NSColor::secondaryLabelColor());
+    colored(&l, &NSColor::secondaryLabelColor());
     rv(l.as_nsview())
 }
 
 unsafe fn stat_block(name: &str, value: &str) -> Retained<NSView> {
     let top = label(name, 10.0, false, false);
-    colored(&top, NSColor::secondaryLabelColor());
+    colored(&top, &NSColor::secondaryLabelColor());
     let val = label(value, 14.0, true, true);
     let col = vstack(vec![rv(top.as_nsview()), rv(val.as_nsview())], 1.0);
     rv(col.as_nsview())
@@ -483,7 +489,10 @@ unsafe fn stat_block(name: &str, value: &str) -> Retained<NSView> {
 unsafe fn render(s: &Snapshot) {
     let Some(ui) = UI.get() else { return };
     let stack = unsafe { &*ui.stack.0 };
-    stack.setArrangedSubviews(&NSArray::from_retained_slice(&[]));
+    {
+        let empty: Retained<NSArray<NSView>> = NSArray::from_retained_slice(&[]);
+        let _: () = msg_send![stack, setArrangedSubviews: &*empty];
+    }
 
     let green = NSColor::systemGreenColor();
     let red = NSColor::systemRedColor();
@@ -668,7 +677,7 @@ fn open_url(url: &str) {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let ns = NSString::from_str(url);
         if let Some(u) = objc2_foundation::NSURL::URLWithString(&ns) {
-            NSWorkspace::sharedWorkspace(mtm).openURL(&u);
+            NSWorkspace::sharedWorkspace().openURL(&u);
         }
     }
 }
@@ -693,9 +702,9 @@ fn register_actions() {
         let Some(ui) = UI.get() else { return };
         unsafe {
             let sw = &*ui.switch_ctl.0;
-            let on: NSControlStateValue = msg_send![sw, state];
-            let on = on == NSControlStateValue::On;
-            NSUserDefaults::standardUserDefaults().setBool_forKey(on, ns_string!("ev-autostart"));
+            let on: isize = msg_send![sw, state];
+            let on = on == 1;
+            NSUserDefaults::standardUserDefaults().setBool_forKey(on, objc2_foundation::ns_string!("ev-autostart"));
             let action = if on { "enable" } else { "disable" };
             shell(&format!(
                 "launchctl {action} gui/$(id -u)/ai.evolve-router.tray 2>/dev/null; launchctl {action} gui/$(id -u)/ai.evolve-router.gateway 2>/dev/null"
@@ -713,7 +722,7 @@ fn register_actions() {
             let ns = NSString::from_str(&cfg);
             let pb: *mut AnyObject = msg_send![objc2::class!(NSPasteboard), generalPasteboard];
             let _: () = msg_send![pb, clearContents];
-            let _: () = msg_send![pb, setString: &*ns forType: ns_string!("public.utf8-plain-text")];
+            let _: () = msg_send![pb, setString: &*ns forType: objc2_foundation::ns_string!("public.utf8-plain-text")];
         }
     });
     register(TAG_GITHUB, || open_url("https://github.com/holny/evolve-router"));
@@ -724,10 +733,10 @@ fn register_actions() {
     register(TAG_EXIT, || unsafe {
         let Some(mtm) = MainThreadMarker::new() else { return };
         let alert = NSAlert::new(mtm);
-        alert.setMessageText(ns_string!("确定彻底退出 EvolveRouter 吗？"));
-        alert.setInformativeText(ns_string!("网关与菜单栏将全部关闭。\n重新打开：应用程序 → EvolveRouter"));
-        alert.addButtonWithTitle(ns_string!("退出"));
-        alert.addButtonWithTitle(ns_string!("取消"));
+        alert.setMessageText(objc2_foundation::ns_string!("确定彻底退出 EvolveRouter 吗？"));
+        alert.setInformativeText(objc2_foundation::ns_string!("网关与菜单栏将全部关闭。\n重新打开：应用程序 → EvolveRouter"));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("退出"));
+        alert.addButtonWithTitle(objc2_foundation::ns_string!("取消"));
         if alert.runModal() == 1000 {
             shell("(sleep 0.3; launchctl bootout gui/$(id -u)/ai.evolve-router.tray) >/dev/null 2>&1 &");
             let app = NSApplication::sharedApplication(mtm);
@@ -758,15 +767,15 @@ unsafe fn sink_of() -> &'static ActionSink {
 fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
     let bytes = include_bytes!("../assets/tray-icon@2x.png");
     let data = NSData::with_bytes(bytes);
-    let img = unsafe { NSImage::initWithData(NSImage::alloc(mtm), &data) }.expect("tray icon");
+    let img = unsafe { NSImage::initWithData(NSImage::alloc(), &data) }.expect("tray icon");
     img.setSize(NSSize::new(22.0, 22.0));
     img.setTemplate(true);
     img
 }
 
 unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
-    let status_item = NSStatusBar::systemStatusBar(mtm).statusItemWithLength(-1.0);
-    let button = status_item.button().unwrap();
+    let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+    let button = status_item.button(mtm).unwrap();
     let icon = load_icon(mtm);
     button.setImage(Some(&icon));
 
@@ -780,37 +789,35 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
 
     // 面板：container + 竖排 stack
     let container = NSView::new(mtm);
-    let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[])).unwrap();
+    let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[]), mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setSpacing(9.0);
     stack.setAlignment(NSLayoutAttribute::Leading);
     stack.setTranslatesAutoresizingMaskIntoConstraints(false);
-    container.addSubview(stack);
+    container.addSubview(stack.as_nsview());
     pin_edges(&container, &stack, 12.0);
     container.widthAnchor().constraintEqualToConstant(340.0).setActive(true);
 
     // 自启开关（持久实例；未设置过默认开）
     let sw = NSSwitch::new(mtm);
     let defaults = NSUserDefaults::standardUserDefaults();
-    let saved = if defaults.objectForKey_(ns_string!("ev-autostart")).is_some() {
-        defaults.boolForKey(ns_string!("ev-autostart"))
-    } else {
-        true
-    };
-    sw.setState(if saved { NSControlStateValue::On } else { NSControlStateValue::Off });
+    let key = objc2_foundation::ns_string!("ev-autostart");
+    let obj: *mut AnyObject = unsafe { msg_send![&defaults, objectForKey: key] };
+    let saved = if !obj.is_null() { defaults.boolForKey(key) } else { true };
+    sw.setState(if saved { 1 } else { 0 });
     let _: () = msg_send![&sw, setTarget: &*sink];
     let _: () = msg_send![&sw, setAction: sel!(fire:)];
     let _: () = msg_send![&sw, setTag: TAG_SWITCH];
 
     let vc = objc2_app_kit::NSViewController::new(mtm);
-    vc.setView(Some(&container));
+    vc.setView(container.as_nsview());
     let popover = NSPopover::new(mtm);
     popover.setBehavior(NSPopoverBehavior::Transient);
     popover.setContentViewController(Some(&vc));
 
     let _ = UI.set(UiRefs {
         stack: MainPtr(Retained::as_ptr(&stack)),
-        button: MainPtr(Retained::as_ptr(&button)),
+        button: MainPtr(Retained::as_ptr(&button) as *const NSButton as *mut NSButton),
         switch_ctl: MainPtr(Retained::as_ptr(&sw)),
         popover: MainPtr(Retained::as_ptr(&popover)),
     });
@@ -822,15 +829,16 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
     let block = block2::RcBlock::new(move || {
+        let poll_tx = TX.get().cloned();
         let n = TICK.fetch_add(1, Ordering::Relaxed);
         if n % 4 == 1 {
-            if let Some(rt) = RT.get() {
-                rt.spawn(poll_live(tx.clone()));
+            if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
+                rt.spawn(poll_live(t));
             }
         }
         if n % 12 == 6 {
-            if let Some(rt) = RT.get() {
-                rt.spawn(poll_data(tx.clone()));
+            if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
+                rt.spawn(poll_data(t));
             }
         }
         while let Ok(s) = rx.try_recv() {
@@ -847,7 +855,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
         let s = snap();
         if s.inflight > 0 && s.healthy {
             if n % 2 == 0 {
-                PULSE.toggle();
+                PULSE.fetch_xor(true, Ordering::Relaxed);
             }
         } else {
             PULSE.store(false, Ordering::Relaxed);
@@ -862,7 +870,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let timer: Retained<NSTimer> =
         msg_send![NSTimer::class(), timerWithTimeInterval: 0.25f64, block: &*block, repeats: true];
     let rl: Retained<objc2_foundation::NSRunLoop> = objc2_foundation::NSRunLoop::currentRunLoop();
-    let _: () = msg_send![&rl, addTimer: &*timer forMode: ns_string!("kCFRunLoopCommonModes")];
+    let _: () = msg_send![&rl, addTimer: &*timer forMode: objc2_foundation::ns_string!("kCFRunLoopCommonModes")];
     std::mem::forget(timer); // 定时器与 block 与 app 同生命周期
     std::mem::forget(block);
 
