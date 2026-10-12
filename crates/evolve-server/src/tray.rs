@@ -1,13 +1,8 @@
 // evo-router tray 模式（macOS）：单二进制双模式之一。
 // 同进程 = 网关（tokio 后台线程，spawn_gateway）+ AppKit 菜单栏。
-//
-// UI 架构（一劳永逸取向——只使用已在本仓主动验证过的 API 面，不碰自找坑）：
-//   状态项图标 = NSImage template 22pt（四态 tint）。
-//   点击图标   = NSPanel borderless 非激活弹窗（Stats 风格；含底色/圆角），
-//                内容 = **frame 布局** 的 wrappingLabel（信息整段文本）+ 4 枚 NSButton。
-//   渲染       = 0.25s 主线程 NSTimer → tokio 轮询 → mpsc 回快照 → setValue 字段。
-//   动作       = ActionSink(target/tag) → launchctl/浏览器/剪贴板。
-// 红线：所有 ObjC 对象只主线程触碰；检查任何 msg_recv 前必须先经 lldb -E objc 验证过。
+// UI：NSPanel borderless（Stats 风格，底色/圆角）+ frame 布局大文本块 + 按钮行。
+// 数据链路与 web 面板同源：/api/live /healthz /api/stats?window=24h /api/providers /api/events。
+// 红线：所有 ObjC 对象只主线程触碰；msg_send 接收者/参数一律 lldb 验证过的形态。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -23,7 +18,7 @@ use objc2_app_kit::{
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString, NSTimer,
 };
 use serde_json::Value;
 
@@ -41,12 +36,15 @@ static PULSE: AtomicBool = AtomicBool::new(false);
 static TICK: AtomicU64 = AtomicU64::new(0);
 static SINK: OnceLock<Retained<ActionSink>> = OnceLock::new();
 static TX: OnceLock<mpsc::Sender<Snapshot>> = OnceLock::new();
-static STATUS_ITEM: OnceLock<SafeStatusRef> = OnceLock::new();
-
-// 仅主线程触碰的指针（编译期强制 Send/Sync 豁免；运行期永不跨线程！）
-struct SafeStatusRef(*mut NSStatusItem);
-unsafe impl Send for SafeStatusRef {}
-unsafe impl Sync for SafeStatusRef {}
+struct UnsafeRef<T: ?Sized>(*mut T);
+impl<T: ?Sized> Clone for UnsafeRef<T> {
+    fn clone(&self) -> Self { UnsafeRef(self.0) }
+}
+impl<T: ?Sized> Copy for UnsafeRef<T> {}
+unsafe impl<T: ?Sized> Send for UnsafeRef<T> {}
+unsafe impl<T: ?Sized> Sync for UnsafeRef<T> {}
+static STATUS_ITEM: OnceLock<UnsafeRef<NSStatusItem>> = OnceLock::new();
+static PANEL_REFS: Mutex<Option<UnsafePanelRefs>> = Mutex::new(None);
 
 // 稳定 tag → 动作
 const TAG_STATUS: isize = 0;
@@ -89,18 +87,24 @@ struct ProvRow {
     tok24: u64,
 }
 
-struct PanelRefs(
-    *mut NSPanel,
-    *mut NSTextField,   // info label
-    *mut NSButton,      // 启停
-    *mut NSButton,      // 自启
-);
-unsafe impl Send for PanelRefs {}
-unsafe impl Sync for PanelRefs {}
-static PANEL: OnceLock<PanelRefs> = OnceLock::new();
+struct UnsafePanelRefs {
+    panel: UnsafeRef<NSPanel>,
+    info: UnsafeRef<NSTextField>,
+    gw_btn: UnsafeRef<NSButton>,
+    auto_btn: UnsafeRef<NSButton>,
+}
+
+impl Clone for UnsafePanelRefs {
+    fn clone(&self) -> Self { *self }
+}
+impl Copy for UnsafePanelRefs {}
 
 fn snap() -> Snapshot {
     SNAP.lock().unwrap().clone().unwrap_or_default()
+}
+
+unsafe fn panel() -> Option<UnsafePanelRefs> {
+    PANEL_REFS.lock().unwrap().clone()
 }
 
 fn hhmm(ms: i64) -> String {
@@ -134,7 +138,7 @@ fn short_kind(kind: &str) -> String {
     }
 }
 
-// ── 轮询（tokio 侧，与 web 面板同源）──
+// ── 轮询（tokio 侧，与 web 面板同源 API）──
 
 async fn get_json(path: &str) -> Option<Value> {
     let (_cfgp, port) = TRAY_CFG.lock().unwrap().clone().unwrap_or((None, 8787));
@@ -330,9 +334,9 @@ fn fail_recent(s: &Snapshot) -> bool {
 // ── 图标四态（tint）──
 
 unsafe fn apply_icon(s: &Snapshot, pulse: bool) {
-    let Some(w) = STATUS_ITEM.get() else { return };
-    let item = unsafe { &*w.0 };
+    let Some(st) = STATUS_ITEM.get() else { return };
     let Some(mtm) = MainThreadMarker::new() else { return };
+    let item = unsafe { &*st.0 };
     let Some(btn) = item.button(mtm) else { return };
     let color: Retained<NSColor> = if !s.healthy {
         NSColor::quaternaryLabelColor()
@@ -355,9 +359,6 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
     img
 }
 
-// 视图指针复用
-
-
 // ── 动作 ──
 
 fn open_url(url: &str) {
@@ -376,9 +377,8 @@ fn register_actions() {
         let key = objc2_foundation::ns_string!("ev-autostart");
         let on = !defaults.boolForKey(key);
         defaults.setBool_forKey(on, key);
-        // 面板按钮文案刷新
-        if let Some(pr) = PANEL.get() {
-            let btn: Retained<NSButton> = unsafe { Retained::retain(pr.3).unwrap() };
+        if let Some(pr) = panel() {
+            let btn: Retained<NSButton> = Retained::retain(pr.auto_btn.0).unwrap();
             let t = NSString::from_str(if on { "自启：开" } else { "自启：关" });
             let _: () = msg_send![&btn, setTitle: &*t];
         }
@@ -398,7 +398,7 @@ fn register_actions() {
             let ns = NSString::from_str(&cfg);
             let pb: *mut AnyObject = msg_send![objc2::class!(NSPasteboard), generalPasteboard];
             let _: () = msg_send![pb, clearContents];
-            let _: () = msg_send![pb, setString: &*ns forType: objc2_foundation::ns_string!("public.utf8-plain-text")];
+            let _: () = msg_send![pb, setString: &*ns, forType: objc2_foundation::ns_string!("public.utf8-plain-text")];
         }
     });
     register(TAG_GITHUB, || open_url("https://github.com/holny/evolve-router"));
@@ -419,11 +419,30 @@ fn register_actions() {
             let _: () = msg_send![&app, terminate: std::ptr::null::<AnyObject>()];
         }
     });
+    register(TAG_STATUS, toggle_panel);
+}
+
+fn toggle_panel() {
+    let Some(pr) = (unsafe { panel() }) else { return };
+    unsafe {
+        let panel = &*pr.panel.0;
+        if panel.isVisible() {
+            panel.orderOut(None);
+        } else {
+            // 定位：主屏右上 · 菜单栏正下（level 87 已盖通知气泡）
+            let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
+            let md: NSRect = msg_send![main, frame];
+            let x = md.origin.x + md.size.width - 360.0;
+            let y = md.origin.y + md.size.height - 50.0 - 470.0;
+            panel.setFrameTopLeftPoint(NSPoint::new(x, y));
+            panel.orderFrontRegardless();
+        }
+    }
 }
 
 // ── 面板（NSPanel + frame 布局文字块 + 按钮行）──
 
-unsafe fn build_panel(mtm: MainThreadMarker) -> PanelRefs {
+unsafe fn build_panel(mtm: MainThreadMarker) -> UnsafePanelRefs {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         mtm.alloc(),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 470.0)),
@@ -431,7 +450,7 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> PanelRefs {
         NSBackingStoreType::Buffered,
         false,
     );
-    panel.setLevel(87);   // NSModalPanel 级，盖过系统通知气泡
+    panel.setLevel(87);
     panel.setHidesOnDeactivate(true);
     panel.setBecomesKeyOnlyIfNeeded(true);
     panel.setOpaque(true);
@@ -450,7 +469,10 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> PanelRefs {
     }
 
     // 信息块（单一 wrapping label，整段更新）
-    let info = NSTextField::wrappingLabelWithString(&NSString::from_str("加载中…"), mtm);
+    let info = NSTextField::wrappingLabelWithString(
+        &NSString::from_str("加载中…"),
+        mtm,
+    );
     info.setFrameOrigin(NSPoint::new(14.0, 92.0));
     info.setFrameSize(NSSize::new(312.0, 366.0));
     info.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(11.5, 0.0)));
@@ -482,17 +504,22 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> PanelRefs {
     let _exit = mkbtn(14.0, 434.0, 150.0, "退出 EvolveRouter", TAG_EXIT);
     let _ = (&_copy, &_dash, &_github, &_exit);
 
-    PanelRefs(
-        Retained::as_ptr(&panel) as *mut NSPanel,
-        Retained::as_ptr(&info) as *mut NSTextField,
-        Retained::as_ptr(&gw_btn) as *mut NSButton,
-        Retained::as_ptr(&auto_btn) as *mut NSButton,
-    )
+    let raw = UnsafePanelRefs {
+        panel: UnsafeRef(Retained::as_ptr(&panel) as *mut NSPanel),
+        info: UnsafeRef(Retained::as_ptr(&info) as *mut NSTextField),
+        gw_btn: UnsafeRef(Retained::as_ptr(&gw_btn) as *mut NSButton),
+        auto_btn: UnsafeRef(Retained::as_ptr(&auto_btn) as *mut NSButton),
+    };
+    std::mem::forget(panel);
+    std::mem::forget(info);
+    std::mem::forget(gw_btn);
+    std::mem::forget(auto_btn);
+    raw
 }
 
 unsafe fn update_panel(s: &Snapshot) {
-    let Some(pr) = PANEL.get() else { return };
-    let info = unsafe { &*pr.1 };
+    let Some(pr) = (unsafe { panel() }) else { return };
+    let info = unsafe { &*pr.info.0 };
     let rate = if s.requests > 0 {
         (100.0 * s.success as f64 / s.requests as f64).round() as u64
     } else {
@@ -542,14 +569,14 @@ unsafe fn update_panel(s: &Snapshot) {
     let ns = NSString::from_str(&t);
     let _: () = msg_send![info, setStringValue: &*ns];
 
-    let gw = unsafe { &*pr.2 };
+    let gw = unsafe { &*pr.gw_btn.0 };
     let gw_t = NSString::from_str(if s.healthy { "停止网关" } else { "启动网关" });
     let _: () = msg_send![gw, setTitle: &*gw_t];
 
     let defaults = NSUserDefaults::standardUserDefaults();
     let key = objc2_foundation::ns_string!("ev-autostart");
     let saved = defaults.boolForKey(key);
-    let auto = unsafe { &*pr.3 };
+    let auto = unsafe { &*pr.auto_btn.0 };
     let auto_t = NSString::from_str(if saved { "自启：开" } else { "自启：关" });
     let _: () = msg_send![auto, setTitle: &*auto_t];
 }
@@ -567,12 +594,14 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
         let _: () = msg_send![&button, setAction: sel!(fire:)];
         let _: () = msg_send![&button, setTag: TAG_STATUS];
     }
-    let _ = STATUS_ITEM.set(SafeStatusRef(Retained::as_ptr(&status_item) as *mut NSStatusItem));
-    std::mem::forget(status_item.clone());
+    let _ = STATUS_ITEM.set(UnsafeRef(Retained::as_ptr(&status_item) as *mut NSStatusItem));
+    std::mem::forget(status_item);
 
     register_actions();
 
-    std::mem::forget(build_panel(mtm));
+    let pr = build_panel(mtm);
+    *PANEL_REFS.lock().unwrap() = Some(pr);
+
     if let Some(s) = SNAP.lock().ok().and_then(|g| g.clone()) {
         update_panel(&s);
     }
@@ -608,7 +637,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let timer: Retained<NSTimer> = msg_send![NSTimer::class(),
         timerWithTimeInterval: 0.25f64, repeats: true, block: &*block];
     let rl: Retained<objc2_foundation::NSRunLoop> = objc2_foundation::NSRunLoop::currentRunLoop();
-    let _: () = msg_send![&rl, addTimer: &*timer forMode: objc2_foundation::ns_string!("NSRunLoopCommonModes")];
+    let _: () = msg_send![&rl, addTimer: &*timer, forMode: objc2_foundation::ns_string!("NSRunLoopCommonModes")];
     std::mem::forget(timer);
     std::mem::forget(block);
 
@@ -617,7 +646,6 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
 
 // ── 入口 ──
 
-static TRAY_BUILD_MARKER: &str = "TRAY-BUILD-MARK-20261012";
 pub fn run(config_path: Option<std::path::PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {
     let Some(mtm) = MainThreadMarker::new() else {
         anyhow::bail!("tray 必须在主线程运行");
