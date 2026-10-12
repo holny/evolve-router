@@ -1,28 +1,26 @@
 #!/bin/bash
-# EvolveRouter 构建：SwiftPM 编译 → 组 .app bundle → 可选安装
+# EvolveRouter 单二进制打包/安装：target/release/evo-router → .app 壳（argv0 免参自动 tray 模式）
 # 用法: apps/tray/build.sh [--install]
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
-
-SRC_ROOT="$(cd .. && pwd)"
+ROOT="$(cd ../.. && pwd)"
 APP_NAME="EvolveRouter"
-BUNDLE_ID="ai.evolve.router.tray"
+BIN="$ROOT/target/release/evo-router"
 
-echo "[1/3] swift build --release ..."
-swift build -c release
+echo "[1/2] cargo build（workspace，tray 默认 feature）..."
+(cd "$ROOT" && cargo build --release)
 
-echo "[2/3] 组装 ${APP_NAME}.app ..."
+echo "[2/2] 组装 ${APP_NAME}.app（同一 evo-router 二进制 + Info 壳）..."
 APP_DIR="build/${APP_NAME}.app/Contents"
-mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-cp .build/release/evolve-router-tray "$APP_DIR/MacOS/${APP_NAME}"
-
+rm -rf "build/${APP_NAME}.app" && mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
+cp "$BIN" "$APP_DIR/MacOS/${APP_NAME}"
 cat > "$APP_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>${APP_NAME}</string>
-    <key>CFBundleIdentifier</key><string>${BUNDLE_ID}</string>
+    <key>CFBundleIdentifier</key><string>ai.evolve.router.tray</string>
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIconFile</key><string>${APP_NAME}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
@@ -32,34 +30,28 @@ cat > "$APP_DIR/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --sign - "build/${APP_NAME}.app" 2>/dev/null || true
-
-# app 图标：alpha 版 logo 10 尺寸 → icns（源由 make-icons.sh 生成，缺失跳过）
-if [[ -f "assets/logo-alpha-1024.png" ]]; then
+# 图标管线（源 logo-template.svg → assets/logo-alpha-1024.png；不存在则跳过 icns）
+[[ -f "$ROOT/apps/tray/assets/logo-alpha-1024.png" ]] || bash "$ROOT/apps/tray/make-icons.sh" >/dev/null 2>&1 || true
+if [[ -f "$ROOT/apps/tray/assets/logo-alpha-1024.png" ]]; then
     ICONSET="build/${APP_NAME}.iconset"
     rm -rf "$ICONSET" && mkdir -p "$ICONSET"
     for s in 16 32 64 128 256 512 1024; do
-        sips -z $s $s "assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+        sips -z $s $s "$ROOT/apps/tray/assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
     done
     iconutil -c icns "$ICONSET" -o "$APP_DIR/Resources/${APP_NAME}.icns" 2>/dev/null || true
 fi
-
-# build/ 下独立 icns 产物（同一源）
-ICONSET="build/${APP_NAME}.iconset"
-rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-if [[ -f "assets/logo-alpha-1024.png" ]]; then
-    for s in 16 32 64 128 256 512 1024; do sips -z $s $s "assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true; done
-fi
-iconutil -c icns "$ICONSET" -o "build/${APP_NAME}.icns" 2>/dev/null || true
+codesign --force --sign - "build/${APP_NAME}.app" 2>/dev/null || true
 
 if [[ "${1:-}" == "--install" ]]; then
-    echo "[3/3] 安装到 /Applications 并启动 ..."
+    echo "[3/3] 安装到 /Applications ..."
     launchctl bootout gui/$(id -u)/ai.evolve-router.tray 2>/dev/null || true
+    # 收敛单 agent：老双 agent 时代的 serve 网关 agent 移除（tray 同进程已含网关）
+    launchctl bootout gui/$(id -u)/ai.evolve-router.gateway 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/ai.evolve-router.gateway.plist"
     pkill -x "${APP_NAME}" 2>/dev/null || true
     sleep 1
     rm -rf "/Applications/${APP_NAME}.app"
     cp -R "build/${APP_NAME}.app" /Applications/
-    # 登录自启 + 崩溃拉起（LaunchAgent）
     TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve-router.tray.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
     cat > "$TRAY_PLIST" <<PLIST
@@ -78,10 +70,8 @@ if [[ "${1:-}" == "--install" ]]; then
 </plist>
 PLIST
     launchctl bootstrap gui/$(id -u) "$TRAY_PLIST"
-    # RunAtLoad 已拉起；open 仅作未拉起时的激活兜底
     pgrep -x "${APP_NAME}" >/dev/null || open "/Applications/${APP_NAME}.app"
-    echo "完成：菜单栏出现分支图标即运行中（登录自启可在 系统设置 → 通用 → 登录项 添加）"
+    echo "完成：单二进制 .app 已安装（菜单栏图标+同进程网关）"
 else
-    echo "[3/3] 跳过安装（--install 可装到 /Applications 并启动）"
-    echo "产物: apps/tray/build/${APP_NAME}.app"
+    echo "产物: apps/tray/build/${APP_NAME}.app（唯一可执行 Contents/MacOS = evo-router）"
 fi
