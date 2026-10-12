@@ -307,7 +307,7 @@ define_class!(
 
     impl ActionSink {
         #[unsafe(method(fire:))]
-        fn fire(&self, _cmd: objc2::runtime::Sel, sender: *mut AnyObject) {
+        fn fire(&self, sender: *mut AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
             if let Some(f) = ACTIONS.lock().unwrap().get(&tag) {
                 f();
@@ -747,18 +747,6 @@ fn register_actions() {
 
 // ── UI 装配 ──
 
-unsafe fn pin_edges(container: &NSView, child: &NSView, pad: f64) {
-    child.topAnchor().constraintEqualToAnchor_constant(&container.topAnchor(), pad).setActive(true);
-    child.leadingAnchor()
-        .constraintEqualToAnchor_constant(&container.leadingAnchor(), pad)
-        .setActive(true);
-    container.trailingAnchor()
-        .constraintEqualToAnchor_constant(&child.trailingAnchor(), pad)
-        .setActive(true);
-    container.bottomAnchor()
-        .constraintEqualToAnchor_constant(&child.bottomAnchor(), pad)
-        .setActive(true);
-}
 
 unsafe fn sink_of() -> &'static ActionSink {
     SINK.get().unwrap()
@@ -787,16 +775,15 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let _: () = msg_send![&button, setAction: sel!(fire:)];
     let _: () = msg_send![&button, setTag: TAG_STATUS];
 
-    // 面板：container + 竖排 stack
-    let container = NSView::new(mtm);
+    // 面板：容器 = 竖排 NSStackView 本体（宽度约束唯一；高度由 fittingSize 供给 popover）
     let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[]), mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setSpacing(9.0);
     stack.setAlignment(NSLayoutAttribute::Leading);
     stack.setTranslatesAutoresizingMaskIntoConstraints(false);
-    container.addSubview(stack.as_nsview());
-    pin_edges(&container, &stack, 12.0);
-    container.widthAnchor().constraintEqualToConstant(340.0).setActive(true);
+    stack.widthAnchor().constraintEqualToConstant(340.0).setActive(true);
+    let container: Retained<NSView> =
+        Retained::retain(stack.as_nsview() as *const NSView as *mut NSView).unwrap();
 
     // 自启开关（持久实例；未设置过默认开）
     let sw = NSSwitch::new(mtm);
