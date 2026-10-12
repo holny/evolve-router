@@ -302,6 +302,8 @@ struct PanelView: View {
                 stat("请求", "\(state.requests)")
                 stat("成功率", "\(state.successRate)%")
                 stat("Tokens", state.tokensK)
+                Spacer()
+                Text("最近 24h").font(.system(size: 9)).foregroundStyle(.tertiary)
             }
             if !state.plans.isEmpty {
                 section("方案 5h 用量") {
