@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{
-    NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString, NSTimer,
+    NSArray, NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString,
 };
 use serde_json::Value;
 
@@ -423,7 +423,13 @@ fn register_actions() {
 }
 
 fn toggle_panel() {
-    let Some(pr) = (unsafe { panel() }) else { return };
+    let Some(pr) = (unsafe { panel() }) else {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+            let _ = writeln!(f, "[panel] PANEL_REFS empty!!");
+        }
+        return;
+    };
     unsafe {
         let panel = &*pr.panel.0;
         if panel.isVisible() {
@@ -451,7 +457,7 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> UnsafePanelRefs {
         false,
     );
     panel.setLevel(87);
-    panel.setHidesOnDeactivate(true);
+    panel.setHidesOnDeactivate(false);
     panel.setBecomesKeyOnlyIfNeeded(true);
     panel.setOpaque(true);
     panel.setHasShadow(true);
@@ -608,8 +614,29 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
 
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
-    let block = block2::RcBlock::new(move || {
+
+    // 轮询循环（普通线程）：250ms tick；UI 更新经 dispatch2 主队列回投
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
         let n = TICK.fetch_add(1, Ordering::Relaxed);
+        // 调试：EVO_AUTO_PANEL=1 时第 3 个 tick 自动弹面板（经主队列，与点击同路径）
+        if n == 3 && std::env::var("EVO_AUTO_PANEL").is_ok() {
+            {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+                    let _ = writeln!(f, "[auto] queueing toggle");
+                }
+            }
+            dispatch2::DispatchQueue::main().exec_async(|| {
+                toggle_panel();
+                {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+                        let _ = writeln!(f, "[auto] toggled");
+                    }
+                }
+            });
+        }
         if n % 4 == 1 {
             if let (Some(t), Some(rt)) = (TX.get().cloned(), RT.get()) {
                 rt.spawn(poll_live(t));
@@ -624,22 +651,20 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
             *SNAP.lock().unwrap() = Some(s);
         }
         let s = snap();
-        update_panel(&s);
-        apply_icon(&s, PULSE.load(Ordering::Relaxed));
-        if s.inflight > 0 && s.healthy {
-            if n % 2 == 0 {
-                PULSE.fetch_xor(true, Ordering::Relaxed);
-            }
+        let pulse = if s.healthy && s.inflight > 0 {
+            PULSE.fetch_xor(true, Ordering::Relaxed)
         } else {
             PULSE.store(false, Ordering::Relaxed);
-        }
+            false
+        };
+        // 主线程：面板刷新 + 图标 tint
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            unsafe {
+                update_panel(&s);
+                apply_icon(&s, pulse);
+            }
+        });
     });
-    let timer: Retained<NSTimer> = msg_send![NSTimer::class(),
-        timerWithTimeInterval: 0.25f64, repeats: true, block: &*block];
-    let rl: Retained<objc2_foundation::NSRunLoop> = objc2_foundation::NSRunLoop::currentRunLoop();
-    let _: () = msg_send![&rl, addTimer: &*timer, forMode: objc2_foundation::ns_string!("NSRunLoopCommonModes")];
-    std::mem::forget(timer);
-    std::mem::forget(block);
 
     let _ = app;
 }
@@ -656,8 +681,20 @@ pub fn run(config_path: Option<std::path::PathBuf>, port_override: Option<u16>) 
     gw_start();
 
     unsafe {
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+                let _ = writeln!(f, "[run] before build_ui");
+            }
+        }
         let app = NSApplication::sharedApplication(mtm);
         build_ui(mtm, &app);
+        {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+                let _ = writeln!(f, "[run] after build_ui, entering NSApp.run");
+            }
+        }
         app.run();
     }
     Ok(())
