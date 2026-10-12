@@ -431,7 +431,7 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> PanelRefs {
         NSBackingStoreType::Buffered,
         false,
     );
-    panel.setLevel(24);
+    panel.setLevel(87);   // NSModalPanel 级，盖过系统通知气泡
     panel.setHidesOnDeactivate(true);
     panel.setBecomesKeyOnlyIfNeeded(true);
     panel.setOpaque(true);
@@ -617,6 +617,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
 
 // ── 入口 ──
 
+static TRAY_BUILD_MARKER: &str = "TRAY-BUILD-MARK-20261012";
 pub fn run(config_path: Option<std::path::PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {
     let Some(mtm) = MainThreadMarker::new() else {
         anyhow::bail!("tray 必须在主线程运行");
