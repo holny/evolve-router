@@ -19,12 +19,33 @@ const MAX_ERROR_BODY: usize = 8 * 1024;
 /// Health-map key separator: model id + unit-sep + key index.
 const KEY_SEP: char = '\u{1f}';
 
+// ── 实时状态（/api/live，菜单栏图标/面板的"忙碌"数据源）──
+// in-flight = 请求进入 chat/messages 处理器到返回的全周期（含路由决策段），
+// RAII 守卫覆盖所有提前 return 路径（缓存命中/参数错误/级联降级等）。
+pub static LIVE_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub struct LiveGuard;
+
+impl LiveGuard {
+    pub fn new() -> Self {
+        LIVE_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        LIVE_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 pub async fn chat_completions(
     State(st): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
+    let _live = LiveGuard::new();
     let agent_hdr = crate::identity::agent_identity(&headers, &st.config.telemetry.agent_header);
     let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "invalid json body");

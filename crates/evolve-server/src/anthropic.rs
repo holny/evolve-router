@@ -22,6 +22,7 @@ const MAX_ERROR_BODY: usize = 8 * 1024;
 
 pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let started = Instant::now();
+    let _live = crate::relay::LiveGuard::new();
     let agent_hdr = crate::identity::agent_identity(&headers, &st.config.telemetry.agent_header);
     let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
         return mr_error(StatusCode::BAD_REQUEST, "invalid json body");

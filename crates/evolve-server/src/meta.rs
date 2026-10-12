@@ -193,6 +193,16 @@ pub async fn api_stats(State(st): State<AppState>) -> Response {
     api_stats_inner(&st, "overview").await
 }
 
+/// /api/live：菜单栏伴侣的轻量实时状态（1s 轮询）——in-flight 请求计数。
+/// 计数由 relay/anthropic 入口的 RAII LiveGuard 维护，覆盖全部 return 路径。
+pub async fn api_live(State(_st): State<AppState>) -> Response {
+    axum::Json(json!({
+        "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
+        "ts": evolve_memory::health::now(),
+    }))
+    .into_response()
+}
+
 async fn api_stats_inner(st: &AppState, window: &str) -> Response {
     let mut stats = st.flywheel.stats();
     let telemetry = st.flywheel.telemetry_snapshot();
@@ -715,6 +725,71 @@ pub async fn api_providers_scan_progress(State(st): State<AppState>) -> Response
 }
 
 /// Provider 实时状态（每 5s 轮询）：health、最后成功时间、当前使用率
+/// 近 5h 每 Provider 积分用量：事件回扫（plan_credits_used 折算，与配额执行
+/// 同口径）。plan_usage_sums 为内存账本、重启即清零——展示口径改走事件回扫，
+/// 重启不丢、与 tokens_24h 同源。美元制套餐（如 OpenCode Go）折算仍为 0（v2 TODO）。
+fn usage_5h_by_provider(
+    snap: &[evolve_core::types::ModelRecord],
+    events: &evolve_memory::events::EventLog,
+    now_ms: u64,
+) -> std::collections::HashMap<String, f64> {
+    let mut out = std::collections::HashMap::new();
+    let prov_of_model: std::collections::HashMap<&str, &str> =
+        snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
+    let Some(path) = events.path() else { return out };
+    let Ok(content) = std::fs::read_to_string(path) else { return out };
+    let cutoff = (now_ms as i64) - 5 * 3600 * 1000;
+    for line in content.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
+            break;
+        }
+        if v.get("kind").and_then(|x| x.as_str()) != Some("chat") {
+            continue;
+        }
+        let Some(chosen) = v.get("chosen").and_then(|x| x.as_str()) else { continue };
+        let Some(prov) = prov_of_model.get(chosen) else { continue };
+        let Some(mm) = snap.iter().find(|m| m.id == chosen) else { continue };
+        let pt = v.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let ct = v.get("completion_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let cached = v.get("cached_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        *out.entry(prov.to_string()).or_insert(0.0) +=
+            evolve_core::plans::plan_credits_used(&mm.base_url, chosen, pt, cached, ct);
+    }
+    out
+}
+
+/// 近 24h 每 Provider token 用量：事件回扫（单文件倒序，越过 24h 界即停；
+/// events.jsonl.1 轮转历史不计——本地量级下单文件通常远超 24h 覆盖）。
+/// /api/providers 与 /api/providers/status 共用，保证两个消费端同源。
+fn tokens_24h_by_provider(
+    snap: &[evolve_core::types::ModelRecord],
+    events: &evolve_memory::events::EventLog,
+    now_ms: u64,
+) -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    let prov_of_model: std::collections::HashMap<&str, &str> =
+        snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
+    let Some(path) = events.path() else { return out };
+    let Ok(content) = std::fs::read_to_string(path) else { return out };
+    let cutoff = (now_ms as i64) - 24 * 3600 * 1000;
+    for line in content.lines().rev() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
+            break;
+        }
+        if v.get("kind").and_then(|x| x.as_str()) != Some("chat") {
+            continue;
+        }
+        let Some(chosen) = v.get("chosen").and_then(|x| x.as_str()) else { continue };
+        let Some(prov) = prov_of_model.get(chosen) else { continue };
+        let pt = v.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        let ct = v.get("completion_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
+        *out.entry(prov.to_string()).or_insert(0) += (pt + ct) as u64;
+    }
+    out
+}
+
 pub async fn api_providers_status(State(st): State<AppState>) -> Response {
     let now_ms = evolve_memory::health::now();
     let health_snap = st.health.snapshot();
@@ -723,6 +798,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
     let mut out: Vec<Value> = Vec::new();
     let snap = st.engine.catalog_snapshot();
+    let tok24 = tokens_24h_by_provider(&snap, &st.events, now_ms);
     use std::hash::{Hash, Hasher};
     let key_fp = |k: &str| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -783,6 +859,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             "soft_pct": soft_pct,
             "cooldown_remaining_ms": cool,
             "available": cool.is_none(),
+            "tokens_24h": tok24.get(key).copied().unwrap_or(0),
             "fetched_models_count": pd.fetched_models.len(),
         }));
     }
@@ -800,6 +877,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             "model_count": 0u64,
             "models": Vec::<Value>::new(),
             "allowance_5h": ov.providers.get(&plan_key).and_then(|p| p.window_5h),
+            "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
         }));
         if let Some(arr) = entry.get_mut("models").and_then(|v| v.as_array_mut()) {
             arr.push(serde_json::Value::String(m.id.clone()));
@@ -838,7 +916,6 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
     let budgets = st.plan_budgets.lock().map(|b| b.clone()).unwrap_or_default();
     let soft_pct = st.config.policy.plan_soft_pct;
-    let sums = st.quota.plan_usage_sums(evolve_memory::health::now(), 5 * 3600 * 1000);
     let health_snap = st.health.snapshot();
     let now_ms = evolve_memory::health::now();
     let mut out: Vec<Value> = Vec::new();
@@ -851,6 +928,8 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     };
     // 1. 手动定义的（最优先——用户自己加的）
     let snap_all = st.engine.catalog_snapshot();
+    let tok24 = tokens_24h_by_provider(&snap_all, &st.events, now_ms);
+    let credits5h = usage_5h_by_provider(&snap_all, &st.events, now_ms);
     for (key, pd) in &ov.providers {
         if pd.disabled { continue; }
         // 档位联动：显式窗口额度 > 注册表档位额度（选档位后配额条立即生效）
@@ -859,14 +938,19 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         // 手动也查用量：按账号归属——目录里有同名 provider（编辑自发现条的
         // overlay）按 provider 过滤；纯自定义条目退回 base_url 匹配
         let has_named = snap_all.iter().any(|m| &m.provider == key);
-        let used = snap_all.iter()
-            .filter(|m| if has_named { &m.provider == key } else { m.base_url == pd.base_url })
-            .filter_map(|m| sums.get(&m.id).map(|s| (&m.id, s)))
-            .map(|(id, (i, c, o))| evolve_core::plans::plan_credits_used(&pd.base_url, id, *i, *c, *o))
-        .sum::<f64>();
+        let used = if has_named {
+            credits5h.get(key).copied().unwrap_or(0.0)
+        } else {
+            // 纯自定义条目：同 base_url 各 provider 求和
+            snap_all.iter()
+                .filter(|m| m.base_url == pd.base_url)
+                .filter_map(|m| credits5h.get(&m.provider))
+                .sum::<f64>()
+        };
         out.push(json!({
             "key": key, "source": "manual",
             "base_url": pd.base_url, "protocol": pd.protocol,
+            "plan_key": plan_key,
             "plan_kind": pd.plan_kind, "docs_url": pd.docs_url,
             "tier": pd.tier,
             "windows": {
@@ -880,6 +964,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "has_key": pd.api_key.is_some(),
             "key_fp": pd.api_key.as_deref().map(key_fp).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
+            "tokens_24h": tok24.get(key).copied().unwrap_or(0),
             "soft_pct": soft_pct,
         }));
     }
@@ -933,13 +1018,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let models_at_url: Vec<&evolve_core::types::ModelRecord> = snap_all.iter()
             .filter(|x| x.provider == m.provider)
             .collect();
-        let used: f64 = models_at_url.iter()
-            .filter_map(|mm| {
-                sums.get(&mm.id).map(|(i, c, o)| {
-                    evolve_core::plans::plan_credits_used(&mm.base_url, &mm.id, *i, *c, *o)
-                })
-            })
-            .sum();
+        let used: f64 = credits5h.get(m.provider.as_str()).copied().unwrap_or(0.0);
         // 下次窗口重置：组内模型的健康冷却取最近
         let next_reset = health_snap.iter()
             .filter(|(k, h)| {
@@ -953,6 +1032,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         out.push(json!({
             "key": m.provider.clone(), "source": "discovered",
             "base_url": m.base_url, "protocol": if m.protocol == evolve_core::types::Protocol::Anthropic { "anthropic" } else { "openai" },
+            "plan_key": plan_key,
             "plan_kind": profile.map(|p| p.plan_kind).unwrap_or("api"),
             "docs_url": profile.map(|p| p.docs_url).unwrap_or(""),
             "tier": tier,
@@ -968,10 +1048,98 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "has_key": m.has_credential(),
             "key_fp": m.key_values().first().map(|k| key_fp(k)).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
+            "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
             "soft_pct": soft_pct,
             "next_reset_epoch_ms": next_reset,
         }));
     }
+    // 同套餐归一（用户裁决 10-12）：同 plan_key 的多账号条目合并为一行展示——
+    // 用量/24h tokens 求和、模型并集、windows 逐窗取首个非空、标量取首个非空值。
+    // plan_key 为空（无套餐画像的自定义端点）保持独立。前端（面板/托盘）零适配。
+    let mut merged: Vec<Value> = Vec::new();
+    let mut merged_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in out {
+        let pk = e.get("plan_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if pk.is_empty() {
+            merged.push(e);
+            continue;
+        }
+        match merged_idx.get(&pk).copied() {
+            None => {
+                let mut e = e;
+                if let Some(o) = e.as_object_mut() {
+                    let k0 = o.get("key").cloned().unwrap_or(json!(""));
+                    o.insert("merged_from".into(), json!([k0]));
+                    // 行名归一为套餐名（plan_key），同套餐多账号聚合后不再以账号名为主键
+                    o.insert("key".into(), json!(pk.clone()));
+                }
+                merged_idx.insert(pk, merged.len());
+                merged.push(e);
+            }
+            Some(i) => {
+                if let (Some(dst), Some(src)) = (merged[i].as_object_mut(), e.as_object()) {
+                // 求和字段：used_5h 浮点（两位舍入），tokens/count 整数
+                for k in ["used_5h", "tokens_24h", "model_count"] {
+                    if k == "used_5h" {
+                        let s = dst.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0)
+                            + src.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        dst.insert(k.into(), json!((s * 100.0).round() / 100.0));
+                    } else {
+                        let s = dst.get(k).and_then(|v| v.as_u64()).unwrap_or(0)
+                            + src.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                        dst.insert(k.into(), json!(s));
+                    }
+                }
+                // 数组并集（保持序）；merged_from 源无值时回退其 key
+                for k in ["models", "fetched_models", "merged_from"] {
+                    let mut arr = dst.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                    let src_arr = src.get(k).and_then(|v| v.as_array()).cloned()
+                        .or_else(|| {
+                            if k == "merged_from" {
+                                src.get("key").cloned().map(|k0| vec![k0])
+                            } else {
+                                None
+                            }
+                        });
+                    if arr.is_empty() {
+                        if let Some(sv) = src_arr {
+                            arr = sv;
+                        }
+                    } else if let Some(sv) = src_arr {
+                        for x in sv {
+                            if !arr.contains(&x) {
+                                arr.push(x);
+                            }
+                        }
+                    }
+                    dst.insert(k.into(), json!(arr));
+                }
+                    // windows 逐窗取首个非空
+                    if let (Some(dw), Some(sw)) = (dst.get_mut("windows").and_then(|v| v.as_object_mut()),
+                                                   src.get("windows").and_then(|v| v.as_object())) {
+                        for (wk, wv) in sw {
+                            if !wv.is_null() && dw.get(wk).map(|c| c.is_null()).unwrap_or(true) {
+                                dw.insert(wk.clone(), wv.clone());
+                            }
+                        }
+                    }
+                    // 其余标量：目标空值时回填来源非空值（tier/docs_url/has_key/next_reset 等）
+                    for (k, sv) in src {
+                        if k == "key" || k == "key_fp" || k == "source" {
+                            continue;
+                        }
+                        let cur_empty = dst.get(k).map(|c| {
+                            c.is_null() || c.as_str().map(|s| s.is_empty()).unwrap_or(false)
+                        }).unwrap_or(true);
+                        if cur_empty && !sv.is_null() {
+                            dst.insert(k.clone(), sv.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut out = merged;
     // 判重标记：同 (base_url, key指纹) 的第二处 → duplicate_of=先出现的 provider 名。
     // 同 base_url 不同 key 是两个 provider（如 opencode-go 与 opencode-go-github），不算重复。
     {
