@@ -490,7 +490,7 @@ define_class!(
 
     impl PanelDelegate {
         #[unsafe(method(windowDidResignKey:))]
-        fn window_did_resign_key(&self, _cmd: objc2::runtime::Sel, _note: *mut AnyObject) {
+        fn window_did_resign_key(&self, _note: *mut AnyObject) {
             hide_panel(true);
         }
     }
