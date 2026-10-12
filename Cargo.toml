@@ -38,8 +38,23 @@ rand = "0.9"
 clap = { version = "4", features = ["derive"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
 
+# macOS 菜单栏托盘（evo-router tray 模式，AppKit 原生）
+objc2 = { version = "0.6" }
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSArray", "NSData", "NSTimer", "NSRunLoop", "NSUserDefaults", "NSURL", "NSProcessInfo",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSStatusBar", "NSStatusItem", "NSButton", "NSControl", "NSTextField",
+    "NSProgressIndicator", "NSPopover", "NSStackView", "NSColor", "NSImage", "NSSwitch",
+    "NSAlert", "NSWorkspace", "NSView", "NSResponder", "NSLayoutAnchor", "NSLayoutConstraint",
+    "NSFont", "NSEvent", "NSUserInterfaceLayout",
+    "NSUserInterfaceValidation", "NSAccessibility", "NSAnimation", "NSGraphics",
+] }
+block2 = { version = "0.6" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+

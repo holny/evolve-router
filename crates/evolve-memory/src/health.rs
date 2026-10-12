@@ -128,7 +128,10 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
             until_epoch_ms: None,
         },
         429 => {
-            let until = retry_after_ms.map(|ms| now() + ms);
+            // 恢复时间优先级：正文"reset at <时间>"（精确时刻，如智谱 5h 超限）
+            // > Retry-After 头 > 默认 5 分钟探测节奏
+            let until = parse_reset_epoch_ms(body_snippet, now())
+                .or_else(|| retry_after_ms.map(|ms| now() + ms));
             if no_credit.iter().any(|k| lower.contains(k)) {
                 Failure { kind: HealthKind::PaymentRequired, message: "no credit".into(), until_epoch_ms: None }
             } else if quota.iter().any(|k| lower.contains(k)) {
@@ -157,6 +160,27 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
 fn first_hit<'a>(lower: &str, keys: &[&'a str]) -> Option<&'a str> {
     keys.iter().find(|k| lower.contains(**k)).copied()
 }
+
+
+/// days-from-civil (Howard Hinnant 算法)：公历日期 → 自 1970-01-01 的天数
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn days_since_epoch_ms(days: i64) -> u64 {
+    (days.max(0) as u64).saturating_mul(86_400_000)
+}
+
+fn local_ms_placeholder<T>(_: i64, _: ()) -> (i64, ()) {
+    (0, ())
+}
+
 
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -207,5 +231,149 @@ mod tests {
         assert!(e.cooldown_remaining_ms(now()).unwrap_or(0) >= 120_000, "3 hits x base 60s");
         reg.mark_ok("m");
         assert!(reg.snapshot().get("m").unwrap().available(now()));
+    }
+}
+
+/// 从错误正文解析"恢复时间点"——上游（智谱 5h 超限等）时常把
+/// `It will reset at 2026-10-12 19:11:41 +0800 CST` 写在正文而不带 Retry-After 头。
+/// 覆盖三类写法（无法解析或时间已过 → None，走默认探测节奏）：
+/// ① 绝对时间 `2026-10-12 19:11:41 (+0800|+08:00|Z|UTC)?`（无时区按中国时区 +08 近似）
+/// ② `resets in 47 minutes` / `in 47 minutes`
+/// ③ `resets in 2 hours` / `in 2 hours`
+pub fn parse_reset_epoch_ms(body: &str, now_ms: u64) -> Option<u64> {
+    let l = body.to_lowercase();
+
+    // ③ 相对分钟 / 小时（先于绝对时间扫：两种写法不共存，顺序无所谓）
+    if let Some(pos) = l.find("minute") {
+        if let Some(n) = num_before(&l[..pos]) {
+            if (1..600).contains(&n) {
+                return Some(now_ms + n * 60_000);
+            }
+        }
+    }
+    if let Some(pos) = l.find("hour") {
+        if let Some(n) = num_before(&l[..pos]) {
+            if (1..48).contains(&n) {
+                return Some(now_ms + n * 3_600_000);
+            }
+        }
+    }
+
+    // ① 绝对时间：找 `YYYY-MM-DD` 锚点
+    let bytes = body.as_bytes();
+    let mut i = 0usize;
+    while i + 10 <= bytes.len() {
+        if bytes[i..i + 4].iter().all(u8::is_ascii_digit)
+            && bytes[i + 4] == b'-'
+            && bytes[i + 5..i + 7].iter().all(u8::is_ascii_digit)
+            && bytes[i + 7] == b'-'
+            && bytes[i + 8..i + 10].iter().all(u8::is_ascii_digit)
+        {
+            let year: i64 = body[i..i + 4].parse().ok()?;
+            let month: i64 = body[i + 5..i + 7].parse().ok()?;
+            let day: i64 = body[i + 8..i + 10].parse().ok()?;
+            if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+                i += 10;
+                continue;
+            }
+            let (mut hour, mut minute, mut second) = (0i64, 0i64, 0i64);
+            // 可选时间部分：'T' 或空格 + HH:MM(:SS)?
+            let rest = &body[i + 10..];
+            let rb = rest.as_bytes();
+            if !rb.is_empty() && (rb[0] == b'T' || rb[0] == b' ') && rb.len() >= 5
+                && rb[1..3].iter().all(u8::is_ascii_digit)
+                && rb[3] == b':'
+                && rb[4..6].iter().all(u8::is_ascii_digit)
+            {
+                hour = rest[1..3].parse().ok()?;
+                minute = rest[4..6].parse().ok()?;
+                if rb.len() >= 9 && rb[6] == b':' && rb[7..9].iter().all(u8::is_ascii_digit) {
+                    second = rest[7..9].parse().ok()?;
+                }
+            }
+            // 时区尾巴：+0800 / +08:00 / Z / UTC → 0；其余（含 CST）→ +08 近似
+            let tz_rest = rest.to_lowercase();
+            let offset_s: i64 = if let Some(p) = tz_rest.find('+').or_else(|| tz_rest.find('-').filter(|_| i > 0)) {
+                let _ = p;
+                let tz: String = tz_rest
+                    .chars()
+                    .skip_while(|c| *c != '+' && *c != '-')
+                    .skip(1)
+                    .filter(|c| c.is_ascii_digit())
+                    .take(4)
+                    .collect();
+                if tz.len() == 4 {
+                    let h: i64 = tz[0..2].parse().unwrap_or(0);
+                    let m: i64 = tz[2..4].parse().unwrap_or(0);
+                    h * 3600 + m * 60
+                } else {
+                    8 * 3600
+                }
+            } else if tz_rest.contains("utc") || tz_rest.contains('z') {
+                0
+            } else {
+                8 * 3600
+            };
+            let base = days_from_civil(year, month, day);
+            let utc_ms = (base as i64) * 86_400_000 + hour * 3_600_000 + minute * 60_000 + second * 1000
+                - offset_s * 1000;
+            if utc_ms > 0 && (utc_ms as u64) > now_ms {
+                return Some(utc_ms as u64);
+            }
+            return None;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// 取文本尾部最近的 1~3 位数字（"resets in 47" → 47）
+fn num_before(head: &str) -> Option<u64> {
+    let digits: String = head
+        .chars()
+        .rev()
+        .skip_while(|c| c.is_whitespace())
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let n: u64 = digits.parse().ok()?;
+    if (1..6000).contains(&n) {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// days-from-civil (Howard Hinnant)：公历日期 → 自 1970-01-01 的天数
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+
+    #[test]
+    fn parses_zhipu_5h_notice() {
+        let now = 1_760_000_000_000;
+        let body = "You have exceeded the 5-hour usage quota. It will reset at 2026-10-12 19:11:41 +0800 CST.";
+        let ms = parse_reset_epoch_ms(body, now).unwrap();
+        // 2026-10-12 19:11:41 +0800 = 11:11:41 UTC = 1791805901000ms 附近
+        let expected = 1_791_803_501_000u64;
+        assert!((ms as i64 - expected as i64).abs() < 1_000, "got {ms}");
+        assert!(ms > now);
+    }
+
+    #[test]
+    fn parses_relative_minutes_and_hours() {
+        let now = 1_760_000_000_000;
+        assert_eq!(parse_reset_epoch_ms("resets in 47 minutes", now), Some(now + 47 * 60_000));
+        assert_eq!(parse_reset_epoch_ms("try again in 2 hours", now), Some(now + 2 * 3_600_000));
+    }
+
+    #[test]
+    fn rejects_garbage_and_past() {
+        let now = 1_760_000_000_000;
+        assert_eq!(parse_reset_epoch_ms("nothing here", now), None);
+        assert_eq!(parse_reset_epoch_ms("reset at 2001-01-01 00:00:00 +0800", now), None);
     }
 }
