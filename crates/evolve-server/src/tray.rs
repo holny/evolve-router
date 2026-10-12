@@ -823,12 +823,25 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     panel.setLevel(24);  // statusBar 级
     panel.setHidesOnDeactivate(true);
     panel.setBecomesKeyOnlyIfNeeded(true);
-    panel.setOpaque(false);
+    panel.setOpaque(true);
     panel.setHasShadow(true);
     // 内容 = 竖排 stack，固定四边 pin（扩 stack 曾有多约束冲突的老坑，contentView 固定尺寸即可）
     let content = NSView::new(mtm);
     content.setFrameSize(NSSize::new(340.0, 760.0));
     panel.setContentView(Some(content.as_nsview()));
+    // 底色（动态明暗）+ 圆角：layer-backed 12 → Stats 风格圆角面板
+    {
+        let bg: *mut AnyObject = msg_send![objc2_app_kit::NSColor::class(), windowBackgroundColor];
+        let _: () = msg_send![&panel, setBackgroundColor: bg];
+    }
+    content.setWantsLayer(true);
+    {
+        let lv: *mut AnyObject = msg_send![content.as_nsview(), layer];
+        if !lv.is_null() {
+            let _: () = msg_send![lv, setCornerRadius: 12f64];
+            let _: () = msg_send![lv, setMasksToBounds: true];
+        }
+    }
     let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[]), mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setSpacing(10.0);
