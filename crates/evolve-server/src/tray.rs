@@ -94,6 +94,7 @@ struct ProvRow {
     disabled: bool,
     pct: Option<i64>,
     tok24: u64,
+    last_used: Option<i64>,
 }
 
 fn snap() -> Snapshot {
@@ -216,9 +217,16 @@ async fn poll_data(tx: mpsc::Sender<Snapshot>) {
                         .and_modify(|v| *v = (*v).max(pct))
                         .or_insert(pct);
                 }
-                provs.push(ProvRow { key, kind, disabled, pct, tok24 });
+                let last_used = p["last_used_ms"]
+                    .as_i64()
+                    .or_else(|| p["last_used_ms"].as_f64().map(|f| f as i64))
+                    .filter(|&v| v > 0);
+                provs.push(ProvRow { key, kind, disabled, pct, tok24, last_used });
             }
-            provs.sort_by(|a, b| b.disabled.cmp(&a.disabled).then(b.tok24.cmp(&a.tok24)));
+            // 排序（用户裁决）：最近使用优先；无记录沉底；禁用殿后
+            provs.sort_by(|a, b| {
+                b.last_used.cmp(&a.last_used).then(b.disabled.cmp(&a.disabled))
+            });
             provs.truncate(8);
             s.providers = provs;
             s.plans = plans.into_iter().collect();
@@ -801,6 +809,10 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let popover = NSPopover::new(mtm);
     popover.setBehavior(NSPopoverBehavior::Transient);
     popover.setContentViewController(Some(&vc));
+    {
+        let sz = NSSize::new(340.0, 680.0);
+        let _: () = msg_send![popover, setPreferredContentSize: sz];
+    }
 
     let _ = UI.set(UiRefs {
         stack: MainPtr(Retained::as_ptr(&stack)),

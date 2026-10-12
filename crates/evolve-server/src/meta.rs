@@ -764,16 +764,18 @@ fn usage_5h_by_provider(
 /// 近 24h 每 Provider token 用量：事件回扫（单文件倒序，越过 24h 界即停；
 /// events.jsonl.1 轮转历史不计——本地量级下单文件通常远超 24h 覆盖）。
 /// /api/providers 与 /api/providers/status 共用，保证两个消费端同源。
+/// 返回 (各 Provider 近 24h tokens, 各 Provider 最近一次使用 ts_ms)
 fn tokens_24h_by_provider(
     snap: &[evolve_core::types::ModelRecord],
     events: &evolve_memory::events::EventLog,
     now_ms: u64,
-) -> std::collections::HashMap<String, u64> {
+) -> (std::collections::HashMap<String, u64>, std::collections::HashMap<String, i64>) {
     let mut out = std::collections::HashMap::new();
+    let mut last_used: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
     let prov_of_model: std::collections::HashMap<&str, &str> =
         snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
-    let Some(path) = events.path() else { return out };
-    let Ok(content) = std::fs::read_to_string(path) else { return out };
+    let Some(path) = events.path() else { return (out, last_used) };
+    let Ok(content) = std::fs::read_to_string(path) else { return (out, last_used) };
     let cutoff = (now_ms as i64) - 24 * 3600 * 1000;
     for line in content.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
@@ -788,8 +790,15 @@ fn tokens_24h_by_provider(
         let pt = v.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
         let ct = v.get("completion_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
         *out.entry(prov.to_string()).or_insert(0) += (pt + ct) as u64;
+        let ts = v.get("ts")
+                .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
+                .unwrap_or(0);
+        let e = last_used.entry(prov.to_string()).or_insert(0);
+        if ts > *e {
+            *e = ts;
+        }
     }
-    out
+    (out, last_used)
 }
 
 pub async fn api_providers_status(State(st): State<AppState>) -> Response {
@@ -800,7 +809,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
     let mut out: Vec<Value> = Vec::new();
     let snap = st.engine.catalog_snapshot();
-    let tok24 = tokens_24h_by_provider(&snap, &st.events, now_ms);
+    let (tok24, last_used) = tokens_24h_by_provider(&snap, &st.events, now_ms);
     use std::hash::{Hash, Hasher};
     let key_fp = |k: &str| {
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -862,6 +871,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             "cooldown_remaining_ms": cool,
             "available": cool.is_none(),
             "tokens_24h": tok24.get(key).copied().unwrap_or(0),
+            "last_used_ms": last_used.get(key).copied().unwrap_or(0),
             "fetched_models_count": pd.fetched_models.len(),
         }));
     }
@@ -880,6 +890,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             "models": Vec::<Value>::new(),
             "allowance_5h": ov.providers.get(&plan_key).and_then(|p| p.window_5h),
             "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
+            "last_used_ms": last_used.get(m.provider.as_str()).copied().unwrap_or(0),
         }));
         if let Some(arr) = entry.get_mut("models").and_then(|v| v.as_array_mut()) {
             arr.push(serde_json::Value::String(m.id.clone()));
@@ -930,7 +941,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     };
     // 1. 手动定义的（最优先——用户自己加的）
     let snap_all = st.engine.catalog_snapshot();
-    let tok24 = tokens_24h_by_provider(&snap_all, &st.events, now_ms);
+    let (tok24, last_used) = tokens_24h_by_provider(&snap_all, &st.events, now_ms);
     let credits5h = usage_5h_by_provider(&snap_all, &st.events, now_ms);
     for (key, pd) in &ov.providers {
         if pd.disabled { continue; }
@@ -967,6 +978,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "key_fp": pd.api_key.as_deref().map(key_fp).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
             "tokens_24h": tok24.get(key).copied().unwrap_or(0),
+            "last_used_ms": last_used.get(key).copied().unwrap_or(0),
             "soft_pct": soft_pct,
         }));
     }
@@ -1051,6 +1063,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "key_fp": m.key_values().first().map(|k| key_fp(k)).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
             "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
+            "last_used_ms": last_used.get(m.provider.as_str()).copied().unwrap_or(0),
             "soft_pct": soft_pct,
             "next_reset_epoch_ms": next_reset,
         }));
@@ -1080,6 +1093,15 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             }
             Some(i) => {
                 if let (Some(dst), Some(src)) = (merged[i].as_object_mut(), e.as_object()) {
+                // idempotent used: last_used 取 max
+                if let (Some(dl), Some(sl)) = (
+                    dst.get("last_used_ms").and_then(|v| v.as_i64()),
+                    src.get("last_used_ms").and_then(|v| v.as_i64()),
+                ) {
+                    if sl > dl {
+                        dst.insert("last_used_ms".into(), json!(sl));
+                    }
+                }
                 // 求和字段：used_5h 浮点（两位舍入），tokens/count 整数
                 for k in ["used_5h", "tokens_24h", "model_count"] {
                     if k == "used_5h" {
