@@ -811,7 +811,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     popover.setContentViewController(Some(&vc));
     {
         let sz = NSSize::new(340.0, 680.0);
-        let _: () = msg_send![popover, setPreferredContentSize: sz];
+        let _: () = msg_send![&popover, setPreferredContentSize: sz];
     }
 
     let _ = UI.set(UiRefs {
