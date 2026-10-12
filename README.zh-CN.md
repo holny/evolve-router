@@ -2,9 +2,7 @@
 
 <img src="docs/assets/logo.png" width="128" alt="EvolveRouter logo">
 
-# EvolveRouter
-
-**本地优先的 LLM 路由网关，内建决策模型，每次请求都在进化。**
+# EvolveRouter：先思考，再路由。每一次请求，都让路由更聪明。
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
@@ -16,13 +14,11 @@
 
 ---
 
-> **不选最好的模型——选最合适的。**
+> **省下 Token，花在刀刃上。**
 >
-> 一个本地部署的 LLM 智能路由网关：决策模型逐请求判定任务画像，飞轮从每次结果中学习，科学公式保证每次决策可追溯。**你的数据从不出主机。**
+> EvolveRouter 是一个**本地优先的自进化 LLM 路由网关**，部署在你的 Agent 和所有模型之间。可插拔的**决策模型**在消耗任何 Token 之前，先对每个请求进行 **8 维度判断**——领域、难度、视觉需求、琐碎度、工具密度、风险、会话深度、尺寸。**4 层反馈飞轮**从每次结果中学习，越用越准。所有决策**本地、透明、可审计**：JSONL 事件日志、响应头 `x-ev-model / x-ev-reason / x-ev-decision-id`，以及零构建仪表盘 `127.0.0.1:8787`。**数据永不离开本机。** 一个 **6.7 MB Rust 单二进制**，零运行时依赖，无需 Docker，无需 Python，无需云端。决策模型不可用时自动降级为多语言启发式，**路由永不阻塞**。兼容 **OpenAI/Anthropic 模型**及 **opencode、Claude Code、Codex、Pi、openclaw、hermes** 等编程 Agent。
 
-**EvolveRouter** 是一个本地优先的智能路由网关，架在你的 Agent 与所有 LLM Provider 之间——opencode / Claude Code / Codex / Pi / openclaw / hermes / dsh 及任何 OpenAI、Anthropic 兼容客户端都开箱接入。它不把每个请求都发给「最好的」模型——而是按任务画像（可插拔决策模型 + 多语言启发式第二意见，取严融合，逐请求判 8 维信号）**实时判 每次请求最合适的那一个**，并叠加方案画像（每方案自有货币先计价再评分）。**每次请求都喂飞轮**，路由越用越准。
-
-差异化在于——决策**本地、过程透明、可审计**：每条边、每个分、每道降级都带名带值（`x-ev-model / x-ev-reason / x-ev-decision-id` 头 + JSONL 事件日志 + 零构建面板）；用户数据从不出主机。决策模型不可达时启发式接管，**路由永不阻塞**。
+EvolveRouter 是一个本地优先的 LLM 路由网关，核心理念很简单：先思考，再路由；每一次请求，都让路由更聪明。与静态规则路由不同，它通过可插拔的决策模型判断每个请求的任务画像，动态选择最合适的模型，并基于真实结果数据持续优化路由策略。4 层反馈飞轮把每次请求都变成学习信号，越用越准。最终效果是：省下 Token，花在刀刃上。所有决策完全可审计——本地 JSONL 日志、响应头、零构建仪表盘。一个 6.7 MB Rust 单二进制，零云端依赖，无需 Docker，无需 Python。配额感知预算保护。兼容所有 OpenAI/Anthropic 模型及编程 Agent。你的提示词永不离开本机。
 
 ![EvolveRouter 架构](docs/assets/architecture.svg)
 

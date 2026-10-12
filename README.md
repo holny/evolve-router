@@ -2,9 +2,7 @@
 
 <img src="docs/assets/logo.png" width="128" alt="EvolveRouter logo">
 
-# EvolveRouter
-
-**A local LLM routing gateway with a decision model at its core. It evolves with every request.**
+# EvolveRouter: Think Before You Route. Evolve With Every Request.
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
@@ -16,15 +14,13 @@
 
 ---
 
-> **Not the best model — the right one, for every request.**
+> **Save tokens. Spend them where they matter.**
 >
-> A local-first LLM routing gateway: a decision model judges every request's task profile, a flywheel learns from every outcome, and a scientific formula keeps every decision traceable. **Your data never leaves your machine.**
+> EvolveRouter is a **local-first, self-evolving LLM router** that sits between your agent and every model you use. A pluggable **decision model** judges each request across **8 signals** — domain, difficulty, vision needs, triviality, tool density, stakes, session depth, size — before a single token is spent. A **4-layer feedback flywheel** learns from every outcome, so routing sharpens the more you use it. Every decision is **local, transparent, and auditable**: JSONL event logs, `x-ev-model / x-ev-reason / x-ev-decision-id` response headers, and a zero-build dashboard at `127.0.0.1:8787`. **Your data never leaves the host.** One **6.7 MB Rust binary**, zero runtime dependencies, no Docker, no Python, no cloud. When the decision model is unreachable, a multilingual heuristic takes over and **routing never blocks**. Works with **OpenAI & Anthropic compatible models** and coding agents like **opencode, Claude Code, Codex, Pi, openclaw, hermes**.
 
 ![EvolveRouter architecture](docs/assets/architecture.svg)
 
-**EvolveRouter** is a local-first routing gateway that sits between your Agent and every LLM provider you use. It doesn't ship every request to the "best" model — it routes each one to the **most suitable** one, judged on the fly by a **decision model** (any System-One-compatible backend — cloud or self-hosted — plus a multilingual heuristic second opinion, take-conservative fusion) against what the task actually needs and what your providers can afford right now. Every request feeds the flywheel, so the routing gets sharper the more you use it.
-
-What makes it different: every decision is **local, transparent, and auditable** — JSONL event log, response headers (`x-ev-model / x-ev-reason / x-ev-decision-id`), zero-build dashboard. User data never leaves the host. And when the decision model is unavailable, the heuristic takes over and **routing never blocks**.
+EvolveRouter is a local-first LLM routing gateway built on a simple idea: think before you route, and evolve with every request. Instead of static rules, a pluggable decision model judges every request's task profile, dynamically selects the most suitable model, and continuously optimizes routing from real-world outcome data. A 4-layer feedback flywheel turns every request into a learning signal, so the router gets smarter the more you use it. The result: you save tokens and spend them where they matter. Every decision is fully auditable — local JSONL logs, response headers, and a zero-build dashboard. One 6.7 MB Rust binary, zero cloud dependency, no Docker, no Python. Quota-aware budget protection. Works with all OpenAI/Anthropic compatible models and coding agents. Your prompts never leave your machine.
 
 
 ## Why not another proxy
