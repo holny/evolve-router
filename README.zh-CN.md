@@ -18,8 +18,6 @@
 >
 > EvolveRouter 是一个**本地优先的自进化 LLM 路由网关**，部署在你的 Agent 和所有模型之间。可插拔的**决策模型**在消耗任何 Token 之前，先对每个请求进行 **8 维度判断**——领域、难度、视觉需求、琐碎度、工具密度、风险、会话深度、尺寸。**4 层反馈飞轮**从每次结果中学习，越用越准。所有决策**本地、透明、可审计**：JSONL 事件日志、响应头 `x-ev-model / x-ev-reason / x-ev-decision-id`，以及零构建仪表盘 `127.0.0.1:8787`。**数据永不离开本机。** 一个 **6.7 MB Rust 单二进制**，零运行时依赖，无需 Docker，无需 Python，无需云端。决策模型不可用时自动降级为多语言启发式，**路由永不阻塞**。兼容 **OpenAI/Anthropic 模型**及 **opencode、Claude Code、Codex、Pi、openclaw、hermes** 等编程 Agent。
 
-EvolveRouter 是一个本地优先的 LLM 路由网关，核心理念很简单：先思考，再路由；每一次请求，都让路由更聪明。与静态规则路由不同，它通过可插拔的决策模型判断每个请求的任务画像，动态选择最合适的模型，并基于真实结果数据持续优化路由策略。4 层反馈飞轮把每次请求都变成学习信号，越用越准。最终效果是：省下 Token，花在刀刃上。所有决策完全可审计——本地 JSONL 日志、响应头、零构建仪表盘。一个 6.7 MB Rust 单二进制，零云端依赖，无需 Docker，无需 Python。配额感知预算保护。兼容所有 OpenAI/Anthropic 模型及编程 Agent。你的提示词永不离开本机。
-
 ![EvolveRouter 架构](docs/assets/architecture.svg)
 
 *各 Agent 指向单一端点 `model = "auto"`。双判官（决策模型 + 启发式）逐请求评分；飞轮把每次结果喂回排名；每个 Provider 方案按各自货币计价与预算。[编辑源文件](docs/assets/architecture.excalidraw)。*

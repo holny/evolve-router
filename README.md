@@ -20,8 +20,6 @@
 
 ![EvolveRouter architecture](docs/assets/architecture.svg)
 
-EvolveRouter is a local-first LLM routing gateway built on a simple idea: think before you route, and evolve with every request. Instead of static rules, a pluggable decision model judges every request's task profile, dynamically selects the most suitable model, and continuously optimizes routing from real-world outcome data. A 4-layer feedback flywheel turns every request into a learning signal, so the router gets smarter the more you use it. The result: you save tokens and spend them where they matter. Every decision is fully auditable — local JSONL logs, response headers, and a zero-build dashboard. One 6.7 MB Rust binary, zero cloud dependency, no Docker, no Python. Quota-aware budget protection. Works with all OpenAI/Anthropic compatible models and coding agents. Your prompts never leave your machine.
-
 
 ## Why not another proxy
 
