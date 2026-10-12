@@ -16,10 +16,10 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSButton, NSColor,
-    NSControlStateValue, NSFont, NSImage, NSLayoutAttribute, NSPopover, NSPopoverBehavior,
-    NSProgressIndicator, NSStackView, NSStatusBar, NSStatusItem, NSSwitch, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView, NSWorkspace,
+    NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
+    NSControlStateValue, NSFont, NSImage, NSLayoutAttribute, NSPanel, NSProgressIndicator,
+    NSStackView, NSStatusBar, NSStatusItem, NSSwitch, NSTextField,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindowStyleMask, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer, NSUserDefaults};
 use serde_json::Value;
@@ -35,10 +35,13 @@ static ACTIONS: std::sync::LazyLock<Mutex<HashMap<isize, Box<dyn Fn() + Send>>>>
 static GW_TX: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
 static TRAY_CFG: Mutex<Option<(Option<std::path::PathBuf>, u16)>> = Mutex::new(None);
 static PULSE: AtomicBool = AtomicBool::new(false);
+static SHOWN: AtomicBool = AtomicBool::new(false);
 static TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_HEALTHY: AtomicBool = AtomicBool::new(true);
 static SINK: OnceLock<Retained<ActionSink>> = OnceLock::new();
 static TX: OnceLock<mpsc::Sender<Snapshot>> = OnceLock::new();
+// NSStatusItem 保活（仅主线程触碰）
+static STATUS_ITEM: OnceLock<MainPtr<NSStatusItem>> = OnceLock::new();
 
 // 跨线程句柄（仅主线程解引用）
 struct MainPtr<T: ?Sized>(*const T);
@@ -49,7 +52,7 @@ struct UiRefs {
     stack: MainPtr<NSStackView>,
     button: MainPtr<NSButton>,
     switch_ctl: MainPtr<NSSwitch>,
-    popover: MainPtr<NSPopover>,
+    panel: MainPtr<NSPanel>,
 }
 static UI: OnceLock<UiRefs> = OnceLock::new();
 
@@ -317,6 +320,7 @@ define_class!(
         #[unsafe(method(fire:))]
         fn fire(&self, sender: *mut AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
+
             if let Some(f) = ACTIONS.lock().unwrap().get(&tag) {
                 f();
             }
@@ -332,6 +336,13 @@ impl ActionSink {
 
 fn register(tag: isize, f: impl Fn() + Send + 'static) {
     ACTIONS.lock().unwrap().insert(tag, Box::new(f));
+}
+
+fn tray_dbg(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+        let _ = writeln!(f, "{} {}", now_hhmmss(), msg);
+    }
 }
 
 fn shell(cmd: &str) {
@@ -692,17 +703,34 @@ fn open_url(url: &str) {
 
 fn register_actions() {
     register(TAG_STATUS, || {
-        let Some(ui) = UI.get() else { return };
+        tray_dbg("[click] fire");
+        let Some(ui) = UI.get() else { tray_dbg("[click] UI miss"); return };
         unsafe {
-            let pop = &*ui.popover.0;
-            if pop.isShown() {
-                pop.performClose(None);
+            let panel = unsafe { &*ui.panel.0 };
+            let btn = unsafe { &*ui.button.0 };
+            tray_dbg("[click] deref ok");
+            if panel.isVisible() {
+                tray_dbg("[click] visible→hide");
+                panel.orderOut(None);
             } else {
-                let btn = &*ui.button.0;
-                let _: () = msg_send![pop,
-                    showRelativeToRect: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
-                    ofView: btn
-                    preferredEdge: 2usize]; // NSRectEdgeMinY
+                tray_dbg("[click] hidden→show");
+                // 定位：状态按钮正下方；高度按内容实测伸缩（clamp 到安全范围）
+                let fr: NSRect = msg_send![btn, frame];
+                let w: Retained<objc2_app_kit::NSWindow> = msg_send![btn, window];
+                let screen: NSRect = msg_send![&w, convertRectToScreen: fr];
+                let stack = unsafe { &*ui.stack.0 };
+                let fit = stack.fittingSize().height + 28.0;
+                // 主屏可给空间（上方留菜单栏 24 + 余量 60）
+                let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
+                let md: NSRect = msg_send![main, frame];
+                let max_h = (md.size.height - 100.0).max(200.0);
+                let ph = fit.clamp(140.0, max_h);
+                {
+                    let sz = NSSize::new(340.0, ph);
+                    let _: () = msg_send![panel, setFrameSize: sz];
+                }
+                panel.orderFrontRegardless();
+                tray_dbg("[click] shown");
             }
         }
     });
@@ -771,6 +799,7 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
 
 unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+    let _ = STATUS_ITEM.set(MainPtr(Retained::as_ptr(&status_item)));
     let button = status_item.button(mtm).unwrap();
     let icon = load_icon(mtm);
     button.setImage(Some(&icon));
@@ -783,15 +812,34 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let _: () = msg_send![&button, setAction: sel!(fire:)];
     let _: () = msg_send![&button, setTag: TAG_STATUS];
 
-    // 面板：容器 = 竖排 NSStackView 本体（宽度约束唯一；高度由 fittingSize 供给 popover）
+    // 面板：Stats 同款 borderless 非激活 NSPanel（不用 NSPopover——点击即显、无变尺寸坑）
+    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 760.0)),
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSBackingStoreType::Buffered,
+        false,
+    );
+    panel.setLevel(24);  // statusBar 级
+    panel.setHidesOnDeactivate(true);
+    panel.setBecomesKeyOnlyIfNeeded(true);
+    panel.setOpaque(false);
+    panel.setHasShadow(true);
+    // 内容 = 竖排 stack，固定四边 pin（扩 stack 曾有多约束冲突的老坑，contentView 固定尺寸即可）
+    let content = NSView::new(mtm);
+    content.setFrameSize(NSSize::new(340.0, 760.0));
+    panel.setContentView(Some(content.as_nsview()));
     let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[]), mtm);
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    stack.setSpacing(9.0);
+    stack.setSpacing(10.0);
     stack.setAlignment(NSLayoutAttribute::Leading);
     stack.setTranslatesAutoresizingMaskIntoConstraints(false);
-    stack.widthAnchor().constraintEqualToConstant(340.0).setActive(true);
-    let container: Retained<NSView> =
-        Retained::retain(stack.as_nsview() as *const NSView as *mut NSView).unwrap();
+    content.addSubview(stack.as_nsview());
+    // 四边 pin（12pt 边距）——contentView 尺寸固定，无冲突面
+    stack.topAnchor().constraintEqualToAnchor_constant(&content.topAnchor(), 14.0).setActive(true);
+    stack.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 14.0).setActive(true);
+    content.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), 14.0).setActive(true);
+    content.bottomAnchor().constraintEqualToAnchor_constant(&stack.bottomAnchor(), 14.0).setActive(true);
 
     // 自启开关（持久实例；未设置过默认开）
     let sw = NSSwitch::new(mtm);
@@ -804,34 +852,28 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     let _: () = msg_send![&sw, setAction: sel!(fire:)];
     let _: () = msg_send![&sw, setTag: TAG_SWITCH];
 
-    let vc = objc2_app_kit::NSViewController::new(mtm);
-    vc.setView(container.as_nsview());
-    let popover = NSPopover::new(mtm);
-    popover.setBehavior(NSPopoverBehavior::Transient);
-    popover.setContentViewController(Some(&vc));
-    {
-        let sz = NSSize::new(340.0, 680.0);
-        let _: () = msg_send![&popover, setContentSize: sz];
-    }
-
     let _ = UI.set(UiRefs {
-        stack: MainPtr(Retained::as_ptr(&stack)),
+        stack: MainPtr(Retained::as_ptr(&stack) as *const NSStackView as *mut NSStackView),
         button: MainPtr(Retained::as_ptr(&button) as *const NSButton as *mut NSButton),
-        switch_ctl: MainPtr(Retained::as_ptr(&sw)),
-        popover: MainPtr(Retained::as_ptr(&popover)),
+        switch_ctl: MainPtr(Retained::as_ptr(&sw) as *const NSSwitch as *mut NSSwitch),
+        panel:MainPtr(Retained::as_ptr(&panel) as *const NSPanel as *mut NSPanel),
     });
 
     register_actions();
 
     // 初始渲染 + 轮询定时器
-    if std::env::var("EVO_TRAY_MIN").is_err() { render(&snap()); }
+    render(&snap());
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
     let block = block2::RcBlock::new(move || {
-        eprintln!("[T] tick");
         let poll_tx = TX.get().cloned();
-        eprintln!("[T] tick-2 send-target ok");
         let n = TICK.fetch_add(1, Ordering::Relaxed);
+        // 调试自触发：EVO_AUTOTOGGLE=1 时首个 tick 直接弹面板
+        if n == 1 && std::env::var("EVO_AUTOTOGGLE").is_ok() {
+            if let Some(sink) = SINK.get() {
+                let _: () = unsafe { msg_send![sink, fire: std::ptr::null::<AnyObject>()] };
+            }
+        }
         if n % 4 == 1 {
             if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
                 rt.spawn(poll_live(t));
@@ -861,9 +903,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
         } else {
             PULSE.store(false, Ordering::Relaxed);
         }
-        eprintln!("[T] before icon");
         apply_icon(&s, PULSE.load(Ordering::Relaxed));
-        eprintln!("[T] after icon");
         // 健康态变化即时刷新按钮文案
         if s.healthy != LAST_HEALTHY.load(Ordering::Relaxed) {
             LAST_HEALTHY.store(s.healthy, Ordering::Relaxed);
@@ -878,6 +918,17 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     std::mem::forget(block);
 
     let _: () = msg_send![app, setActivationPolicy: NSApplicationActivationPolicy::Accessory];
+    // 对象保活：popover/status_item/button/stack/sw 等的 Retained 是 build_ui 局部
+    // ——函数返回即 drop = NSPopover/NSStatusItem 释放 = 后续点击全在 use-after-free
+    // （ObjC forwarding 对尸内地址抛"unrecognized selector"， 还会被 AppKit 吞）。
+    // 单例 app 一生泄漏一次，直接 forget 赖活。
+    std::mem::forget(status_item);
+    std::mem::forget(panel);
+    std::mem::forget(content);
+    std::mem::forget(button);
+    std::mem::forget(sw);
+    std::mem::forget(stack);
+
 }
 
 // ── 入口 ──
