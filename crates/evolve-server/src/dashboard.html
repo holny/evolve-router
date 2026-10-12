@@ -15,7 +15,7 @@
 <style>
 :root {
   --bg:#0f172a; --card:#1b2336; --card2:#272f42; --border:#2a3549; --border-hover:#475569;
-  --fg:#f8fafc; --dim:#94a3b8; --green:#22c55e; --red:#ef4444; --amber:#eab308; --blue:#60a5fa;
+  --fg:#f8fafc; --dim:#94a3b8; --green:#22c55e; --red:#f87171; --amber:#eab308; --blue:#60a5fa;
   --row-line:#232c42; --group-h:#202a40; --input-bg:#0f172a; --feed-detail-bg:#151d30;
   --tab-on-bg:#1e3a5f; --badge-ok-bg:#12261e; --badge-dead-bg:#3d1a1c; --pbadge-bg:#1e2c47;
   --pbadge-warn-bg:#3d1a1c; --hl-from:#14352a; --selection:#1e3a5f;
@@ -26,17 +26,6 @@
   color-scheme: dark;
 }
 :root[data-theme="light"] {
-  --bg:#f1f5f9; --card:#ffffff; --card2:#f1f5f9; --border:#e2e8f0; --border-hover:#94a3b8;
-  --fg:#0f172a; --dim:#64748b; --green:#16a34a; --red:#dc2626; --amber:#d97706; --blue:#2563eb;
-  --row-line:#eef2f7; --group-h:#f8fafc; --input-bg:#ffffff; --feed-detail-bg:#f8fafc;
-  --tab-on-bg:#dbeafe; --badge-ok-bg:#dcfce7; --badge-dead-bg:#fee2e2; --pbadge-bg:#dbeafe;
-  --pbadge-warn-bg:#fee2e2; --hl-from:#dcfce7; --selection:#bfdbfe;
-  --t1:#0f172a; --t2:#2563eb; --wf-text:#ffffff;
-  --shadow:0 1px 3px rgba(15,23,42,.06), 0 6px 18px rgba(15,23,42,.05);
-  --glass:rgba(255,255,255,.78); --glass-border:rgba(15,23,42,.08);
-  color-scheme: light;
-}
-:root[data-theme="light"] {
   --bg:#f6f8fa; --card:#ffffff; --card2:#f3f4f6; --border:#d0d7de; --border-hover:#8c959f;
   --fg:#1f2328; --dim:#656d76; --green:#1a7f37; --red:#cf222e; --amber:#9a6700; --blue:#0969da;
   --row-line:#eaeef2; --group-h:#f6f8fa; --input-bg:#ffffff; --feed-detail-bg:#f6f8fa;
@@ -44,11 +33,12 @@
   --pbadge-warn-bg:#ffebe9; --hl-from:#d4f7dc; --selection:#b6e3ff;
   --t1:#1f2328; --t2:#0969da; --wf-text:#ffffff;
   --shadow:0 1px 3px rgba(31,35,40,.08), 0 4px 14px rgba(31,35,40,.07);
+  --glass:rgba(255,255,255,.78); --glass-border:rgba(31,35,40,.09);
   color-scheme: light;
 }
 * { box-sizing:border-box; margin:0; padding:0; }
 body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"PingFang SC","Helvetica Neue",sans-serif;
-       padding:18px 24px 28px; max-width:1560px; margin:0 auto; transition:background .2s, color .2s; }
+       padding:0 24px 28px; max-width:1560px; margin:0 auto; transition:background .2s, color .2s; }
 ::selection { background:var(--selection); }
 ::-webkit-scrollbar { width:9px; height:9px; }
 ::-webkit-scrollbar-thumb { background:var(--border); border-radius:5px; border:2px solid var(--bg); }
@@ -58,7 +48,6 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
 .topbar { position:sticky; top:0; z-index:100; display:flex; align-items:center; gap:16px; flex-wrap:wrap;
           margin:0 -24px 16px; padding:14px 24px 12px; border-bottom:1px solid var(--glass-border);
           background:var(--glass); backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px); }
-body { padding-top:0; }
 .topbar h1 { font-size:19px; letter-spacing:.2px;
              background:linear-gradient(90deg,var(--t1),var(--t2) 140%); -webkit-background-clip:text; background-clip:text; color:transparent; }
 :focus-visible { outline:2px solid var(--blue); outline-offset:2px; border-radius:4px; }
@@ -114,7 +103,7 @@ body { padding-top:0; }
 .au-fac { text-align:center; }
 .au-fac .au-bar { height:5px; flex:none; display:block; margin-bottom:3px; }
 .au-fac .fv { font-size:9.5px; color:var(--fg); font-variant-numeric:tabular-nums; }
-.au-fac .fk { font-size:9px; color:var(--dim); opacity:.8; }
+.au-fac .fk { font-size:9px; color:var(--dim); }
 .au-mult { display:flex; gap:5px; margin-top:4px; flex-wrap:wrap; }
 .au-mult .m { font-size:10px; padding:0 6px; border-radius:4px; background:var(--card2); color:var(--dim); font-variant-numeric:tabular-nums; }
 .au-mult .m.hot { color:var(--amber); background:color-mix(in srgb, var(--amber) 12%, transparent); }
@@ -143,7 +132,7 @@ body { padding-top:0; }
 .feed-ev.sel .feed-row { background:color-mix(in srgb, var(--blue) 10%, transparent); }
 .feed-ev.sel .feed-row .m { font-weight:600; }
 .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin-bottom:14px;
-        box-shadow:var(--shadow); transition:border-color .15s; }
+        box-shadow:var(--shadow); transition:border-color .15s; overflow-x:auto; }
 .card:hover { border-color:var(--border-hover); }
 .card h2 { font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:.6px; margin-bottom:10px;
            border-bottom:1px solid var(--row-line); padding-bottom:8px; }
@@ -808,7 +797,7 @@ function linkView(e){
     const tried = e.attempted.map(m => {
       const fail = (e.skipped||[]).find(s => s.startsWith(m));
       const failTxt = fail ? ' '+esc(fail.replace(m, '').replace(/^[\[\(]/, '(')) : '';
-      return '<span style="display:inline-block;padding:1px 6px;border:1px solid var(--border);border-radius:3px;margin:1px;font-size:10px;color:#bbb">'+esc(shortId(m))+failTxt+'</span>';
+      return '<span style="display:inline-block;padding:1px 6px;border:1px solid var(--border);border-radius:3px;margin:1px;font-size:10px;color:var(--dim)">'+esc(shortId(m))+failTxt+'</span>';
     }).join(' ');
     parts.push('<div class="lk-h">'+esc(t('sec_matrix'))+' <span class="dim2">(全灭 · 降级链试过)</span></div>' +
       '<div style="line-height:1.8">'+tried+'</div>');
@@ -868,7 +857,7 @@ function addRow(e){
   const row = document.createElement('div');
   row.className = 'feed-ev';
   row.innerHTML = '<div class="feed-row">' +
-    '<span class="t">'+timeStr(new Date())+'</span>' +
+    '<span class="t">'+timeStr(e.ts ? new Date(e.ts) : new Date())+'</span>' +
     '<span class="pill badge '+badge+'">'+e.status+'</span>' +
     '<span class="m" title="'+esc(e.chosen)+'">'+esc(e.chosen)+'</span>' +
     feedMetrics(e) +
@@ -884,7 +873,7 @@ function addRow(e){
   });
   const g = groupBlock(e);
   g.count++;
-  g.h.querySelector('.cnt').textContent = g.count+' '+t('f_entries')+' · '+timeStr(new Date());
+  g.h.querySelector('.cnt').textContent = g.count+' '+t('f_entries')+' · '+timeStr(e.ts ? new Date(e.ts) : new Date());
   g.b.prepend(row);
   lastAct[e.chosen] = {a: badge === 'ok' ? 'c' : 'f', t: Date.now()};
   while (g.b.children.length > 50) { if (g.b.lastChild) g.b.removeChild(g.b.lastChild); }
@@ -1099,7 +1088,9 @@ function renderAutopsy(e){
     const rest = e.filtered.filter(fl => !chainRel.includes(fl.model)).slice(0, Math.max(1, 3-chainBad.length));
     const shown = chainBad.concat(rest).filter(Boolean).map(fl =>
       '<span title="'+esc(fl.model)+'">'+esc(shortId(fl.model))+'</span>（'+esc(causeLocal(fl.cause))+'）').join('、 ');
-    L.push('<details style="margin-top:8px"><summary class="dim2" style="cursor:pointer">'+esc(t('st_filtered_head'))+'（'+total+'，'+esc(t('au_filters_n').replace('{n}',''))+'示 '+Math.min(total, chainBad.length+rest.length)+'）</summary>' +
+    const shownN = Math.min(total, chainBad.length+rest.length);
+    L.push('<details style="margin-top:8px"><summary class="dim2" style="cursor:pointer">'+esc(t('st_filtered_head')) +
+      (lang==='zh' ? '（共 '+total+' · 示 '+shownN+'）' : ' ('+total+' total · showing '+shownN+')') + '</summary>' +
       '<div class="dim2" style="margin-top:4px;line-height:1.7">' + shown + (total > chainBad.length+rest.length ? ' …' : '') + '</div></details>');
   }
 
@@ -1137,7 +1128,7 @@ function renderDyn(){
     const pkShort = {'api':'API', coding:'CP', token:'TP', agent:'AP'}[s.plan_kind] || '';
     const pkFull = {'api':'pk_api', coding:'pk_coding', token:'pk_token', agent:'pk_agent'}[s.plan_kind];
     const pkBadge = pkShort ? ' <span class="pbadge dim2" title="'+esc(t(pkFull))+'">'+pkShort+'</span>' : '';
-    const src = '<span'+(degraded?' style="color:var(--red)" title="⚠ '+esc(t('allnormal')).replace(/（.*/,'')+'"':'')+'>'+esc(srcLabel(s.source))+(degraded?' ⚠':'')+'</span>'+pkBadge;
+    const src = '<span'+(degraded?' style="color:var(--red)" title="'+(lang==='zh'?'⚠ 该模型全部 key 处于冷却或不可用':'⚠ all keys cooling down or unavailable')+'"':'')+'>'+esc(srcLabel(s.source))+(degraded?' ⚠':'')+'</span>'+pkBadge;
     const tc = s.tool_calls || {};
     const toolRate = tc.total ? Math.round(100*(tc.valid_json/tc.total))+'%' : '-';
     const tok = '<div title="'+esc(t('t_actual'))+'">'+fmtK(s.prompt_tokens??0)+t('s_in')+' '+fmtK(s.completion_tokens??0)+t('s_out')+'</div>' +
@@ -1242,7 +1233,6 @@ function renderWheel(){
     fetch('/api/weight', {method:'POST', headers:{'content-type':'application/json'},
       body: JSON.stringify({model: el.dataset.wmodel, weight: num})}).then(refresh);
   }));
-  wb.querySelectorAll('td.mxm').forEach(el => el.addEventListener('click', () => jumpToWheel(el.dataset.jump)));
 }
 const lastAct = {};
 function jumpToWheel(model){
@@ -1355,14 +1345,11 @@ function renderProviders(){
     const fetchN = typeof p.fetched_models === 'number' ? p.fetched_models
       : (typeof p.model_count === 'number' ? p.model_count
       : (p.fetched_models ? String(p.fetched_models).split(',').filter(s => s.trim()).length : 0));
-    // review：档位徽章化（lite/pro/max/go/go-plus），额度并入右侧窗口栏——
-    // 不再用 "(pro · -)" 文字摘要（- 是空额度，用户不可读）
     const tierColors = {lite:'#64748b', pro:'var(--blue)', max:'var(--amber)', go:'var(--green)', 'go-plus':'var(--green)'};
     const tierColor = tierColors[p.tier] || 'var(--dim)';
     const tierBadge = p.tier
       ? '<span class="pbadge" style="background:var(--card2);color:'+tierColor+'">'+esc(tName)+'</span>'
       : '';
-    const fetch = fetchN;
     // 配额展示：5h 额度 + 已用 + 进度条 + 下次重置
     const allowance = (p.windows && p.windows['5h']) || p.allowance;
     const used = p.used_5h || 0;
@@ -1477,7 +1464,7 @@ function renderProviders(){
             : '<button class="lang-btn" data-pv-del-disc="'+esc(p.key)+'" data-pv-url="'+esc(p.base_url||'')+'" style="border-color:var(--red);color:var(--red)">'+esc(t('pv_delete'))+'</button>')
       + '</div>'
       + '<div class="dim2" style="margin-top:4px;font-size:11px">'
-      +   esc(p.base_url || '') + ' · ' + esc(p.protocol || 'openai') + ' · ' + fetch + ' models'
+      +   esc(p.base_url || '') + ' · ' + esc(p.protocol || 'openai') + ' · ' + fetchN + ' models'
       + '</div>'
       + budgetHtml
       + provHtml
@@ -1606,6 +1593,13 @@ function refreshProvider(){
     }));
 }
 document.getElementById('pv-add-btn').addEventListener('click', () => openProviderDrawer('', true));
+{
+  const drawer = document.getElementById('pv-drawer');
+  drawer.addEventListener('click', ev => { if (ev.target === drawer) drawer.style.display = 'none'; });
+  document.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape' && drawer.style.display === 'flex') drawer.style.display = 'none';
+  });
+}
 let pvScanTimer = null;
 function pollScanProgress(){
   fetch('/api/providers/scan-progress').then(r => r.json()).then(j => {
@@ -1737,7 +1731,6 @@ async function refresh(){
     renderDyn();
     renderHealthQuota();
     renderWheel();
-    renderTrends();
   } catch(_){}
 }
 
@@ -1770,7 +1763,9 @@ es.onmessage = ev => { try { addRow(JSON.parse(ev.data)); } catch(_){} };
     const light = cur === 'light';
     if (sun) sun.style.display = light ? '' : 'none';
     if (moon) moon.style.display = light ? 'none' : '';
-    btn.title = light ? '白天模式（点击切换黑夜）' : '黑夜模式（点击切换白天）';
+    btn.title = light
+      ? (lang === 'zh' ? '明亮模式（点击切换暗色）' : 'Light mode (click to switch to dark)')
+      : (lang === 'zh' ? '暗色模式（点击切换明亮）' : 'Dark mode (click to switch to light)');
   };
   sync();
   btn.addEventListener('click', () => {

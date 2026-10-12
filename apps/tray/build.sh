@@ -1,19 +1,27 @@
 #!/bin/bash
-# EvolveRouter 单二进制打包/安装：target/release/evo-router → .app 壳（argv0 免参自动 tray 模式）
+# EvolveRouter B-路线打包：Swift 壳（MenuBarExtra 原生面板）+ Rust 网关 helper → 双 Mach-O 的 .app
+# 结构: Contents/MacOS/{EvolveRouter(壳,exe) evo-router(serve helper)}
 # 用法: apps/tray/build.sh [--install]
 set -euo pipefail
 cd "$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd ../.. && pwd)"
 APP_NAME="EvolveRouter"
-BIN="$ROOT/target/release/evo-router"
+SHELL_BIN="apps/tray/.build/release/evolve-router-tray"
+GATEWAY_BIN="$ROOT/target/release/evo-router"
 
-echo "[1/2] cargo build（workspace，tray 默认 feature）..."
+echo "[1/4] cargo build（workspace，网关 helper）..."
 (cd "$ROOT" && cargo build --release)
 
-echo "[2/2] 组装 ${APP_NAME}.app（同一 evo-router 二进制 + Info 壳）..."
+echo "[2/4] swift build（壳，MenuBarExtra 原生面板）..."
+swift build -c release --package-path "$ROOT/apps/tray"
+[[ -f "$ROOT/$SHELL_BIN" ]] || { echo "壳二进制缺失: $SHELL_BIN"; exit 1; }
+
+echo "[3/4] 组装 ${APP_NAME}.app（双二进制 + Info 壳）..."
 APP_DIR="build/${APP_NAME}.app/Contents"
 rm -rf "build/${APP_NAME}.app" && mkdir -p "$APP_DIR/MacOS" "$APP_DIR/Resources"
-cp "$BIN" "$APP_DIR/MacOS/${APP_NAME}"
+cp "$ROOT/$SHELL_BIN" "$APP_DIR/MacOS/${APP_NAME}"
+cp "$GATEWAY_BIN" "$APP_DIR/MacOS/evo-router"
+chmod +x "$APP_DIR/MacOS/${APP_NAME}" "$APP_DIR/MacOS/evo-router"
 cat > "$APP_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,16 +48,25 @@ if [[ -f "$ROOT/apps/tray/assets/logo-alpha-1024.png" ]]; then
     done
     iconutil -c icns "$ICONSET" -o "$APP_DIR/Resources/${APP_NAME}.icns" 2>/dev/null || true
 fi
+# ad-hoc 签名两个二进制（arm64 子进程 exec 的硬门槛）+ 整体
+codesign --force --sign - "$APP_DIR/MacOS/evo-router"
+codesign --force --sign - "$APP_DIR/MacOS/${APP_NAME}"
 codesign --force --sign - "build/${APP_NAME}.app" 2>/dev/null || true
 
 if [[ "${1:-}" == "--install" ]]; then
-    echo "[3/3] 安装到 /Applications ..."
+    echo "[4/4] 安装到 /Applications ..."
     launchctl bootout gui/$(id -u)/ai.evolve-router.tray 2>/dev/null || true
-    # 收敛单 agent：老双 agent 时代的 serve 网关 agent 移除（tray 同进程已含网关）
     launchctl bootout gui/$(id -u)/ai.evolve-router.gateway 2>/dev/null || true
     rm -f "$HOME/Library/LaunchAgents/ai.evolve-router.gateway.plist"
     pkill -x "${APP_NAME}" 2>/dev/null || true
+    pkill -f "evo-router serve" 2>/dev/null || true
     sleep 1
+    # 等端口真释放（SIGTERM 优雅停机可拖 >1.5s；不等于新壳会误判为"外部实例"而不拉网关）
+    for i in $(seq 1 10); do
+        curl -s -m 1 "http://127.0.0.1:${EV_PORT:-8787}/healthz" >/dev/null 2>&1 || break
+        sleep 0.5
+        [[ $i -eq 10 ]] && pkill -9 -f "evo-router serve" 2>/dev/null || true
+    done
     rm -rf "/Applications/${APP_NAME}.app"
     cp -R "build/${APP_NAME}.app" /Applications/
     TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve-router.tray.plist"
@@ -70,8 +87,9 @@ if [[ "${1:-}" == "--install" ]]; then
 </plist>
 PLIST
     launchctl bootstrap gui/$(id -u) "$TRAY_PLIST"
+    sleep 2
     pgrep -x "${APP_NAME}" >/dev/null || open "/Applications/${APP_NAME}.app"
-    echo "完成：单二进制 .app 已安装（菜单栏图标+同进程网关）"
+    echo "完成：${APP_NAME}.app 已安装（Swift 壳面板 + evo-router serve 子进程网关）"
 else
-    echo "产物: apps/tray/build/${APP_NAME}.app（唯一可执行 Contents/MacOS = evo-router）"
+    echo "产物: apps/tray/build/${APP_NAME}.app（exe=Swift 壳；MacOS/evo-router=网关 helper）"
 fi

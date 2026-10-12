@@ -14,8 +14,8 @@ use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{
     NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
-    NSFont, NSImage, NSPanel, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField, NSView,
-    NSWindowStyleMask, NSWorkspace, NSWindow,
+    NSEvent, NSFont, NSImage, NSPanel, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField,
+    NSView, NSWindowStyleMask, NSWorkspace, NSWindow,
 };
 use objc2_foundation::{
     NSArray, NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString,
@@ -516,6 +516,7 @@ fn toggle_panel() {
             p.orderFrontRegardless();
             p.makeKeyAndOrderFront(None);
             tray_dbg("[show] ordered key");
+            install_outside_click_monitor();
             // 探针：500ms 后回报 key 状态
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -537,7 +538,33 @@ fn toggle_panel() {
     }
 }
 
-// ── 面板 delegate：失焦（key resign）→ orderOut（点击外部自动隐藏）──
+// ── 点击外部自动隐藏：全局鼠标监听（不依赖 key/resign，accessory app 通杀）──
+
+static MONITOR: Mutex<Option<UnsafeRef<AnyObject>>> = Mutex::new(None);
+
+unsafe fn install_outside_click_monitor() {
+    if MONITOR.lock().unwrap().is_some() {
+        return;
+    }
+    let block = block2::RcBlock::new(|_evt: std::ptr::NonNull<NSEvent>| {
+        // 用户点击了我们 app 以外的任何地方（桌面/Finder/其他 app）→ 收面板
+        hide_panel(false);
+        if let Some(m) = MONITOR.lock().unwrap().take() {
+            let _: () = msg_send![objc2::class!(NSEvent), removeMonitor: m.0];
+        }
+    });
+    let mask = objc2_app_kit::NSLeftMouseUpMask; // LeftMouseUp bit mask (static)
+    if let Some(m) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block) {
+        std::mem::forget(block); // 监听器随面板生命周期
+        *MONITOR.lock().unwrap() = Some(UnsafeRef(Retained::into_raw(m) as *mut AnyObject));
+    }
+}
+
+unsafe fn remove_outside_click_monitor() {
+    if let Some(m) = MONITOR.lock().unwrap().take() {
+        let _: () = msg_send![objc2::class!(NSEvent), removeMonitor: m.0];
+    }
+}
 
 static LAST_OUT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 
@@ -546,6 +573,7 @@ fn hide_panel(resign: bool) {
     unsafe {
         let panel = &*pr.panel.0;
         panel.orderOut(None);
+        remove_outside_click_monitor();
     }
     if resign {
         *LAST_OUT.lock().unwrap() = Some(std::time::Instant::now());
@@ -573,7 +601,7 @@ unsafe fn build_panel(mtm: MainThreadMarker) -> UnsafePanelRefs {
     let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
         mtm.alloc(),
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 470.0)),
-        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel | NSWindowStyleMask::UtilityWindow,
         NSBackingStoreType::Buffered,
         false,
     );
