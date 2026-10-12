@@ -15,13 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker};
-use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
-    NSControlStateValue, NSFont, NSImage, NSLayoutAttribute, NSPanel, NSProgressIndicator,
-    NSStackView, NSStatusBar, NSStatusItem, NSSwitch, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindowStyleMask, NSWorkspace,
-};
-use objc2_foundation::{NSArray, NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer, NSUserDefaults};
+use objc2_app_kit::{NSAlert, NSApplication, NSApplicationActivationPolicy, NSButton,
+    NSColor, NSImage, NSMenu, NSMenuItem, NSProgressIndicator, NSStatusBar, NSStatusBarButton,
+    NSStatusItem, NSWorkspace};
+use objc2_foundation::{NSData, NSSize, NSObject, NSUserDefaults, NSString, NSTimer, NSRunLoop};
 use serde_json::Value;
 
 use crate::config;
@@ -35,26 +32,45 @@ static ACTIONS: std::sync::LazyLock<Mutex<HashMap<isize, Box<dyn Fn() + Send>>>>
 static GW_TX: Mutex<Option<tokio::sync::oneshot::Sender<()>>> = Mutex::new(None);
 static TRAY_CFG: Mutex<Option<(Option<std::path::PathBuf>, u16)>> = Mutex::new(None);
 static PULSE: AtomicBool = AtomicBool::new(false);
-static SHOWN: AtomicBool = AtomicBool::new(false);
+
 static TICK: AtomicU64 = AtomicU64::new(0);
 static LAST_HEALTHY: AtomicBool = AtomicBool::new(true);
 static SINK: OnceLock<Retained<ActionSink>> = OnceLock::new();
 static TX: OnceLock<mpsc::Sender<Snapshot>> = OnceLock::new();
+macro_rules! main_ptr {
+    ($t:ty) => {{
+        struct Wrap(*mut $t);
+        unsafe impl Send for Wrap {}
+        unsafe impl Sync for Wrap {}
+        Wrap
+    }};
+}
+// 主线程专属裸指针通用 wrapper（Send/Sync 强转，仅主线程触碰）
+struct UnsafeSend<T: ?Sized>(*mut T);
+unsafe impl<T: ?Sized> Send for UnsafeSend<T> {}
+unsafe impl<T: ?Sized> Sync for UnsafeSend<T> {}
+static MENU: OnceLock<UnsafeSend<NSMenu>> = OnceLock::new();
 // NSStatusItem 保活（仅主线程触碰）
-static STATUS_ITEM: OnceLock<MainPtr<NSStatusItem>> = OnceLock::new();
+static STATUS_ITEM: OnceLock<UnsafeSend<NSStatusItem>> = OnceLock::new(); // 仅主线程触碰
 
-// 跨线程句柄（仅主线程解引用）
-struct MainPtr<T: ?Sized>(*const T);
-unsafe impl<T: ?Sized> Send for MainPtr<T> {}
-unsafe impl<T: ?Sized> Sync for MainPtr<T> {}
+// 菜单项槽位（NSMenu 原生下拉）。
+static UI: OnceLock<UiRefs> = OnceLock::new();
+
+#[derive(Debug)]
+struct MainItem(*mut NSMenuItem);
+unsafe impl Send for MainItem {}
+unsafe impl Sync for MainItem {}
 
 struct UiRefs {
-    stack: MainPtr<NSStackView>,
-    button: MainPtr<NSButton>,
-    switch_ctl: MainPtr<NSSwitch>,
-    panel: MainPtr<NSPanel>,
+    gw_line: MainItem,
+    st_line: MainItem,
+    plans_line: MainItem,
+    provs: [MainItem; 8],
+    recent_title: MainItem,
+    recents: [MainItem; 5],
+    gw_btn: MainItem,
+    auto_item: MainItem,
 }
-static UI: OnceLock<UiRefs> = OnceLock::new();
 
 // 稳定 tag → 动作
 const TAG_STATUS: isize = 0;
@@ -354,117 +370,6 @@ fn shell(cmd: &str) {
 
 // ── UI helpers ──
 
-unsafe fn label(text: impl AsRef<str>, size: f64, bold: bool, mono: bool) -> Retained<NSTextField> {
-    let mtm = MainThreadMarker::new().unwrap();
-    let ns = NSString::from_str(text.as_ref());
-    let l = NSTextField::labelWithString(&ns, mtm);
-    let weight = if bold { 0.5 } else { 0.0 };
-    let font = if mono {
-        NSFont::monospacedSystemFontOfSize_weight(size, weight)
-    } else {
-        NSFont::systemFontOfSize_weight(size, weight)
-    };
-    l.setFont(Some(&font));
-    l
-}
-
-unsafe fn colored(l: &NSTextField, c: &NSColor) {
-    let _: () = msg_send![l, setTextColor: c];
-}
-
-fn rv(v: &NSView) -> Retained<NSView> {
-    unsafe { Retained::retain(v as *const NSView as *mut NSView).unwrap() }
-}
-
-unsafe fn hrow(views: Vec<Retained<NSView>>, spacing: f64) -> Retained<NSStackView> {
-    let arr = NSArray::from_retained_slice(&views);
-    let row = NSStackView::stackViewWithViews(&arr, MainThreadMarker::new().unwrap());
-    row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-    row.setSpacing(spacing);
-    row.setAlignment(NSLayoutAttribute::CenterY);
-    row
-}
-
-unsafe fn vstack(views: Vec<Retained<NSView>>, spacing: f64) -> Retained<NSStackView> {
-    let arr = NSArray::from_retained_slice(&views);
-    let col = NSStackView::stackViewWithViews(&arr, MainThreadMarker::new().unwrap());
-    col.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    col.setSpacing(spacing);
-    col.setAlignment(NSLayoutAttribute::Leading);
-    col
-}
-
-unsafe fn bar(pct: i64, width: f64) -> Retained<NSProgressIndicator> {
-    let mtm = MainThreadMarker::new().unwrap();
-    let p = NSProgressIndicator::new(mtm);
-    p.setIndeterminate(false);
-    p.setMinValue(0.0);
-    p.setMaxValue(100.0);
-    p.setDoubleValue(pct.clamp(0, 100) as f64);
-    p.setTranslatesAutoresizingMaskIntoConstraints(false);
-    p.heightAnchor().constraintEqualToConstant(6.0).setActive(true);
-    p.widthAnchor().constraintEqualToConstant(width).setActive(true);
-    p
-}
-
-unsafe fn dot(color: &NSColor) -> Retained<NSTextField> {
-    let d = label("●", 8.0, false, false);
-    colored(&d, color);
-    d
-}
-
-unsafe fn make_button(title: &str, tag: isize, small: bool) -> Retained<NSButton> {
-    let mtm = MainThreadMarker::new().unwrap();
-    let b = NSButton::new(mtm);
-    let ns = NSString::from_str(title);
-    b.setTitle(&ns);
-    if small {
-        b.setControlSize(objc2_app_kit::NSControlSize::Small);
-        b.setFont(Some(&NSFont::systemFontOfSize_weight(11.0, 0.0)));
-    }
-    let sink = sink_of();
-    let _: () = msg_send![&b, setTarget: sink];
-    let _: () = msg_send![&b, setAction: sel!(fire:)];
-    let _: () = msg_send![&b, setTag: tag];
-    b
-}
-
-trait AsNsView {
-    fn as_nsview(&self) -> &NSView;
-}
-impl AsNsView for NSTextField {
-    fn as_nsview(&self) -> &NSView {
-        unsafe { &*(std::ptr::from_ref::<NSTextField>(self) as *const NSView) }
-    }
-}
-impl AsNsView for NSProgressIndicator {
-    fn as_nsview(&self) -> &NSView {
-        unsafe { &*(std::ptr::from_ref::<NSProgressIndicator>(self) as *const NSView) }
-    }
-}
-impl AsNsView for NSSwitch {
-    fn as_nsview(&self) -> &NSView {
-        unsafe { &*(std::ptr::from_ref::<NSSwitch>(self) as *const NSView) }
-    }
-}
-impl AsNsView for NSButton {
-    fn as_nsview(&self) -> &NSView {
-        unsafe { &*(std::ptr::from_ref::<NSButton>(self) as *const NSView) }
-    }
-}
-impl AsNsView for NSStackView {
-    fn as_nsview(&self) -> &NSView {
-        unsafe { &*(std::ptr::from_ref::<NSStackView>(self) as *const NSView) }
-    }
-}
-impl AsNsView for Retained<NSView> {
-    fn as_nsview(&self) -> &NSView {
-        self
-    }
-}
-
-// ── 图标四态 ──
-
 fn fail_recent(s: &Snapshot) -> bool {
     s.last_fail_ts
         .map(|ts| {
@@ -475,8 +380,14 @@ fn fail_recent(s: &Snapshot) -> bool {
 }
 
 unsafe fn apply_icon(s: &Snapshot, pulse: bool) {
-    let Some(ui) = UI.get() else { return };
-    let btn = unsafe { &*ui.button.0 };
+    // 图标 tint（四态）：通过 status item button 找到（STATUS_ITEM 只在主线程触碰）
+    let Some(w) = STATUS_ITEM.get() else { return };
+    let btn: Option<Retained<NSStatusBarButton>> = {
+        // UnsafeSend<NSStatusItem> → button(mtm)
+        let mtm = MainThreadMarker::new().unwrap_or_else(|| unreachable!());
+        status_item_button(w.0, mtm)
+    };
+    let Some(btn) = btn else { return };
     let color: Retained<NSColor> = if !s.healthy {
         NSColor::quaternaryLabelColor()
     } else if fail_recent(s) {
@@ -486,210 +397,17 @@ unsafe fn apply_icon(s: &Snapshot, pulse: bool) {
     } else {
         NSColor::labelColor()
     };
-    let _: () = msg_send![btn, setContentTintColor: &*color];
+    let _: () = msg_send![&btn, setContentTintColor: &*color];
+}
+
+unsafe fn status_item_button(item: *mut NSStatusItem, mtm: MainThreadMarker) -> Option<Retained<NSStatusBarButton>> {
+    let item = &*item;
+    let btn: Option<Retained<NSStatusBarButton>> = item.button(mtm);
+    let raw = btn.map(|b| Retained::into_raw(b)).unwrap_or(std::ptr::null_mut());
+    if raw.is_null() { None } else { Some(Retained::retain(raw).unwrap()) }
 }
 
 // ── 面板渲染 ──
-
-unsafe fn section_title(t: &str) -> Retained<NSView> {
-    let l = label(t, 10.0, true, false);
-    colored(&l, &NSColor::secondaryLabelColor());
-    rv(l.as_nsview())
-}
-
-unsafe fn stat_block(name: &str, value: &str) -> Retained<NSView> {
-    let top = label(name, 10.0, false, false);
-    colored(&top, &NSColor::secondaryLabelColor());
-    let val = label(value, 14.0, true, true);
-    let col = vstack(vec![rv(top.as_nsview()), rv(val.as_nsview())], 1.0);
-    rv(col.as_nsview())
-}
-
-unsafe fn render(s: &Snapshot) {
-    let Some(ui) = UI.get() else { return };
-    let stack = unsafe { &*ui.stack.0 };
-    {
-        let empty: Retained<NSArray<NSView>> = NSArray::from_retained_slice(&[]);
-        let _: () = msg_send![stack, setArrangedSubviews: &*empty];
-    }
-
-    let green = NSColor::systemGreenColor();
-    let red = NSColor::systemRedColor();
-    let orange = NSColor::systemOrangeColor();
-    let gray = NSColor::systemGrayColor();
-    let blue = NSColor::systemBlueColor();
-    let sec = NSColor::secondaryLabelColor();
-    let tert = NSColor::tertiaryLabelColor();
-
-    // 头部：状态点 + 标题 + 进行中 + 复制 + 同步时间
-    let (dc, title) = if s.healthy {
-        (&green, "网关运行中 · 8787")
-    } else {
-        (&red, "网关已停止")
-    };
-    let mut head = vec![rv(dot(dc).as_nsview()), rv(label(title, 12.0, true, false).as_nsview())];
-    if s.inflight > 0 {
-        let chip = label(&format!("{} 进行中", s.inflight), 10.0, true, false);
-        colored(&chip, &blue);
-        head.push(rv(chip.as_nsview()));
-    }
-    head.push(rv(make_button("⧉", TAG_COPY, true).as_nsview()));
-    head.push(rv(label(s.last_sync.clone(), 10.0, false, false).as_nsview()));
-    stack.addArrangedSubview(&hrow(head, 6.0));
-
-    // 统计行
-    let rate = if s.requests > 0 {
-        (100.0 * s.success as f64 / s.requests as f64).round() as i64
-    } else {
-        0
-    };
-    let stat_row = hrow(
-        vec![
-            rv(stat_block("请求", &format!("{}", s.requests)).as_nsview()),
-            rv(stat_block("成功率", &format!("{rate}%")).as_nsview()),
-            rv(stat_block("Tokens", &fmt_tok(s.tokens)).as_nsview()),
-            {
-                let t = label("最近 24h", 9.0, false, false);
-                colored(&t, &tert);
-                rv(t.as_nsview())
-            },
-        ],
-        14.0,
-    );
-    stack.addArrangedSubview(&stat_row);
-
-    // 方案 5h 用量
-    if !s.plans.is_empty() {
-        stack.addArrangedSubview(&section_title("方案 5h 用量"));
-        for (name, pct) in &s.plans {
-            let disp = if *pct > 999 { ">999%".to_string() } else { format!("{pct}%") };
-            let row = hrow(
-                vec![
-                    rv(label(name, 11.0, true, false).as_nsview()),
-                    rv(bar(*pct, 120.0).as_nsview()),
-                    rv(label(&disp, 11.0, false, true).as_nsview()),
-                ],
-                6.0,
-            );
-            stack.addArrangedSubview(&row);
-        }
-    }
-
-    // 最近决策
-    if !s.recent.is_empty() {
-        stack.addArrangedSubview(&section_title("最近决策"));
-        for r in &s.recent {
-            let dc = if r.status == 200 { &green } else { &red };
-            let mut meta = vec![rv(label(r.time.clone(), 9.0, false, false).as_nsview())];
-            if let Some(tt) = r.ttft {
-                meta.push(rv(label(format!("TTFT {tt}ms"), 9.0, false, false).as_nsview()));
-            }
-            if let Some(ts) = r.tok_s {
-                if ts > 0.0 {
-                    meta.push(rv(label(format!("{ts:.0} tok/s"), 9.0, false, false).as_nsview()));
-                }
-            }
-            meta.push(rv(label(r.agent.clone(), 9.0, false, true).as_nsview()));
-            let sub = hrow(meta, 5.0);
-            let col = vstack(
-                vec![
-                    rv(label(r.model.clone(), 10.5, false, false).as_nsview()),
-                    rv(sub.as_nsview()),
-                ],
-                1.0,
-            );
-            let right = if r.status == 200 {
-                rv(label(format!("{}ms", r.total_ms), 10.0, false, true).as_nsview())
-            } else {
-                let f = label("fail", 10.0, false, true);
-                colored(&f, &red);
-                rv(f.as_nsview())
-            };
-            let row = hrow(
-                vec![rv(dot(dc).as_nsview()), rv(col.as_nsview()), right],
-                6.0,
-            );
-            stack.addArrangedSubview(&row);
-        }
-    }
-
-    // Provider 管理
-    if !s.providers.is_empty() {
-        stack.addArrangedSubview(&section_title("Provider 管理"));
-        for p in &s.providers {
-            let dc = if p.disabled {
-                &gray
-            } else if matches!(p.pct, Some(v) if v >= 85) {
-                &orange
-            } else {
-                &green
-            };
-            let mut sub = Vec::new();
-            if p.disabled {
-                sub.push(rv(label("已禁用", 9.0, false, false).as_nsview()));
-            }
-            if p.tok24 > 0 {
-                sub.push(rv(label(format!("{} · 24h", fmt_tok(p.tok24)), 9.0, false, false).as_nsview()));
-            }
-            let left = if sub.is_empty() {
-                rv(label(p.key.clone(), 10.5, false, false).as_nsview())
-            } else {
-                let col = vstack(
-                    vec![
-                        rv(label(p.key.clone(), 10.5, false, false).as_nsview()),
-                        rv(hrow(sub, 4.0).as_nsview()),
-                    ],
-                    1.0,
-                );
-                rv(col.as_nsview())
-            };
-            let right: Retained<NSView> = if let Some(pct) = p.pct {
-                let disp = if pct > 999 { ">999%".to_string() } else { format!("{pct}%") };
-                rv(hrow(
-                    vec![rv(bar(pct, 90.0).as_nsview()), rv(label(disp, 10.0, false, true).as_nsview())],
-                    5.0,
-                )
-                .as_nsview())
-            } else if p.kind == "api" {
-                rv(label("按量", 9.0, false, false).as_nsview())
-            } else {
-                rv(label("—", 9.0, false, false).as_nsview())
-            };
-            let row = hrow(vec![rv(dot(dc).as_nsview()), left, right], 6.0);
-            stack.addArrangedSubview(&row);
-        }
-    }
-
-    // 分隔 + 控制区
-    let div = label("─────────────────────────", 8.0, false, false);
-    colored(&div, &tert);
-    stack.addArrangedSubview(&div);
-
-    let sw = unsafe { &*ui.switch_ctl.0 };
-    let autostart_row = hrow(
-        vec![
-            rv(sw.as_nsview()),
-            rv(label("开机自动启动", 11.0, false, false).as_nsview()),
-        ],
-        6.0,
-    );
-    stack.addArrangedSubview(&autostart_row);
-
-    let gw_title = if s.healthy { "停止网关" } else { "启动网关" };
-    stack.addArrangedSubview(&make_button(gw_title, TAG_GW_TOGGLE, true));
-
-    let link_row = hrow(
-        vec![
-            rv(make_button("开源地址", TAG_GITHUB, true).as_nsview()),
-            rv(make_button("完整面板", TAG_DASHBOARD, true).as_nsview()),
-            rv(make_button("退出", TAG_EXIT, true).as_nsview()),
-        ],
-        10.0,
-    );
-    stack.addArrangedSubview(&link_row);
-}
-
-// ── 动作实现 ──
 
 fn open_url(url: &str) {
     unsafe {
@@ -702,45 +420,18 @@ fn open_url(url: &str) {
 }
 
 fn register_actions() {
-    register(TAG_STATUS, || {
-        tray_dbg("[click] fire");
-        let Some(ui) = UI.get() else { tray_dbg("[click] UI miss"); return };
-        unsafe {
-            let panel = unsafe { &*ui.panel.0 };
-            let btn = unsafe { &*ui.button.0 };
-            tray_dbg("[click] deref ok");
-            if panel.isVisible() {
-                tray_dbg("[click] visible→hide");
-                panel.orderOut(None);
-            } else {
-                tray_dbg("[click] hidden→show");
-                // 定位：状态按钮正下方；高度按内容实测伸缩（clamp 到安全范围）
-                let fr: NSRect = msg_send![btn, frame];
-                let w: Retained<objc2_app_kit::NSWindow> = msg_send![btn, window];
-                let screen: NSRect = msg_send![&w, convertRectToScreen: fr];
-                let stack = unsafe { &*ui.stack.0 };
-                let fit = stack.fittingSize().height + 28.0;
-                // 主屏可给空间（上方留菜单栏 24 + 余量 60）
-                let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
-                let md: NSRect = msg_send![main, frame];
-                let max_h = (md.size.height - 100.0).max(200.0);
-                let ph = fit.clamp(140.0, max_h);
-                {
-                    let sz = NSSize::new(340.0, ph);
-                    let _: () = msg_send![panel, setFrameSize: sz];
-                }
-                panel.orderFrontRegardless();
-                tray_dbg("[click] shown");
-            }
-        }
-    });
     register(TAG_SWITCH, || {
-        let Some(ui) = UI.get() else { return };
         unsafe {
-            let sw = &*ui.switch_ctl.0;
-            let on: isize = msg_send![sw, state];
-            let on = on == 1;
-            NSUserDefaults::standardUserDefaults().setBool_forKey(on, objc2_foundation::ns_string!("ev-autostart"));
+            let defaults = NSUserDefaults::standardUserDefaults();
+            let key = objc2_foundation::ns_string!("ev-autostart");
+            let saved = defaults.boolForKey(key);
+            let on = !saved;
+            defaults.setBool_forKey(on, key);
+            // 刷新勾选状态
+            if let Some(ui) = UI.get() {
+                let obj = ui.auto_item.0;
+                let _: () = msg_send![obj, setState: if on { 1isize } else { 0 }];
+            }
             let action = if on { "enable" } else { "disable" };
             shell(&format!(
                 "launchctl {action} gui/$(id -u)/ai.evolve-router.tray 2>/dev/null; launchctl {action} gui/$(id -u)/ai.evolve-router.gateway 2>/dev/null"
@@ -797,118 +488,254 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
     img
 }
 
-unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
-    let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
-    let _ = STATUS_ITEM.set(MainPtr(Retained::as_ptr(&status_item)));
-    let button = status_item.button(mtm).unwrap();
-    let icon = load_icon(mtm);
-    button.setImage(Some(&icon));
 
-    let sink = ActionSink::new(mtm);
-    let _ = SINK.set(sink.clone());
+fn nsstr(t: &str) -> Retained<NSString> {
+    NSString::from_str(t)
+}
 
-    // 状态按钮 → 弹出面板
-    let _: () = msg_send![&button, setTarget: &*sink];
-    let _: () = msg_send![&button, setAction: sel!(fire:)];
-    let _: () = msg_send![&button, setTag: TAG_STATUS];
+unsafe fn add_sep(menu: &NSMenu) {
+    let sep = NSMenuItem::separatorItem(MainThreadMarker::new().unwrap());
+    menu.addItem(&sep);
+}
 
-    // 面板：Stats 同款 borderless 非激活 NSPanel（不用 NSPopover——点击即显、无变尺寸坑）
-    let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
-        mtm.alloc(),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(340.0, 760.0)),
-        NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
-        NSBackingStoreType::Buffered,
-        false,
-    );
-    panel.setLevel(24);  // statusBar 级
-    panel.setHidesOnDeactivate(true);
-    panel.setBecomesKeyOnlyIfNeeded(true);
-    panel.setOpaque(true);
-    panel.setHasShadow(true);
-    // 内容 = 竖排 stack，固定四边 pin（扩 stack 曾有多约束冲突的老坑，contentView 固定尺寸即可）
-    let content = NSView::new(mtm);
-    content.setFrameSize(NSSize::new(340.0, 760.0));
-    panel.setContentView(Some(content.as_nsview()));
-    // 底色（动态明暗）+ 圆角：layer-backed 12 → Stats 风格圆角面板
-    {
-        let bg: *mut AnyObject = msg_send![objc2_app_kit::NSColor::class(), windowBackgroundColor];
-        let _: () = msg_send![&panel, setBackgroundColor: bg];
+unsafe fn add_item(menu: &NSMenu, title: &str, tag: isize) -> Retained<NSMenuItem> {
+    let it = NSMenuItem::new(MainThreadMarker::new().unwrap());
+    it.setTitle(&nsstr(title));
+    if tag >= 0 {
+        let sink: &Retained<ActionSink> = SINK.get().unwrap();
+        let target: *mut ActionSink = Retained::as_ptr(sink) as *mut ActionSink;
+        let _: () = msg_send![&it, setTarget: target];
+        let _: () = msg_send![&it, setAction: sel!(fire:)];
+        let _: () = msg_send![&it, setTag: tag];
     }
-    content.setWantsLayer(true);
-    {
-        let lv: *mut AnyObject = msg_send![content.as_nsview(), layer];
-        if !lv.is_null() {
-            let _: () = msg_send![lv, setCornerRadius: 12f64];
-            let _: () = msg_send![lv, setMasksToBounds: true];
-        }
-    }
-    let stack = NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[]), mtm);
-    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    stack.setSpacing(10.0);
-    stack.setAlignment(NSLayoutAttribute::Leading);
-    stack.setTranslatesAutoresizingMaskIntoConstraints(false);
-    content.addSubview(stack.as_nsview());
-    // 四边 pin（12pt 边距）——contentView 尺寸固定，无冲突面
-    stack.topAnchor().constraintEqualToAnchor_constant(&content.topAnchor(), 14.0).setActive(true);
-    stack.leadingAnchor().constraintEqualToAnchor_constant(&content.leadingAnchor(), 14.0).setActive(true);
-    content.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), 14.0).setActive(true);
-    content.bottomAnchor().constraintEqualToAnchor_constant(&stack.bottomAnchor(), 14.0).setActive(true);
+    menu.addItem(&it);
+    it
+}
 
-    // 自启开关（持久实例；未设置过默认开）
-    let sw = NSSwitch::new(mtm);
-    let defaults = NSUserDefaults::standardUserDefaults();
-    let key = objc2_foundation::ns_string!("ev-autostart");
-    let obj: *mut AnyObject = unsafe { msg_send![&defaults, objectForKey: key] };
-    let saved = if !obj.is_null() { defaults.boolForKey(key) } else { true };
-    sw.setState(if saved { 1 } else { 0 });
-    let _: () = msg_send![&sw, setTarget: &*sink];
-    let _: () = msg_send![&sw, setAction: sel!(fire:)];
-    let _: () = msg_send![&sw, setTag: TAG_SWITCH];
+unsafe fn build_menu(mtm: MainThreadMarker) -> Retained<NSMenu> {
+    let menu = NSMenu::new(mtm);
+    let sink = SINK.get().unwrap();
+
+    macro_rules! slot {
+        ($title:expr, $tag:expr) => {{
+            let it = NSMenuItem::new(mtm);
+            it.setTitle(&nsstr($title));
+            if $tag >= 0 {
+                let target: *mut ActionSink = Retained::as_ptr(sink) as *mut ActionSink;
+                let _: () = msg_send![&it, setTarget: target];
+                let _: () = msg_send![&it, setAction: sel!(fire:)];
+                let _: () = msg_send![&it, setTag: $tag];
+            }
+            menu.addItem(&it);
+            it
+        }};
+    }
+
+    let gw_line = slot!("● 网关已停止", -1);
+    add_sep(&menu);
+    let st_line = slot!("请求 … · 成功率 … · Tokens …", -1);
+    let plans_line = slot!("方案 5h：…", -1);
+    add_sep(&menu);
+    // 最近使用 Provider（8 槽位占位，更新时填数据/隐藏）
+    let provs_logo = slot!("Provider（最近使用）", -1);
+    let _ = provs_logo.setTitle(&nsstr("Provider（最近使用）"));
+    let mut provs = Vec::new();
+    for _ in 0..8 {
+        let it = slot!("", -1);
+        it.setHidden(true);
+        provs.push(MainItem(Retained::as_ptr(&it) as *mut NSMenuItem));
+    }
+    add_sep(&menu);
+    let recent_title = slot!("最近决策", -1);
+    let mut recents = Vec::new();
+    for _ in 0..5 {
+        let it = slot!("", -1);
+        it.setHidden(true);
+        recents.push(MainItem(Retained::as_ptr(&it) as *mut NSMenuItem));
+    }
+    add_sep(&menu);
+    let gw_btn = slot!("停止网关", TAG_GW_TOGGLE);
+    let auto_item = slot!("开机自动啟动", TAG_SWITCH);
+    let _copy = slot!("复制接入配置", TAG_COPY);
+    let _dashboard = slot!("打开完整面板", TAG_DASHBOARD);
+    let _github = slot!("开源地址 (GitHub)", TAG_GITHUB);
+    add_sep(&menu);
+    let _exit = slot!("退出 EvolveRouter…", TAG_EXIT);
+
+    let _ = prologue_menu_items(&menu);
 
     let _ = UI.set(UiRefs {
-        stack: MainPtr(Retained::as_ptr(&stack) as *const NSStackView as *mut NSStackView),
-        button: MainPtr(Retained::as_ptr(&button) as *const NSButton as *mut NSButton),
-        switch_ctl: MainPtr(Retained::as_ptr(&sw) as *const NSSwitch as *mut NSSwitch),
-        panel:MainPtr(Retained::as_ptr(&panel) as *const NSPanel as *mut NSPanel),
+        gw_line: MainItem(Retained::as_ptr(&gw_line) as *mut NSMenuItem),
+        st_line: MainItem(Retained::as_ptr(&st_line) as *mut NSMenuItem),
+        plans_line: MainItem(Retained::as_ptr(&plans_line) as *mut NSMenuItem),
+        provs: provs.try_into().unwrap(),
+        recent_title: MainItem(Retained::as_ptr(&recent_title) as *mut NSMenuItem),
+        recents: recents.try_into().unwrap(),
+        gw_btn: MainItem(Retained::as_ptr(&gw_btn) as *mut NSMenuItem),
+        auto_item: MainItem(Retained::as_ptr(&auto_item) as *mut NSMenuItem),
     });
+
+    menu
+}
+
+// 占位：占位（防 unused 警告得起名字）——真实在 render/update_menu 中使用
+fn prologue_menu_items(_menu: &NSMenu) -> bool {
+    true
+}
+
+unsafe fn update_menu(s: &Snapshot) {
+    let Some(ui) = UI.get() else { return };
+    let set = |it: &MainItem, t: &str| unsafe {
+        let obj = &*it.0;
+        let _: () = msg_send![obj, setTitle: &*nsstr(t)];
+    };
+    let set_hidden = |it: &MainItem, hide: bool| unsafe {
+        let obj = &*it.0;
+        let _: () = msg_send![obj, setHidden: hide];
+    };
+    let state = |it: &MainItem, st: isize| unsafe {
+        let obj = &*it.0;
+        let _: () = msg_send![obj, setState: st];
+    };
+
+    if s.healthy {
+        set(&ui.gw_line, "● 网关运行中 · 8787");
+    } else {
+        set(&ui.gw_line, "● 网关已停止");
+    }
+    let rate = if s.requests > 0 {
+        (100.0 * s.success as f64 / s.requests as f64).round() as u64
+    } else {
+        0
+    };
+    set(
+        &ui.st_line,
+        &format!(
+            "请求 {} · 成功率 {}% · Tokens {}（24h）",
+            s.requests,
+            rate,
+            fmt_tok(s.tokens)
+        ),
+    );
+    let mut plans_txt = String::from("方案 5h：");
+    if s.plans.is_empty() {
+        plans_txt.push_str("无套餐用量");
+    } else {
+        for (i, (k, v)) in s.plans.iter().enumerate() {
+            if i > 0 {
+                plans_txt.push_str(" · ");
+            }
+            let v = v.min(&999);
+            let v = if *v > 999 { 999 } else { *v };
+            plans_txt.push_str(&format!("{k} {v}%"));
+        }
+    }
+    set(&ui.plans_line, &plans_txt);
+
+    for (i, slot) in ui.provs.iter().enumerate() {
+        if let Some(p) = s.providers.get(i) {
+            set_hidden(slot, false);
+            let dot = if p.disabled { "○" } else { "●" };
+            let sub = if p.disabled {
+                format!("{dot} {} 已禁用", p.key)
+            } else if let Some(pct) = p.pct {
+                let v = pct.min(999);
+                let t24 = if p.tok24 > 0 {
+                    format!(" · 24h {}", fmt_tok(p.tok24))
+                } else {
+                    String::new()
+                };
+                format!("{dot} {} {v}%{t24}", p.key)
+            } else if p.kind == "api" {
+                format!("{dot} {} 按量", p.key)
+            } else {
+                format!("{dot} {}", p.key)
+            };
+            set(slot, &sub);
+        } else {
+            set_hidden(slot, true);
+        }
+    }
+
+    if s.recent.is_empty() {
+        set(&ui.recent_title, "最近决策（空）");
+    } else {
+        set(&ui.recent_title, "最近决策");
+    }
+    for (i, slot) in ui.recents.iter().enumerate() {
+        if let Some(r) = s.recent.get(i) {
+            set_hidden(slot, false);
+            let mark = if r.status == 200 { "●" } else { "✗" };
+            let ts = r.tok_s.map(|v| format!(" · {:.0}tok/s", v)).unwrap_or_default();
+            set(
+                slot,
+                &format!("{} {} {}ms · {}{} · {}", mark, r.model, r.total_ms, r.agent, ts, r.time),
+            );
+        } else {
+            set_hidden(slot, true);
+        }
+    }
+
+    set(&ui.gw_btn, if s.healthy { "停止网关" } else { "启动网关" });
+
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = objc2_foundation::ns_string!("ev-autostart");
+    let obj: *mut AnyObject = msg_send![&defaults, objectForKey: key];
+    let saved = if !obj.is_null() { defaults.boolForKey(key) } else { true };
+    state(&ui.auto_item, if saved { 1 } else { 0 });
+
+    if let Some(w) = MENU.get().filter(|p| !p.0.is_null()) {
+        unsafe {
+            let m = &*w.0;
+            let _: () = msg_send![m, update];
+        }
+    }
+}
+
+unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
+    // 状态项＋图标（template：自动明暗；纯 logo alpha 展示，不 tint）
+    let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(-1.0);
+    let icon = load_icon(mtm);
+    if let Some(button) = status_item.button(mtm) {
+        button.setImage(Some(&icon));
+    }
+    let _ = STATUS_ITEM.set(UnsafeSend(Retained::as_ptr(&status_item) as *mut NSStatusItem));
+    std::mem::forget(status_item.clone()); // 保活
 
     register_actions();
 
-    // 初始渲染 + 轮询定时器
-    render(&snap());
+    let menu = build_menu(mtm);
+    let _ = MENU.set(UnsafeSend(Retained::as_ptr(&menu) as *mut NSMenu));
+    std::mem::forget(menu.clone()); // 保活
+    status_item.setMenu(Some(&menu));
+
+    // 首帧数据 + 轮询定时器（0.25s tick，live 1s / data 3s）
+    if let Some(s) = SNAP.lock().ok().and_then(|g| g.clone()) {
+        update_menu(&s);
+    }
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
     let block = block2::RcBlock::new(move || {
-        let poll_tx = TX.get().cloned();
         let n = TICK.fetch_add(1, Ordering::Relaxed);
-        // 调试自触发：EVO_AUTOTOGGLE=1 时首个 tick 直接弹面板
-        if n == 1 && std::env::var("EVO_AUTOTOGGLE").is_ok() {
-            if let Some(sink) = SINK.get() {
-                let _: () = unsafe { msg_send![sink, fire: std::ptr::null::<AnyObject>()] };
-            }
-        }
         if n % 4 == 1 {
-            if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
+            if let (Some(t), Some(rt)) = (TX.get().cloned(), RT.get()) {
                 rt.spawn(poll_live(t));
             }
         }
         if n % 12 == 6 {
-            if let (Some(t), Some(rt)) = (poll_tx.clone(), RT.get()) {
+            if let (Some(t), Some(rt)) = (TX.get().cloned(), RT.get()) {
                 rt.spawn(poll_data(t));
             }
         }
         while let Ok(s) = rx.try_recv() {
-            let data_changed = {
-                let g = SNAP.lock().unwrap();
-                g.as_ref().map(|old| old.last_sync != s.last_sync).unwrap_or(true)
-            };
-            *SNAP.lock().unwrap() = Some(s.clone());
-            if data_changed {
-                let cur = snap();
-                render(&cur);
-            }
+            *SNAP.lock().unwrap() = Some(s);
         }
         let s = snap();
+        update_menu(&s);
+        if s.healthy != LAST_HEALTHY.load(Ordering::Relaxed) {
+            LAST_HEALTHY.store(s.healthy, Ordering::Relaxed);
+            update_menu(&s);
+        }
         if s.inflight > 0 && s.healthy {
             if n % 2 == 0 {
                 PULSE.fetch_xor(true, Ordering::Relaxed);
@@ -917,31 +744,13 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
             PULSE.store(false, Ordering::Relaxed);
         }
         apply_icon(&s, PULSE.load(Ordering::Relaxed));
-        // 健康态变化即时刷新按钮文案
-        if s.healthy != LAST_HEALTHY.load(Ordering::Relaxed) {
-            LAST_HEALTHY.store(s.healthy, Ordering::Relaxed);
-    if std::env::var("EVO_TRAY_MIN").is_err() { render(&s); }
-        }
     });
-    let timer: Retained<NSTimer> =
-        msg_send![NSTimer::class(), timerWithTimeInterval: 0.25f64, repeats: true, block: &*block];
+    let timer: Retained<NSTimer> = msg_send![NSTimer::class(),
+        timerWithTimeInterval: 0.25f64, repeats: true, block: &*block];
     let rl: Retained<objc2_foundation::NSRunLoop> = objc2_foundation::NSRunLoop::currentRunLoop();
-    let _: () = msg_send![&rl, addTimer: &*timer forMode: objc2_foundation::ns_string!("kCFRunLoopCommonModes")];
-    std::mem::forget(timer); // 定时器与 block 与 app 同生命周期
+    let _: () = msg_send![&rl, addTimer: &*timer forMode: objc2_foundation::ns_string!("NSRunLoopCommonModes")];
+    std::mem::forget(timer);
     std::mem::forget(block);
-
-    let _: () = msg_send![app, setActivationPolicy: NSApplicationActivationPolicy::Accessory];
-    // 对象保活：popover/status_item/button/stack/sw 等的 Retained 是 build_ui 局部
-    // ——函数返回即 drop = NSPopover/NSStatusItem 释放 = 后续点击全在 use-after-free
-    // （ObjC forwarding 对尸内地址抛"unrecognized selector"， 还会被 AppKit 吞）。
-    // 单例 app 一生泄漏一次，直接 forget 赖活。
-    std::mem::forget(status_item);
-    std::mem::forget(panel);
-    std::mem::forget(content);
-    std::mem::forget(button);
-    std::mem::forget(sw);
-    std::mem::forget(stack);
-
 }
 
 // ── 入口 ──
