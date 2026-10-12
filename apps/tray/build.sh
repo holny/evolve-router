@@ -34,27 +34,31 @@ cat > "$APP_DIR/Info.plist" <<PLIST
 PLIST
 codesign --force --sign - "build/${APP_NAME}.app" 2>/dev/null || true
 
-# app 图标：alpha 版 logo 10 尺寸 → icns（源由 /tmp/logo-alpha-1024.png 提供，缺失跳过）
-if [[ -f "${SRC_ROOT}/assets/logo-alpha-1024.png" ]]; then
+# app 图标：alpha 版 logo 10 尺寸 → icns（源由 make-icons.sh 生成，缺失跳过）
+if [[ -f "assets/logo-alpha-1024.png" ]]; then
     ICONSET="build/${APP_NAME}.iconset"
     rm -rf "$ICONSET" && mkdir -p "$ICONSET"
     for s in 16 32 64 128 256 512 1024; do
-        sips -z $s $s "${SRC_ROOT}/assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+        sips -z $s $s "assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
     done
     iconutil -c icns "$ICONSET" -o "$APP_DIR/Resources/${APP_NAME}.icns" 2>/dev/null || true
 fi
 
-# icns：logo alpha 版 10 尺寸 → iconutil（app bundle 图标）
+# build/ 下独立 icns 产物（同一源）
 ICONSET="build/${APP_NAME}.iconset"
 rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-for s in 16 32 64 128 256 512 1024; do sips -z $s $s "$HOME/Library/Logs/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true; done
+if [[ -f "assets/logo-alpha-1024.png" ]]; then
+    for s in 16 32 64 128 256 512 1024; do sips -z $s $s "assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true; done
+fi
 iconutil -c icns "$ICONSET" -o "build/${APP_NAME}.icns" 2>/dev/null || true
 
 if [[ "${1:-}" == "--install" ]]; then
     echo "[3/3] 安装到 /Applications 并启动 ..."
+    launchctl bootout gui/$(id -u)/ai.evolve-router.tray 2>/dev/null || true
+    pkill -x "${APP_NAME}" 2>/dev/null || true
+    sleep 1
     rm -rf "/Applications/${APP_NAME}.app"
     cp -R "build/${APP_NAME}.app" /Applications/
-    open "/Applications/${APP_NAME}.app"
     # 登录自启 + 崩溃拉起（LaunchAgent）
     TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve-router.tray.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
@@ -73,8 +77,9 @@ if [[ "${1:-}" == "--install" ]]; then
 </dict>
 </plist>
 PLIST
-    launchctl bootout gui/$(id -u)/ai.evolve-router.tray 2>/dev/null || true
     launchctl bootstrap gui/$(id -u) "$TRAY_PLIST"
+    # RunAtLoad 已拉起；open 仅作未拉起时的激活兜底
+    pgrep -x "${APP_NAME}" >/dev/null || open "/Applications/${APP_NAME}.app"
     echo "完成：菜单栏出现分支图标即运行中（登录自启可在 系统设置 → 通用 → 登录项 添加）"
 else
     echo "[3/3] 跳过安装（--install 可装到 /Applications 并启动）"

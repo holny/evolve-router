@@ -1,25 +1,20 @@
 <svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
-  <!-- EvolveRouter logo v4：圆盘即循环——双 C 弧 + 缺口箭头（自进化）+ 白 ER（智能核心）
-       循环方向：顺时针（正循环）。渐变沿圆周从青绿到蓝。 -->
+  <!-- EvolveRouter logo v5：圆盘即循环——双循环箭头弧（一体成型：弧带末端收敛为箭尖，顺时针自进化）+ 白 ER（智能核心）
+       渐变沿圆周从青绿到蓝。 -->
   <defs>
     <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#34d399"/>
       <stop offset="100%" stop-color="#3b82f6"/>
     </linearGradient>
-    <path id="av" d="M -17 15 L 0 0 L 17 15" fill="none" stroke="url(#grad)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
   </defs>
 
-  <!-- 双 C 弧（r=204，缺口在 -45° 与 135° 方向，各 ~50°） -->
-  <g fill="none" stroke="url(#grad)" stroke-width="88">
-    <!-- 大弧：160° → -70°（经 180/270/0，逆时针大弧） -->
-    <path d="M 64 326 A 204 204 0 1 0 326 64"/>
-    <!-- 小弧：-20° → 110° -->
-    <path d="M 448 187 A 204 204 0 0 1 186 448"/>
+  <!-- 循环箭头弧 ×2（外缘 r=232 / 内缘 r=176（带宽 56），一体箭尖；两枚中心对称，缺口在 135° 与 -45°，各 ~50°） -->
+  <g fill="url(#grad)">
+    <!-- 大弧：160° → 290°，箭尖前伸至 306° -->
+    <path d="M 26.7 339.5 A 244 244 0 0 1 339.5 26.7 L 383 81.3 L 320.3 79.3 A 188 188 0 0 0 79.3 320.3 Z"/>
+    <!-- 小弧：340° → 110°，箭尖前伸至 126°（中心对称） -->
+    <path d="M 485.3 172.5 A 244 244 0 0 1 172.5 485.3 L 129 430.7 L 191.7 432.7 A 188 188 0 0 0 432.7 191.7 Z"/>
   </g>
-
-  <!-- 缺口箭头（指向顺时针 = 进化方向） -->
-  <use href="#av" transform="translate(326,64) rotate(35)"/>
-  <use href="#av" transform="translate(186,448) rotate(215)"/>
 
   <!-- 深色内核（白 ER 的衬底；黑底主题下与背景融合） -->
   <circle cx="256" cy="256" r="158" fill="#0f172a"/>

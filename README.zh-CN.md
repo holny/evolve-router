@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.png" width="128" alt="EvolveRouter logo">
+
 # EvolveRouter
 
 **本地优先的 LLM 路由网关，内建决策模型，每次请求都在进化。**

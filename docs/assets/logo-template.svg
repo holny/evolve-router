@@ -1,0 +1,18 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- EvolveRouter logo v5 template 变体：与 logo.svg 同几何，全黑扁平——
+       macOS template 图标只取 alpha 通道，彩色渐变经 255−亮度提取后会半透明"残缺"。
+       白 ER 保持白色 → 提取后为镂空字母。 -->
+  <!-- 循环箭头弧 ×2（外缘 r=232 / 内缘 r=176（带宽 56），一体箭尖；两枚中心对称） -->
+  <g fill="#000000">
+    <path d="M 26.7 339.5 A 244 244 0 0 1 339.5 26.7 L 383 81.3 L 320.3 79.3 A 188 188 0 0 0 79.3 320.3 Z"/>
+    <path d="M 485.3 172.5 A 244 244 0 0 1 172.5 485.3 L 129 430.7 L 191.7 432.7 A 188 188 0 0 0 432.7 191.7 Z"/>
+  </g>
+
+  <!-- 深色内核 -->
+  <circle cx="256" cy="256" r="158" fill="#000000"/>
+
+  <!-- 白 ER → 提取后镂空 -->
+  <text x="256" y="322" text-anchor="middle"
+        font-family="Arial Black, Arial, Helvetica, sans-serif" font-weight="900"
+        font-size="200" fill="#ffffff">ER</text>
+</svg>

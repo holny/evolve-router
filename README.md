@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/logo.png" width="128" alt="EvolveRouter logo">
+
 # EvolveRouter
 
 **A local LLM routing gateway with a decision model at its core. It evolves with every request.**
