@@ -812,7 +812,7 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     register_actions();
 
     // 初始渲染 + 轮询定时器
-    render(&snap());
+    if std::env::var("EVO_TRAY_MIN").is_err() { render(&snap()); }
     let (tx, rx) = mpsc::channel::<Snapshot>();
     let _ = TX.set(tx);
     let block = block2::RcBlock::new(move || {
@@ -851,11 +851,11 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
         // 健康态变化即时刷新按钮文案
         if s.healthy != LAST_HEALTHY.load(Ordering::Relaxed) {
             LAST_HEALTHY.store(s.healthy, Ordering::Relaxed);
-            render(&s);
+    if std::env::var("EVO_TRAY_MIN").is_err() { render(&s); }
         }
     });
     let timer: Retained<NSTimer> =
-        msg_send![NSTimer::class(), timerWithTimeInterval: 0.25f64, block: &*block, repeats: true];
+        msg_send![NSTimer::class(), timerWithTimeInterval: 0.25f64, repeats: true, block: &*block];
     let rl: Retained<objc2_foundation::NSRunLoop> = objc2_foundation::NSRunLoop::currentRunLoop();
     let _: () = msg_send![&rl, addTimer: &*timer forMode: objc2_foundation::ns_string!("kCFRunLoopCommonModes")];
     std::mem::forget(timer); // 定时器与 block 与 app 同生命周期
