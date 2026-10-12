@@ -298,6 +298,7 @@ define_class!(
         #[unsafe(method(fire:))]
         fn fire(&self, sender: *mut AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
+            tray_dbg(&format!("[fire] tag={tag}"));
             if let Some(f) = ACTIONS.lock().unwrap().get(&tag) {
                 f();
             }
@@ -367,6 +368,25 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
 
 // ── 动作 ──
 
+fn tray_dbg(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
+        let _ = writeln!(f, "{} {}", now_hhmmss(), msg);
+    }
+}
+
+fn now_hhmmss() -> String {
+    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
+    unsafe {
+        let mut tm: libc::tm = std::mem::zeroed();
+        let t = (ms / 1000) as libc::time_t;
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return "--:--:--".into();
+        }
+        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+    }
+}
+
 fn open_url(url: &str) {
     unsafe {
         let Some(mtm) = MainThreadMarker::new() else { return };
@@ -429,13 +449,7 @@ fn register_actions() {
 }
 
 fn toggle_panel() {
-    let Some(pr) = (unsafe { panel() }) else {
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
-            let _ = writeln!(f, "[panel] PANEL_REFS empty!!");
-        }
-        return;
-    };
+    let Some(pr) = (unsafe { panel() }) else { tray_dbg("[toggle] PANEL_REFS empty"); return };
     unsafe {
         let p = &*pr.panel.0;
         if p.isVisible() {
@@ -455,15 +469,53 @@ fn toggle_panel() {
             let fr: NSRect = msg_send![&bbtn, frame];
             let win: Retained<NSWindow> = msg_send![&bbtn, window];
             let sc: NSRect = msg_send![&win, convertRectToScreen: fr];
+            // 双屏感知：列出每块 NSScreen 的 frame
+            {
+                let screens: *mut AnyObject = msg_send![objc2::class!(NSScreen), screens];
+                let cnt_u: u64 = msg_send![screens, count];
+                for i in 0..cnt_u as usize {
+                    let sobj: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+                    let f: NSRect = msg_send![sobj, frame];
+                    tray_dbg(&format!("[screens] #{} frame=({:.0},{:.0} {}x{})", i, f.origin.x, f.origin.y, f.size.width, f.size.height));
+                }
+            }
+            tray_dbg(&format!("[pos] btn_frame=({:.0},{:.0} {}x{})", fr.origin.x, fr.origin.y, fr.size.width, fr.size.height));
             let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
             let md: NSRect = msg_send![main, frame];
+            tray_dbg(&format!("[pos] sc=({:.0},{:.0}) main=({:.0},{:.0} {}x{})", sc.origin.x, sc.origin.y, md.origin.x, md.origin.y, md.size.width, md.size.height));
             let mut x = sc.origin.x + 8.0;
-            if x + 340.0 > md.origin.x + md.size.width {
-                x = md.origin.x + md.size.width - 344.0;
+            // 按钮所在屏（frame 包含按钮中心的屏）为锚——右缘 clamp 用该屏，多显示器不再跨界
+            let anchor_screen: *mut AnyObject = {
+                let screens: *mut AnyObject = msg_send![objc2::class!(NSScreen), screens];
+                let cnt: u64 = msg_send![screens, count];
+                let mut found: *mut AnyObject = std::ptr::null_mut();
+                for i in 0..cnt as usize {
+                    let sobj: *mut AnyObject = msg_send![screens, objectAtIndex: i];
+                    let f: NSRect = msg_send![sobj, frame];
+                    if sc.origin.x >= f.origin.x
+                        && sc.origin.x <= f.origin.x + f.size.width
+                        && sc.origin.y >= f.origin.y - 1.0
+                        && sc.origin.y <= f.origin.y + f.size.height + 1.0
+                    {
+                        found = sobj;
+                        break;
+                    }
+                }
+                found
+            };
+            if !anchor_screen.is_null() {
+                let af: NSRect = msg_send![anchor_screen, frame];
+                if x + 340.0 > af.origin.x + af.size.width {
+                    x = af.origin.x + af.size.width - 344.0;
+                }
+                if x < af.origin.x + 4.0 {
+                    x = af.origin.x + 4.0;
+                }
             }
             p.setFrameTopLeftPoint(NSPoint::new(x, sc.origin.y - 4.0));
             p.orderFrontRegardless();
             p.makeKeyAndOrderFront(None);
+            tray_dbg("[show] ordered key");
             // 探针：500ms 后回报 key 状态
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(500));
@@ -471,6 +523,9 @@ fn toggle_panel() {
                     unsafe {
                         let pn = &*prg.panel.0;
                         let key: bool = msg_send![pn, isKeyWindow];
+                        let vis: bool = pn.isVisible();
+                        let pfr: NSRect = msg_send![pn, frame];
+                        tray_dbg(&format!("[probe] key={key} vis={vis} frame=({:.0},{:.0} {}x{})", pfr.origin.x, pfr.origin.y, pfr.size.width, pfr.size.height));
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
                             let _ = writeln!(f, "[probe] panel isKeyWindow={}", key);
