@@ -329,7 +329,7 @@ pub fn health_model_id(health_id: &str) -> &str {
 }
 
 /// RFC3339 (Z suffix) -> epoch ms. Minimal parser: 2026-09-29T12:34:56Z.
-fn parse_rfc3339_ms(s: &str) -> Option<u64> {
+pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
     // review#3：上游 reset 头完全受上游控制——短于 RFC3339 日期段（10 字节）
     // 直接放弃，不 panic（畸形值如 "bad"、"x" 等）
     if s.len() < 10 {

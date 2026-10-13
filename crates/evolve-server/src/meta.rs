@@ -936,7 +936,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let mut seen_pk: Vec<String> = Vec::new();
         let mut push_due = |k: &str, bu: &str, ak: Option<String>| {
             if let Some(pk) = evolve_core::plans::plan_key_for(bu) {
-                if matches!(pk, "minimax-coding" | "zhipu-coding" | "zai-devpack")
+                if matches!(pk, "minimax-coding" | "zhipu-coding" | "zai-devpack" | "opencode-go")
                     && !seen_pk.iter().any(|x| x == pk)
                     && st.quota.observed_window(pk, "5h", now0, 60 * 1000).is_none()
                 {
@@ -1325,18 +1325,23 @@ pub async fn api_providers_set(
 async fn refresh_observed(
     st: &AppState, key: &str, base_url: &str, plan_key: &str, api_key: Option<String>, now_ms: u64,
 ) -> Option<serde_json::Map<String, Value>> {
-    // 分派：minimax → token_plan/remains；zhipu/zai → monitor 积分端点
-    if plan_key != "minimax-coding" && plan_key != "zhipu-coding" && plan_key != "zai-devpack" {
-        return None;
-    }
+    // 分派：minimax → token_plan/remains；zhipu/zai → monitor 积分端点；
+    // opencode-go → zen usage（rolling/weekly/monthly 百分比）
     let zhipuish = plan_key == "zhipu-coding" || plan_key == "zai-devpack";
+    let minimaxish = plan_key == "minimax-coding";
+    let ocgo = plan_key == "opencode-go";
+    if !zhipuish && !minimaxish && !ocgo { return None; }
     let origin = if zhipuish {
         if base_url.contains("z.ai") { "https://api.z.ai".to_string() } else { "https://open.bigmodel.cn".to_string() }
+    } else if ocgo {
+        "https://opencode.ai".to_string()
     } else {
         base_url.split("/v1").next().unwrap_or("https://api.minimax.cn").to_string()
     };
     let url = if zhipuish {
         format!("{origin}/api/monitor/usage/quota/limit?type=1")
+    } else if ocgo {
+        format!("{origin}/zen/go/v1/usage")
     } else {
         format!("{origin}/v1/token_plan/remains")
     };
@@ -1352,7 +1357,19 @@ async fn refresh_observed(
         scope: scope.to_string(), remaining: Some(100 - pct.min(100)), limit: Some(100),
         reset_epoch_ms: reset, updated_epoch_ms: now_ms,
     };
-    let windows = if zhipuish {
+    let windows = if ocgo {
+        // usage.rolling(5h)/weekly/monthly: percent + resetsAt（ISO8601）
+        let parse_iso = |v: &Value| v.as_str().and_then(|s| evolve_memory::quota::parse_rfc3339_ms(s));
+        let u = &j["usage"];
+        let mut w = vec![
+            mk("5h", u["rolling"]["percent"].as_u64().unwrap_or(0), parse_iso(&u["rolling"]["resetsAt"])),
+            mk("weekly", u["weekly"]["percent"].as_u64().unwrap_or(0), parse_iso(&u["weekly"]["resetsAt"])),
+        ];
+        if u["monthly"]["percent"].as_u64().is_some() {
+            w.push(mk("monthly", u["monthly"]["percent"].as_u64().unwrap_or(0), parse_iso(&u["monthly"]["resetsAt"])));
+        }
+        w
+    } else if zhipuish {
         // data.limits[]: unit=3 → 5h（动态刷新，无固定重置时刻）；unit=6 → 周（nextResetTime）
         let limits = j["data"]["limits"].as_array()?;
         let pick = |unit: u64| limits.iter().find(|e| e["unit"].as_u64() == Some(unit)).cloned();
