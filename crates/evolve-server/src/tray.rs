@@ -13,8 +13,8 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker};
 use objc2_app_kit::{
-    NSAlert, NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSColor,
-    NSEvent, NSFont, NSImage, NSPanel, NSStatusBar, NSStatusBarButton, NSStatusItem, NSTextField,
+    NSAlert, NSApplication, NSBackingStoreType, NSButton, NSColor,
+    NSEvent, NSFont, NSImage, NSPanel, NSStatusBar, NSStatusItem, NSTextField,
     NSView, NSWindowStyleMask, NSWorkspace, NSWindow,
 };
 use objc2_foundation::{
@@ -298,7 +298,6 @@ define_class!(
         #[unsafe(method(fire:))]
         fn fire(&self, sender: *mut AnyObject) {
             let tag: isize = unsafe { msg_send![sender, tag] };
-            tray_dbg(&format!("[fire] tag={tag}"));
             if let Some(f) = ACTIONS.lock().unwrap().get(&tag) {
                 f();
             }
@@ -368,12 +367,6 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
 
 // ── 动作 ──
 
-fn tray_dbg(msg: &str) {
-    use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
-        let _ = writeln!(f, "{} {}", now_hhmmss(), msg);
-    }
-}
 
 fn now_hhmmss() -> String {
     let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
@@ -449,7 +442,7 @@ fn register_actions() {
 }
 
 fn toggle_panel() {
-    let Some(pr) = (unsafe { panel() }) else { tray_dbg("[toggle] PANEL_REFS empty"); return };
+    let Some(pr) = (unsafe { panel() }) else { return };
     unsafe {
         let p = &*pr.panel.0;
         if p.isVisible() {
@@ -469,20 +462,6 @@ fn toggle_panel() {
             let fr: NSRect = msg_send![&bbtn, frame];
             let win: Retained<NSWindow> = msg_send![&bbtn, window];
             let sc: NSRect = msg_send![&win, convertRectToScreen: fr];
-            // 双屏感知：列出每块 NSScreen 的 frame
-            {
-                let screens: *mut AnyObject = msg_send![objc2::class!(NSScreen), screens];
-                let cnt_u: u64 = msg_send![screens, count];
-                for i in 0..cnt_u as usize {
-                    let sobj: *mut AnyObject = msg_send![screens, objectAtIndex: i];
-                    let f: NSRect = msg_send![sobj, frame];
-                    tray_dbg(&format!("[screens] #{} frame=({:.0},{:.0} {}x{})", i, f.origin.x, f.origin.y, f.size.width, f.size.height));
-                }
-            }
-            tray_dbg(&format!("[pos] btn_frame=({:.0},{:.0} {}x{})", fr.origin.x, fr.origin.y, fr.size.width, fr.size.height));
-            let main: *mut AnyObject = msg_send![objc2::class!(NSScreen), mainScreen];
-            let md: NSRect = msg_send![main, frame];
-            tray_dbg(&format!("[pos] sc=({:.0},{:.0}) main=({:.0},{:.0} {}x{})", sc.origin.x, sc.origin.y, md.origin.x, md.origin.y, md.size.width, md.size.height));
             let mut x = sc.origin.x + 8.0;
             // 按钮所在屏（frame 包含按钮中心的屏）为锚——右缘 clamp 用该屏，多显示器不再跨界
             let anchor_screen: *mut AnyObject = {
@@ -515,25 +494,7 @@ fn toggle_panel() {
             p.setFrameTopLeftPoint(NSPoint::new(x, sc.origin.y - 4.0));
             p.orderFrontRegardless();
             p.makeKeyAndOrderFront(None);
-            tray_dbg("[show] ordered key");
             install_outside_click_monitor();
-            // 探针：500ms 后回报 key 状态
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                if let Some(prg) = unsafe { panel() } {
-                    unsafe {
-                        let pn = &*prg.panel.0;
-                        let key: bool = msg_send![pn, isKeyWindow];
-                        let vis: bool = pn.isVisible();
-                        let pfr: NSRect = msg_send![pn, frame];
-                        tray_dbg(&format!("[probe] key={key} vis={vis} frame=({:.0},{:.0} {}x{})", pfr.origin.x, pfr.origin.y, pfr.size.width, pfr.size.height));
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
-                            let _ = writeln!(f, "[probe] panel isKeyWindow={}", key);
-                        }
-                    }
-                }
-            });
         }
     }
 }
@@ -772,24 +733,6 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
         let n = TICK.fetch_add(1, Ordering::Relaxed);
-        // 调试：EVO_AUTO_PANEL=1 时第 3 个 tick 自动弹面板（经主队列，与点击同路径）
-        if n == 3 && std::env::var("EVO_AUTO_PANEL").is_ok() {
-            {
-                use std::io::Write;
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
-                    let _ = writeln!(f, "[auto] queueing toggle");
-                }
-            }
-            dispatch2::DispatchQueue::main().exec_async(|| {
-                toggle_panel();
-                {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/ev-tray-dbg.log") {
-                        let _ = writeln!(f, "[auto] toggled");
-                    }
-                }
-            });
-        }
         if n % 4 == 1 {
             if let (Some(t), Some(rt)) = (TX.get().cloned(), RT.get()) {
                 rt.spawn(poll_live(t));
