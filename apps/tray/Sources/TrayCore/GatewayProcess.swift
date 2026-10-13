@@ -12,23 +12,34 @@ public final class GatewayProcess: ObservableObject {
     @Published public private(set) var starting = false
 
     private var child: Process?
+    private var spawnInFlight = false
+    private var externalUntil: Date?
 
     public var isChildAlive: Bool {
         guard let child, child.isRunning else { return false }
         return true
     }
 
-    /// 幂等启动：外部健康实例（1s×5 连续健康）→ 判为外部只读；一旦出现非健康 → 可接管并 spawn。
+    /// 幂等启动：外部健康实例（1s×3 连续健康）→ 30s 内判为外部只读；
+    /// 一旦出现非健康 → spawnInFlight 抢占式接管 spawn。pollLive 每秒驱动、
+    /// 无节流死锁（旧 lastAttempt 被每秒调用刷新，spawn 永不触发——实证修复）。
     public func ensureRunning() async {
-        var persistent = true
-        for _ in 0..<5 {
-            guard await networkHealthy() else { persistent = false; break }
+        if owned, child?.isRunning == true { return }
+        if spawnInFlight { return }
+        if let eu = externalUntil, Date() < eu { return }
+        var healthyStreak = 0
+        for _ in 0..<3 {
+            if await networkHealthy() { healthyStreak += 1 } else { healthyStreak = 0; break }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        if persistent { owned = false; return }
-        if child?.isRunning != true {
-            await spawn()
+        if healthyStreak >= 3 {
+            owned = false
+            externalUntil = Date().addingTimeInterval(30)
+            return
         }
+        spawnInFlight = true
+        defer { spawnInFlight = false }
+        await spawn()
     }
 
     private func spawn() async -> Bool {

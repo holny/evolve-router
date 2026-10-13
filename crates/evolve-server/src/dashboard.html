@@ -1453,11 +1453,22 @@ function renderProviders(){
     const winInfo = (allowance || wk || mo)
       ? '<span class="dim2" style="font-size:10px;margin-left:4px">5h:'+fq(allowance)+' 周:'+fq(wk)+' 月:'+fq(mo)+'</span>'
       : '';
+    // 按量余额（payg_balance：官方 /user/balance 实测；负数/不可用红字）
+    const paygBal = (p.payg_balance && typeof p.payg_balance.total === 'number')
+      ? (() => {
+          const avail = !!p.payg_balance.is_available;
+          const total = Number(p.payg_balance.total).toFixed(2);
+          const bad = !avail || p.payg_balance.total < 0;
+          return '<span class="pbadge" title="账号余额（官方余额端点实测）" style="'
+            + (bad ? 'background:var(--badge-dead-bg);color:var(--red)' : 'background:var(--badge-ok-bg);color:var(--green)')
+            + '">余额 '+esc(String(p.payg_balance.currency))+' '+esc(total)+(bad?' · 不可用':'')+'</span>';
+        })()
+      : '';
     return '<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px'+(p.disabled?';opacity:.5':'')+'">'
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
       +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge
       +   ' <span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(kindBadge)+'</span>'
-      +   summary + disabled + docs + winInfo
+      +   summary + disabled + docs + winInfo + paygBal
       +   '<span style="margin-left:auto"></span>'
       +   '<button class="lang-btn" data-pv-edit="'+esc(p.key)+'" data-pv-source="'+esc(p.source)+'">'+esc(t('pv_edit'))+'</button>'
       +   (p.source === 'manual'
