@@ -930,29 +930,34 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     // MiniMax remains 自动刷新：observed 过期（>60s）就后台拉（面板 3s 轮询自然驱动，60s 节流在 freshness 检查）
     {
         let now0 = evolve_memory::health::now();
-        let stale = ov.providers.iter()
-            .filter(|(k, p)| !p.disabled && k.contains("MiniMax") || k.contains("minimax"))
-            .any(|(k, p)| {
-                let pk = evolve_core::plans::plan_key_for(&p.base_url);
-                let fresh = pk == Some("minimax-coding") && st.quota
-                    .observed_window("minimax-coding", "5h", now0, 60 * 1000).is_some();
-                !fresh
-            });
-        if stale {
-            let st2 = st.clone();
-            let key2 = ov.providers.keys().find(|k| k.to_lowercase().contains("minimax")).cloned();
-            let bu2 = ov.providers.iter()
-                .find(|(k, _)| k.to_lowercase().contains("minimax"))
-                .map(|(_, p)| p.base_url.clone());
-            let ak2 = ov.providers.iter()
-                .find(|(k, _)| k.to_lowercase().contains("minimax"))
-                .and_then(|(_, p)| p.api_key.clone());
-            if let (Some(k), Some(bu)) = (key2, bu2) {
-                tokio::spawn(async move {
-                    let now_ms = evolve_memory::health::now();
-                    let _ = minimax_refresh_observed(&st2, &k, &bu, ak2, now_ms).await;
-                });
+        // 积分制 provider（minimax/zhipu/zai）observed 过期（>60s）→ 后台刷官方端点
+        // 覆盖 overrides 与发现型两类；按 plan_key 去重（配额是账号级，一家实测即代表）
+        let mut due: Vec<(String, String, String, Option<String>)> = Vec::new();
+        let mut seen_pk: Vec<String> = Vec::new();
+        let mut push_due = |k: &str, bu: &str, ak: Option<String>| {
+            if let Some(pk) = evolve_core::plans::plan_key_for(bu) {
+                if matches!(pk, "minimax-coding" | "zhipu-coding" | "zai-devpack")
+                    && !seen_pk.iter().any(|x| x == pk)
+                    && st.quota.observed_window(pk, "5h", now0, 60 * 1000).is_none()
+                {
+                    seen_pk.push(pk.to_string());
+                    due.push((k.to_string(), bu.to_string(), pk.to_string(), ak));
+                }
             }
+        };
+        for (k, p) in ov.providers.iter().filter(|(_, p)| !p.disabled) {
+            push_due(k, &p.base_url, p.api_key.clone());
+        }
+        for m in st.engine.catalog_snapshot() {
+            push_due(&m.provider, &m.base_url, m.key_values().first().cloned());
+        }
+        for (k, bu, pk, ak) in due {
+            let st2 = st.clone();
+            let pk = pk.to_string();
+            tokio::spawn(async move {
+                let now_ms = evolve_memory::health::now();
+                let _ = refresh_observed(&st2, &k, &bu, &pk, ak, now_ms).await;
+            });
         }
     }
     let budgets = st.plan_budgets.lock().map(|b| b.clone()).unwrap_or_default();
@@ -1317,11 +1322,24 @@ pub async fn api_providers_set(
 
 /// MiniMax M Plan 官方 remains 端点拉取 → 写 quota observed（5h/周，百分比口径）。
 /// 由 reconcile 手动触发 + api_providers 轮询时过期自动刷新（60s 节流）。
-async fn minimax_refresh_observed(
-    st: &AppState, key: &str, base_url: &str, api_key: Option<String>, now_ms: u64,
+async fn refresh_observed(
+    st: &AppState, key: &str, base_url: &str, plan_key: &str, api_key: Option<String>, now_ms: u64,
 ) -> Option<serde_json::Map<String, Value>> {
-    let origin = base_url.split("/v1").next().unwrap_or("https://api.minimax.cn").to_string();
-    let url = format!("{origin}/v1/token_plan/remains");
+    // 分派：minimax → token_plan/remains；zhipu/zai → monitor 积分端点
+    if plan_key != "minimax-coding" && plan_key != "zhipu-coding" && plan_key != "zai-devpack" {
+        return None;
+    }
+    let zhipuish = plan_key == "zhipu-coding" || plan_key == "zai-devpack";
+    let origin = if zhipuish {
+        if base_url.contains("z.ai") { "https://api.z.ai".to_string() } else { "https://open.bigmodel.cn".to_string() }
+    } else {
+        base_url.split("/v1").next().unwrap_or("https://api.minimax.cn").to_string()
+    };
+    let url = if zhipuish {
+        format!("{origin}/api/monitor/usage/quota/limit?type=1")
+    } else {
+        format!("{origin}/v1/token_plan/remains")
+    };
     let key_resolved = api_key.or_else(|| {
         st.engine.catalog_snapshot().iter()
             .find(|m| m.provider == key)
@@ -1330,28 +1348,40 @@ async fn minimax_refresh_observed(
     let mut req = st.http.get(&url).timeout(std::time::Duration::from_secs(8));
     req = req.bearer_auth(&key_resolved);
     let j = req.send().await.ok()?.json::<serde_json::Value>().await.ok()?;
-    let general = j["model_remains"].as_array().and_then(|arr| {
-        arr.iter().find(|e| e["model_name"] == "general").or_else(|| arr.first())
-    })?.clone();
-    let mk = |pct: Option<u64>, reset: Option<u64>| evolve_memory::WindowState {
-        scope: String::new(), remaining: pct, limit: Some(100),
+    let mk = |scope: &str, pct: u64, reset: Option<u64>| evolve_memory::WindowState {
+        scope: scope.to_string(), remaining: Some(100 - pct.min(100)), limit: Some(100),
         reset_epoch_ms: reset, updated_epoch_ms: now_ms,
     };
-    let windows = vec![
-        evolve_memory::WindowState { scope: "5h".into(), ..mk(
-            general["current_interval_remaining_percent"].as_u64(),
-            general["end_time"].as_u64()) },
-        evolve_memory::WindowState { scope: "weekly".into(), ..mk(
-            general["current_weekly_remaining_percent"].as_u64(),
-            general["weekly_end_time"].as_u64()) },
-    ];
-    st.quota.observe_provider("minimax-coding", &windows);
+    let windows = if zhipuish {
+        // data.limits[]: unit=3 → 5h（动态刷新，无固定重置时刻）；unit=6 → 周（nextResetTime）
+        let limits = j["data"]["limits"].as_array()?;
+        let pick = |unit: u64| limits.iter().find(|e| e["unit"].as_u64() == Some(unit)).cloned();
+        let h5 = pick(3)?;
+        let wk = pick(6)?;
+        vec![
+            mk("5h", h5["percentage"].as_u64().unwrap_or(0), None),
+            mk("weekly", wk["percentage"].as_u64().unwrap_or(0), wk["nextResetTime"].as_u64()),
+        ]
+    } else {
+        let general = j["model_remains"].as_array().and_then(|arr| {
+            arr.iter().find(|e| e["model_name"] == "general").or_else(|| arr.first())
+        })?.clone();
+        vec![
+            mk("5h", general["current_interval_remaining_percent"].as_u64().unwrap_or(0),
+               general["end_time"].as_u64()),
+            mk("weekly", general["current_weekly_remaining_percent"].as_u64().unwrap_or(0),
+               general["weekly_end_time"].as_u64()),
+        ]
+    };
+    st.quota.observe_provider(plan_key, &windows);
     let mut snapshot: serde_json::Map<String, Value> = windows.iter().map(|w| {
         (w.scope.clone(), json!({
             "remaining": w.remaining, "limit": w.limit, "reset_epoch_ms": w.reset_epoch_ms,
         }))
     }).collect();
-    snapshot.insert("exhausted_5h".into(), json!(general["current_interval_remaining_percent"].as_u64() == Some(0)));
+    let exhausted_5h = windows.iter().find(|w| w.scope == "5h")
+        .and_then(|w| w.remaining).map(|r| r == 0).unwrap_or(false);
+    snapshot.insert("exhausted_5h".into(), json!(exhausted_5h));
     Some(snapshot)
 }
 
@@ -1397,7 +1427,7 @@ pub async fn api_providers_reconcile(
     if let Some(pk) = evolve_core::plans::plan_key_for(&base_url) {
         // MiniMax M Plan：官方 remains 端点（零 token 成本），优先于探针请求
         if pk == "minimax-coding" {
-            if let Some(snapshot) = minimax_refresh_observed(&st, &key, &base_url, api_key.clone(), now_ms).await {
+            if let Some(snapshot) = refresh_observed(&st, &key, &base_url, &pk, api_key.clone(), now_ms).await {
                 return (axum::Json(json!({"status":"ok","plan_key":pk,"windows":snapshot}))).into_response();
             }
         }
