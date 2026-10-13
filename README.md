@@ -180,6 +180,23 @@ evo-router service install   # also: start / stop / restart / status
 ```
 
 
+### macOS menu bar — real-time status at a glance
+
+On macOS, EvolveRouter lives in your **menu bar** as a native SwiftUI panel. The brand badge itself is a live status indicator with five states:
+
+| State | Meaning |
+|---|---|
+| Colored disc, white ER | Running, idle |
+| **Soft green ER + breathing** | Routing in progress |
+| **Soft yellow ER** | Last request failed (until the next request starts) |
+| White disc, knocked-out ER | Gateway stopped |
+| Gray + breathing | Gateway starting |
+
+The panel streams live decisions, per-provider 5-hour quotas, cache-hit rates, tok/s, TTFT, cooldown countdowns with causes, and one-tap wiring-config copy — all without opening the dashboard.
+
+![EvolveRouter macOS menu bar panel — light & dark](docs/assets/panel.png)
+
+
 ## The dashboard
 
 Open `http://127.0.0.1:8787/`:

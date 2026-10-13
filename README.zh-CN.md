@@ -181,6 +181,23 @@ evo-router service install   # 另有：start / stop / restart / status
 ```
 
 
+### macOS 菜单栏 —— 状态一目了然
+
+在 macOS 上，EvolveRouter 以原生 SwiftUI 面板常驻**菜单栏**。品牌徽章本身就是实时状态指示器，共五种状态：
+
+| 状态 | 含义 |
+|---|---|
+| 彩盘白 ER | 运行中，空闲 |
+| **浅绿 ER + 呼吸** | 正在路由 |
+| **浅黄 ER** | 上一次请求失败（持续到下次请求开始） |
+| 白盘镂空 ER | 网关已停止 |
+| 灰色 + 呼吸 | 网关启动中 |
+
+面板实时推送最近决策、每家 Provider 的 5 小时配额、缓存命中率、吐字速率、TTFT、冷却倒计时与原因，接入配置一键复制——无需打开完整面板。
+
+![EvolveRouter macOS 菜单栏面板 —— 亮/暗双主题](docs/assets/panel.png)
+
+
 ## 面板
 
 打开 `http://127.0.0.1:8787/`：
