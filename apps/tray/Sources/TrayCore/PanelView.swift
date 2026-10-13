@@ -28,7 +28,11 @@ public struct PanelView: View {
         }
         .padding(14)
         .frame(width: 336)
-        .task { await state.pollData() }
+        .task {
+            if ProcessInfo.processInfo.environment["EV_PREVIEW_STATIC"] == nil {
+                await state.pollData()
+            }
+        }
         .confirmationDialog(t("quit_confirm"), isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button(t("quit_action"), role: .destructive) { quitAll() }
             Button(t("cancel"), role: .cancel) {}
@@ -198,23 +202,7 @@ public struct PanelView: View {
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
                         HStack(spacing: 5) {
-                            if let until = p.cooldownUntil, until > Date() {
-                                let remain = Int(until.timeIntervalSinceNow)
-                                let txt = remain >= 3600
-                                    ? "\(remain/3600)h \(remain%3600/60)m"
-                                    : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
-                                Text("\(t("cooldown")) \(txt)")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.red)
-                                    .monospacedDigit()
-                                if let cause = p.cooldownCause, !cause.isEmpty {
-                                    Text(cause)
-                                        .font(.system(size: 9.5))
-                                        .foregroundStyle(.red)
-                                        .lineLimit(1)
-                                        .help(cause)
-                                }
-                            }
+
                             if !p.enabled {
                                 Text(t("disabled"))
                                     .font(.system(size: 9.5))
@@ -245,6 +233,18 @@ public struct PanelView: View {
                                     .monospacedDigit()
                             }
                         }
+                            if let until = p.cooldownUntil, until > Date() {
+                                let remain = Int(until.timeIntervalSinceNow)
+                                let txt = remain >= 3600
+                                    ? "\(remain/3600)h \(remain%3600/60)m"
+                                    : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
+                                Text("\(t("cooldown")) \(txt)\(p.cooldownCause.map { c in " · \(c)" } ?? "")")
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.red)
+                                    .monospacedDigit()
+                                    .lineLimit(1)
+                                    .help(p.cooldownCause ?? "")
+                            }
                     }
                     Spacer(minLength: 0)
                     if let pct = p.pct {

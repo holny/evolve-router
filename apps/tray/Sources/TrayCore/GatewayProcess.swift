@@ -52,10 +52,9 @@ public final class GatewayProcess: ObservableObject {
         do {
             try p.run()
         } catch {
-            try? "spawn error: \(error)\n".write(toFile: "/tmp/ev-spawn-dbg.log", atomically: true, encoding: .utf8)
+            tracingFallback("spawn failed: \(error)")
             return false
         }
-        try? "spawned pid=\(p.processIdentifier) at \(Date())\n".write(toFile: "/tmp/ev-spawn-dbg.log", atomically: true, encoding: .utf8)
         child = p
         owned = true
         // 等网关就绪（最长 ~6s：绑定 + 目录初始化）
@@ -65,6 +64,15 @@ public final class GatewayProcess: ObservableObject {
             if await networkHealthy() { return true }
         }
         return await networkHealthy()
+    }
+
+    private func tracingFallback(_ msg: String) {
+        // 诊断信息进 gateway-child.log（与子进程日志同文件，避免散落探针文件）
+        if let fh = FileHandle(forWritingAtPath: Config.gatewayLogURL.path) {
+            fh.seekToEndOfFile()
+            fh.write(Data("[shell] \(msg)\n".utf8))
+            try? fh.close()
+        }
     }
 
     /// 优雅停止：SIGTERM → 等 3s → SIGKILL；返回是否由本 app 管理并已停。

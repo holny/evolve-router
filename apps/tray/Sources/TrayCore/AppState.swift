@@ -23,14 +23,6 @@ public struct RecentDecision: Identifiable {
     public let failReason: String?
 }
 
-private func dbg(_ msg: String) {
-    if let data = ("\(Date()) " + msg + "\n").data(using: .utf8) {
-        if let fh = FileHandle(forWritingAtPath: "/tmp/ev-icon-dbg.log") {
-            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
-        } else { try? data.write(to: URL(fileURLWithPath: "/tmp/ev-icon-dbg.log")) }
-    }
-}
-
 public struct ChatResult: Equatable {
     public let decisionId: String
     public let status: Int
@@ -98,7 +90,6 @@ public final class AppState: ObservableObject {
             seenDecisionIDs = Set(seenDecisionIDs.suffix(192))
         }
         lastResult = ChatResult(decisionId: decisionId, status: status, ts: Date())
-        dbg("noteChatEvent id=\(decisionId) status=\(status) -> lastResult")
     }
 
     /// 高频轻量轮询（1s）：in-flight 计数 + 健康，驱动图标与"进行中"
@@ -279,7 +270,6 @@ public final class AppState: ObservableObject {
             }
         }
         lastSync = Date()
-        dbg("pollData tick: inflight=\(inflight) healthy=\(healthy) lastResult=\(lastResult?.status.description ?? "nil") seen=\(seenDecisionIDs.count)")
     }
 
     private func tsString(_ ts: Any?) -> String {

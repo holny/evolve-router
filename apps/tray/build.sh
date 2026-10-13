@@ -60,7 +60,12 @@ if [[ "${1:-}" == "--install" ]]; then
     rm -f "$HOME/Library/LaunchAgents/ai.evolve-router.gateway.plist"
     pkill -x "${APP_NAME}" 2>/dev/null || true
     pkill -f "evo-router serve" 2>/dev/null || true
-    sleep 1
+    # 确认旧壳真死了（SIGTERM 偶发被 launchd 竞速拉回/未送达）
+    for i in $(seq 1 10); do
+        pgrep -x "${APP_NAME}" >/dev/null 2>&1 || break
+        sleep 0.5
+        [[ $i -eq 10 ]] && pkill -9 -x "${APP_NAME}" 2>/dev/null || true
+    done
     # 等端口真释放（SIGTERM 优雅停机可拖 >1.5s；不等于新壳会误判为"外部实例"而不拉网关）
     for i in $(seq 1 10); do
         curl -s -m 1 "http://127.0.0.1:${EV_PORT:-8787}/healthz" >/dev/null 2>&1 || break
