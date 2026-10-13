@@ -1274,6 +1274,12 @@ function renderChips(){
   const byPlan = {};
   (state.providers||[]).forEach(p => {
     const k = PK_SHORT[p.plan_kind] || p.plan_kind || '-';
+    // observed 实测优先（provider remains 端点/响应头捕获）；credits 数学仅兜底
+    const obs5 = p.observed && p.observed['5h'];
+    if (obs5 && obs5.limit > 0 && obs5.remaining != null) {
+      byPlan[k] = Math.max(byPlan[k]||0, Math.min(100, Math.round(100*(obs5.limit-obs5.remaining)/obs5.limit)));
+      return;
+    }
     const allow = (p.windows && p.windows['5h']) || p.allowance;
     if (!allow) return;
     byPlan[k] = Math.max(byPlan[k]||0, Math.round(100*(p.used_5h||0)/allow));
@@ -1308,15 +1314,11 @@ const TIER_PRESETS = {
   'minimax-coding':{'lite':[4000,null,null],'pro':[16000,null,null],'max':[40000,null,null]},
   'volces-coding': {'lite':[null,null,null],'pro':[null,null,null]},
 };
+const PLAN_TO_PRESET = {coding:'zhipu-coding', agent:'volces-coding', go:'zai-devpack', api:'zhipu-coding'};
 function applyTierPreset(planKind, tier, fields){
-  // 套餐下拉值（coding/agent/go/api）→ 匹配 TIER_PRESETS 键（含该值的所有套餐）
-  let p = null;
-  for (const key of Object.keys(TIER_PRESETS)) {
-    if (key.includes(planKind) && TIER_PRESETS[key][tier]) {
-      p = TIER_PRESETS[key][tier];
-      break;
-    }
-  }
+  // 套餐下拉值 → 精确映射 preset 键（旧版 includes 匹配曾把 zhipu 窗口误套给 minimax）
+  const key = PLAN_TO_PRESET[planKind];
+  const p = key ? TIER_PRESETS[key] && TIER_PRESETS[key][tier] : null;
   if (!p) return;
   fields.w5h.value = p[0] != null ? p[0] : '';
   fields.wweek.value = p[1] != null ? p[1] : '';

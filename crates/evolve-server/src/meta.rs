@@ -927,6 +927,34 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
 /// Provider 管理列表：内置注册表 + 扫描发现 + 手动定义，合并展示
 pub async fn api_providers(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
+    // MiniMax remains 自动刷新：observed 过期（>60s）就后台拉（面板 3s 轮询自然驱动，60s 节流在 freshness 检查）
+    {
+        let now0 = evolve_memory::health::now();
+        let stale = ov.providers.iter()
+            .filter(|(k, p)| !p.disabled && k.contains("MiniMax") || k.contains("minimax"))
+            .any(|(k, p)| {
+                let pk = evolve_core::plans::plan_key_for(&p.base_url);
+                let fresh = pk == Some("minimax-coding") && st.quota
+                    .observed_window("minimax-coding", "5h", now0, 60 * 1000).is_some();
+                !fresh
+            });
+        if stale {
+            let st2 = st.clone();
+            let key2 = ov.providers.keys().find(|k| k.to_lowercase().contains("minimax")).cloned();
+            let bu2 = ov.providers.iter()
+                .find(|(k, _)| k.to_lowercase().contains("minimax"))
+                .map(|(_, p)| p.base_url.clone());
+            let ak2 = ov.providers.iter()
+                .find(|(k, _)| k.to_lowercase().contains("minimax"))
+                .and_then(|(_, p)| p.api_key.clone());
+            if let (Some(k), Some(bu)) = (key2, bu2) {
+                tokio::spawn(async move {
+                    let now_ms = evolve_memory::health::now();
+                    let _ = minimax_refresh_observed(&st2, &k, &bu, ak2, now_ms).await;
+                });
+            }
+        }
+    }
     let budgets = st.plan_budgets.lock().map(|b| b.clone()).unwrap_or_default();
     let soft_pct = st.config.policy.plan_soft_pct;
     let health_snap = st.health.snapshot();
@@ -1286,6 +1314,47 @@ pub async fn api_providers_set(
     (axum::Json(json!({"status": "ok", "key": key, "fetched_models": fetched}))).into_response()
 }
 
+
+/// MiniMax M Plan 官方 remains 端点拉取 → 写 quota observed（5h/周，百分比口径）。
+/// 由 reconcile 手动触发 + api_providers 轮询时过期自动刷新（60s 节流）。
+async fn minimax_refresh_observed(
+    st: &AppState, key: &str, base_url: &str, api_key: Option<String>, now_ms: u64,
+) -> Option<serde_json::Map<String, Value>> {
+    let origin = base_url.split("/v1").next().unwrap_or("https://api.minimax.cn").to_string();
+    let url = format!("{origin}/v1/token_plan/remains");
+    let key_resolved = api_key.or_else(|| {
+        st.engine.catalog_snapshot().iter()
+            .find(|m| m.provider == key)
+            .and_then(|m| m.key_values().first().cloned())
+    })?;
+    let mut req = st.http.get(&url).timeout(std::time::Duration::from_secs(8));
+    req = req.bearer_auth(&key_resolved);
+    let j = req.send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+    let general = j["model_remains"].as_array().and_then(|arr| {
+        arr.iter().find(|e| e["model_name"] == "general").or_else(|| arr.first())
+    })?.clone();
+    let mk = |pct: Option<u64>, reset: Option<u64>| evolve_memory::WindowState {
+        scope: String::new(), remaining: pct, limit: Some(100),
+        reset_epoch_ms: reset, updated_epoch_ms: now_ms,
+    };
+    let windows = vec![
+        evolve_memory::WindowState { scope: "5h".into(), ..mk(
+            general["current_interval_remaining_percent"].as_u64(),
+            general["end_time"].as_u64()) },
+        evolve_memory::WindowState { scope: "weekly".into(), ..mk(
+            general["current_weekly_remaining_percent"].as_u64(),
+            general["weekly_end_time"].as_u64()) },
+    ];
+    st.quota.observe_provider("minimax-coding", &windows);
+    let mut snapshot: serde_json::Map<String, Value> = windows.iter().map(|w| {
+        (w.scope.clone(), json!({
+            "remaining": w.remaining, "limit": w.limit, "reset_epoch_ms": w.reset_epoch_ms,
+        }))
+    }).collect();
+    snapshot.insert("exhausted_5h".into(), json!(general["current_interval_remaining_percent"].as_u64() == Some(0)));
+    Some(snapshot)
+}
+
 /// 手动对账（用户裁决：以 Provider 测为准）：对一个 provider 的目录首模型发一个
 /// 极小 completion 请求捕获响应头，把 provider 的真实配额/限额写入 observed
 pub async fn api_providers_reconcile(
@@ -1295,6 +1364,8 @@ pub async fn api_providers_reconcile(
     let Some(key) = body.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()) else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "key is required"}}))).into_response();
     };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let ov = crate::state::load_overrides(&st.config.data.dir);
     let (base_url, api_key) = if let Some(pd) = ov.providers.get(&key) {
         (pd.base_url.clone(), pd.api_key.clone())
@@ -1324,6 +1395,12 @@ pub async fn api_providers_reconcile(
             axum::Json(json!({"error": {"message": format!("transport: {e}")}}))).into_response(),
     };
     if let Some(pk) = evolve_core::plans::plan_key_for(&base_url) {
+        // MiniMax M Plan：官方 remains 端点（零 token 成本），优先于探针请求
+        if pk == "minimax-coding" {
+            if let Some(snapshot) = minimax_refresh_observed(&st, &key, &base_url, api_key.clone(), now_ms).await {
+                return (axum::Json(json!({"status":"ok","plan_key":pk,"windows":snapshot}))).into_response();
+            }
+        }
         let windows = evolve_memory::QuotaLedger::parse_headers(resp.headers());
         st.quota.observe_provider(pk, &windows);
         let snapshot: serde_json::Map<String, Value> = windows.iter().map(|w| {

@@ -11,15 +11,14 @@ enum PanelPreview {
         state.requests = 1691
         state.successRate = 99
         state.tokensK = "780.4k"
-        state.plans = [("CP", 63), ("GO", 0)]
         state.recent = [
             RecentDecision(model: "opencode-go-github/glm-5.3", status: 200, totalMs: 13_540, ttftMs: 5_012, tokS: 92.4, agent: "opencode", time: "22:58"),
             RecentDecision(model: "zhipuai-coding-plan/glm-5.3", status: 500, totalMs: 8_214, ttftMs: 4_410, tokS: nil, agent: "pi", time: "22:41"),
         ]
         state.providers = [
-            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownMs: nil, pct: 4, tokens24h: 92_000, planKind: "go"),
-            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownMs: 142_000, pct: 71, tokens24h: 51_000, planKind: "coding"),
-            ProviderRow(key: "minimax-coding", enabled: false, available: true, cooldownMs: nil, pct: nil, tokens24h: 0, planKind: "coding"),
+            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, tokens24h: 92_000, planKind: "go"),
+            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, tokens24h: 51_000, planKind: "coding"),
+            ProviderRow(key: "minimax-coding", enabled: false, available: true, cooldownUntil: nil, cooldownCause: nil, pct: nil, tokens24h: 0, planKind: "coding"),
         ]
         state.lastSync = Date()
 

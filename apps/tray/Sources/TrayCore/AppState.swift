@@ -2,9 +2,11 @@ import Foundation
 import SwiftUI
 
 public struct RecentDecision: Identifiable {
-    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String) {
+    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
+        self.preprocessMs = preprocessMs; self.decisionMs = decisionMs
+        self.totalTokens = totalTokens; self.cachePct = cachePct; self.failReason = failReason
     }
     public let id = UUID()
     public let model: String
@@ -14,24 +16,53 @@ public struct RecentDecision: Identifiable {
     public let tokS: Double?
     public let agent: String
     public let time: String
+    public let preprocessMs: Int
+    public let decisionMs: Int
+    public let totalTokens: Int
+    public let cachePct: Int?
+    public let failReason: String?
+}
+
+private func dbg(_ msg: String) {
+    if let data = ("\(Date()) " + msg + "\n").data(using: .utf8) {
+        if let fh = FileHandle(forWritingAtPath: "/tmp/ev-icon-dbg.log") {
+            fh.seekToEndOfFile(); fh.write(data); try? fh.close()
+        } else { try? data.write(to: URL(fileURLWithPath: "/tmp/ev-icon-dbg.log")) }
+    }
+}
+
+public struct ChatResult: Equatable {
+    public let decisionId: String
+    public let status: Int
+    public let ts: Date
+    public init(decisionId: String, status: Int, ts: Date) {
+        self.decisionId = decisionId; self.status = status; self.ts = ts
+    }
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownMs: Int?, pct: Int?, tokens24h: Int, planKind: String) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil) {
         self.key = key; self.enabled = enabled; self.available = available
-        self.cooldownMs = cooldownMs; self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
+        self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
+        self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
+        self.tokens5h = tokens5h; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePct5h = cachePct5h
     }
     public let key: String
     public let enabled: Bool
     public let available: Bool
-    public let cooldownMs: Int?
+    public let cooldownUntil: Date?
+    public let cooldownCause: String?
     public let pct: Int?
     public let tokens24h: Int
     public let planKind: String
+    public let tokens5h: Int
+    public let avgTtftMs: Int?
+    public let avgRate: Double?
+    public let cachePct5h: Int?
     public var id: String { key }
 }
 
-public enum IconState { case idle, busy, fail, stopped, starting }
+public enum IconState { case idle, busy, success, fail, stopped, starting }
 
 @MainActor
 public final class AppState: ObservableObject {
@@ -44,18 +75,30 @@ public final class AppState: ObservableObject {
     @Published public var requests = 0
     @Published public var successRate = 0
     @Published public var tokensK = "-"
-    @Published public var plans: [(String, Int)] = []
     @Published public var recent: [RecentDecision] = []
     @Published public var providers: [ProviderRow] = []
     @Published public var lastSync: Date?
-    @Published public var lastFailAt: Date?
+    @Published public var lastResult: ChatResult?
+    private var seenDecisionIDs = Set<String>()
 
     public var iconState: IconState {
         if !healthy { return .stopped }
         if starting { return .starting }
-        if let f = lastFailAt, Date().timeIntervalSince(f) < 60 { return .fail }
-        if inflight > 0 { return .busy }
+        if inflight > 0 { return .busy }  // busy 期间用绿色 ER（用户裁决：路由中才显示）
+        if let r = lastResult, r.status != 200 { return .fail }  // idle+失败 → 黄 ER；新请求会清掉 lastResult
         return .idle
+    }
+
+    /// 新事件钩子：去重后把"上次结果"写回 lastResult（busy 中仍展示旧颜色）
+    public func noteChatEvent(decisionId: String, status: Int) {
+        guard !seenDecisionIDs.contains(decisionId) else { return }
+        seenDecisionIDs.insert(decisionId)
+        // 容量保护：清掉太久的事件 id（保留最近 256 个）
+        if seenDecisionIDs.count > 256 {
+            seenDecisionIDs = Set(seenDecisionIDs.suffix(192))
+        }
+        lastResult = ChatResult(decisionId: decisionId, status: status, ts: Date())
+        dbg("noteChatEvent id=\(decisionId) status=\(status) -> lastResult")
     }
 
     /// 高频轻量轮询（1s）：in-flight 计数 + 健康，驱动图标与"进行中"
@@ -76,9 +119,10 @@ public final class AppState: ObservableObject {
     /// 低频明细轮询（3s）：统计/Provider/事件
     public func pollData() async {
         guard healthy else { return }
-        if case (200, let data)? = try? await get("/api/stats?window=24h"),
+        var models: [String: Any] = [:]
+        if case (200, let data)? = try? await get("/api/stats?window=5h"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let models = (obj["models"] as? [String: Any]) ?? obj
+            models = (obj["models"] as? [String: Any]) ?? obj
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
                 guard let s = s as? [String: Any] else { continue }
@@ -92,8 +136,7 @@ public final class AppState: ObservableObject {
             tokensK = Self.fmtTok(toks)
         }
         var rows: [ProviderRow] = []
-        var byPlan: [String: Int] = [:]
-        var coolByKey: [String: (Bool, Int?)] = [:]
+        var coolByKey: [String: (Bool, Date?, String)] = [:]
         if case (200, let sdata)? = try? await get("/api/providers/status"),
            let sw = try? JSONSerialization.jsonObject(with: sdata) as? [String: Any],
            let sarr = sw["providers"] as? [[String: Any]] {
@@ -101,7 +144,9 @@ public final class AppState: ObservableObject {
                 let k = (s["key"] as? String) ?? ""
                 let cd = (s["cooldown_remaining_ms"] as? Int)
                     ?? (s["cooldown_remaining_ms"] as? Double).map(Int.init)
-                coolByKey[k] = (((s["available"] as? Bool) ?? true), cd)
+                let cause = (s["message"] as? String) ?? ((s["kind"] as? String) ?? "")
+                let until = cd.map { Date().addingTimeInterval(Double($0)/1000.0) }
+                coolByKey[k] = (((s["available"] as? Bool) ?? true), until, cause)
             }
         }
         if case (200, let data)? = try? await get("/api/providers"),
@@ -125,23 +170,22 @@ public final class AppState: ObservableObject {
                 if pct == nil, let w5, w5 > 0 {
                     pct = Int((used5 / w5 * 100).rounded())
                 }
-                if let pct {
-                    let short = ["coding": "CP", "go": "GO", "agent": "AP", "token": "TOK"][kind]
-                        ?? String(kind.prefix(4)).uppercased()
-                    byPlan[short] = max(byPlan[short] ?? 0, pct)
-                }
                 var available = true
-                var cooldownMs: Int? = nil
+                var cooldownUntil: Date? = nil
+                var cooldownCause: String? = nil
                 for k in mergedKeys {
-                    if let (av, cd) = coolByKey[k] {
+                    if let (av, until, cause) = coolByKey[k] {
                         available = available && av
-                        if let cd, cd > 0 { cooldownMs = min(cooldownMs ?? Int.max, cd) }
+                        if let until, until > Date() {
+                            if cooldownUntil == nil || until > cooldownUntil! { cooldownUntil = until }
+                            if cooldownCause == nil || cooldownCause!.isEmpty { cooldownCause = cause }
+                        }
                     }
                 }
                 let disabled = (p["disabled"] as? Bool) ?? false
                 let tok24 = (p["tokens_24h"] as? Int) ?? Int((p["tokens_24h"] as? Double) ?? 0)
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
-                                        cooldownMs: cooldownMs, pct: pct,
+                                        cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: pct,
                                         tokens24h: tok24, planKind: kind))
             }
         }
@@ -149,8 +193,38 @@ public final class AppState: ObservableObject {
             if $0.enabled != $1.enabled { return $0.enabled }
             return $0.tokens24h > $1.tokens24h
         }
+        // per-provider 5h 指标：stats 的 model key 形如 "provider/model"，按前缀聚合
+        var agg: [String: (tok: Int, ttftW: Double, ttftN: Int, rateW: Double, rateN: Int, cacheSum: Int, promptSum: Int)] = [:]
+        for (mid, msAny) in models {
+            guard let ms = msAny as? [String: Any] else { continue }
+            let prov = mid.split(separator: "/").first.map(String.init) ?? mid
+            var e = agg[prov] ?? (0, 0.0, 0, 0.0, 0, 0, 0)
+            let req = (ms["requests"] as? Int) ?? Int((ms["requests"] as? Double) ?? 0)
+            let pin = (ms["prompt_tokens"] as? Int) ?? Int((ms["prompt_tokens"] as? Double) ?? 0)
+            let pout = (ms["completion_tokens"] as? Int) ?? Int((ms["completion_tokens"] as? Double) ?? 0)
+            e.tok += pin + pout
+            if let t = (ms["avg_ttft_ms"] as? Double) ?? (ms["avg_ttft_ms"] as? Int).map(Double.init) {
+                e.ttftW += t * Double(req); e.ttftN += req
+            }
+            if let r = (ms["avg_rate_tok_s"] as? Double) ?? (ms["avg_rate_tok_s"] as? Int).map(Double.init) {
+                e.rateW += r * Double(req); e.rateN += req
+            }
+            e.cacheSum += (ms["cached_tokens"] as? Int) ?? Int((ms["cached_tokens"] as? Double) ?? 0)
+            e.promptSum += pin
+            agg[prov] = e
+        }
+        rows = rows.map { r in
+            guard let e = agg[r.key] else { return r }
+            let cachePct: Int? = e.promptSum > 0 ? Int(round(100.0 * Double(e.cacheSum) / Double(e.promptSum))) : nil
+            return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
+                               cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
+                               pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
+                               tokens5h: e.tok,
+                               avgTtftMs: e.ttftN > 0 ? Int(e.ttftW / Double(e.ttftN)) : nil,
+                               avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,
+                               cachePct5h: cachePct)
+        }
         providers = Array(rows.prefix(8))
-        plans = byPlan.sorted { $0.value > $1.value }
         if case (200, let data)? = try? await get("/api/events?limit=30"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             var decRows: [RecentDecision] = []
@@ -164,23 +238,48 @@ public final class AppState: ObservableObject {
                 let tokS = out > 0 ? Double(out) / (Double(gen) / 1000.0) : nil
                 let agent = ((ev["agent"] as? String) ?? "-").split(separator: "/").first.map(String.init) ?? "-"
                 let time = tsString(ev["ts"])
-                decRows.append(RecentDecision(model: model, status: status, totalMs: total,
-                                              ttftMs: ttft > 0 ? ttft : nil, tokS: tokS,
-                                              agent: agent, time: time))
+                let pre = (ev["preprocess_ms"] as? Int) ?? Int((ev["preprocess_ms"] as? Double) ?? 0)
+                let dec = (ev["decision_ms"] as? Int) ?? Int((ev["decision_ms"] as? Double) ?? 0)
+                let pin = (ev["prompt_tokens"] as? Int) ?? Int((ev["prompt_tokens"] as? Double) ?? 0)
+                let cached = (ev["cached_tokens"] as? Int) ?? Int((ev["cached_tokens"] as? Double) ?? 0)
+                let totalTok = pin + out
+                let cachePct: Int? = pin > 0 ? Int(round(100.0 * Double(cached) / Double(pin))) : nil
+                var failReason: String? = nil
+                if status != 200 {
+                    let raw = (ev["reason"] as? String) ?? ""
+                    // reason 形如 "all routed upstreams failed: m1[0](transient error); m2[0](no credit)"
+                    // 提取括号内原因去重，最多 2 个
+                    var causes: [String] = []
+                    var rest = Substring(raw)
+                    while let r1 = rest.range(of: "("), let r2 = rest.range(of: ")", range: r1.upperBound..<rest.endIndex) {
+                        let c = String(rest[r1.upperBound..<r2.lowerBound])
+                        if !causes.contains(c) { causes.append(c) }
+                        rest = rest[r2.upperBound...]
+                    }
+                    if causes.isEmpty {
+                        failReason = raw.isEmpty ? "HTTP \(status)" : String(raw.prefix(60))
+                    } else {
+                        failReason = causes.prefix(2).joined(separator: " / ")
+                    }
+                }
+                decRows.append(RecentDecision(
+                    model: model, status: status, totalMs: total,
+                    ttftMs: ttft > 0 ? ttft : nil, tokS: tokS,
+                    agent: agent, time: time,
+                    preprocessMs: pre, decisionMs: dec,
+                    totalTokens: totalTok, cachePct: cachePct, failReason: failReason))
+                let did = ((ev["decision_id"] as? String) ?? "")
+                if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 5 { break }
             }
             recent = decRows
             if let newest = arr.last(where: { ($0["kind"] as? String) == "chat" }) {
                 let status = (newest["status"] as? Int) ?? Int((newest["status"] as? Double) ?? 0)
-                if status != 200 {
-                    let ts = (newest["ts"] as? Double) ?? 0
-                    lastFailAt = Date(timeIntervalSince1970: ts / 1000)
-                } else {
-                    lastFailAt = nil
-                }
+                // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
             }
         }
         lastSync = Date()
+        dbg("pollData tick: inflight=\(inflight) healthy=\(healthy) lastResult=\(lastResult?.status.description ?? "nil") seen=\(seenDecisionIDs.count)")
     }
 
     private func tsString(_ ts: Any?) -> String {

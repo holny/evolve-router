@@ -22,7 +22,6 @@ public struct PanelView: View {
         VStack(spacing: 10) {
             header
             metricsCard
-            if !state.plans.isEmpty { plansCard }
             if !state.recent.isEmpty { decisionsCard }
             if !state.providers.isEmpty { providersCard }
             controls
@@ -42,11 +41,8 @@ public struct PanelView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "arrow.triangle.2.circlepath")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(Color.accentColor))
+            // 品牌徽章 = 官方 v5 彩盘（与菜单栏/桌面图标同源）
+            brandBadge
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Circle()
@@ -102,6 +98,9 @@ public struct PanelView: View {
             metric("arrow.up.right", label: t("success_rate"), value: "\(state.successRate)%")
             metric("number", label: t("tokens"), value: state.tokensK)
             Spacer(minLength: 0)
+            Text(t("last_24h"))
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,45 +124,13 @@ public struct PanelView: View {
         }
     }
 
-    // MARK: - 方案 5h 用量
-
-    private var plansCard: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            sectionLabel("hourglass", t("plan_5h"))
-            ForEach(state.plans, id: \.0) { name, pct in
-                HStack(spacing: 8) {
-                    planBadge(name)
-                    quotaBar(pct)
-                    Text(pct > 999 ? ">999%" : "\(pct)%")
-                        .font(.system(size: 11, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(pct >= 85 ? Color.orange : .secondary)
-                        .frame(width: 46, alignment: .trailing)
-                }
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(groupBackground)
-    }
-
-    private func planBadge(_ name: String) -> some View {
-        Text(name)
-            .font(.system(size: 10, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(Color.accentColor.opacity(0.14)))
-            .foregroundStyle(Color.accentColor)
-            .lineLimit(1)
-            .minimumScaleFactor(0.8)
-    }
-
     // MARK: - 最近决策
 
     private var decisionsCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("sparkle.middle", t("recent"))
-            ForEach(state.recent) { r in
+            let rows = state.recent
+            ForEach(rows, id: \.id) { r in
                 HStack(spacing: 7) {
                     Circle()
                         .fill(r.status == 200 ? Color.green : Color.red)
@@ -172,24 +139,39 @@ public struct PanelView: View {
                         Text(r.model)
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
-                        HStack(spacing: 6) {
-                            Text(r.time)
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
-                            if let tt = r.ttftMs {
-                                Text("TTFT \(tt)ms")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 5) {
+                                let routing = r.preprocessMs + r.decisionMs
+                                let llm = max(0, r.totalMs - (r.ttftMs ?? 0) - routing)
+                                Text("ER \(Self.fmtMs(routing))")
+                                    .help("EvolveRouter routing decision time")
+                                if let tt = r.ttftMs {
+                                    Text("TTFT \(Self.fmtMs(tt))")
+                                        .help("upstream time-to-first-token")
+                                }
+                                Text("LLM \(Self.fmtMs(llm))")
+                                    .help("upstream generation time")
+                                if let s = r.tokS, s > 0 {
+                                    Text(String(format: "%.0f tok/s", s))
+                                }
+                                Text("\(AppState.fmtTok(r.totalTokens))(\(r.cachePct ?? 0)%)")
+                                    .help("total tokens (cache hit rate in parens)")
                             }
-                            if let s = r.tokS, s > 0 {
-                                Text(String(format: "%.0f tok/s", s))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                            if r.status != 200, let reason = r.failReason {
+                                Text("Fail: \(reason)")
                                     .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
+                                    .foregroundStyle(.red)
+                                    .lineLimit(1)
+                                    .help(reason)
                             }
                         }
                     }
                     Spacer(minLength: 0)
-                    Text(r.status == 200 ? "\(r.totalMs)ms" : t("fail_short"))
+                    Text(Self.fmtMs(r.totalMs))
                         .font(.system(size: 10, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(r.status == 200 ? .secondary : Color.red)
@@ -216,18 +198,48 @@ public struct PanelView: View {
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
                         HStack(spacing: 5) {
-                            if let cd = p.cooldownMs, cd > 0 {
-                                Text("\(t("cooldown")) \(cd / 60_000)m")
+                            if let until = p.cooldownUntil, until > Date() {
+                                let remain = Int(until.timeIntervalSinceNow)
+                                let txt = remain >= 3600
+                                    ? "\(remain/3600)h \(remain%3600/60)m"
+                                    : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
+                                Text("\(t("cooldown")) \(txt)")
                                     .font(.system(size: 9.5))
-                                    .foregroundStyle(.orange)
+                                    .foregroundStyle(.red)
+                                    .monospacedDigit()
+                                if let cause = p.cooldownCause, !cause.isEmpty {
+                                    Text(cause)
+                                        .font(.system(size: 9.5))
+                                        .foregroundStyle(.red)
+                                        .lineLimit(1)
+                                        .help(cause)
+                                }
                             }
                             if !p.enabled {
                                 Text(t("disabled"))
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(.tertiary)
                             }
-                            if p.tokens24h > 0 {
-                                Text("\(AppState.fmtTok(p.tokens24h)) · 24h")
+                            if p.tokens5h > 0 {
+                                Text("\(AppState.fmtTok(p.tokens5h))·5h")
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
+                            }
+                            if let cp = p.cachePct5h {
+                                Text("hit \(cp)%")
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
+                            }
+                            if let rt = p.avgRate {
+                                Text(String(format: "%.0f t/s", rt))
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(.tertiary)
+                                    .monospacedDigit()
+                            }
+                            if let tt = p.avgTtftMs {
+                                Text("TTFT \(Self.fmtMs(tt))")
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(.tertiary)
                                     .monospacedDigit()
@@ -257,82 +269,94 @@ public struct PanelView: View {
     }
 
     // MARK: - 控制区
-
+    // 行 1：主行动（GitHub / 完整面板）—— 等宽 tinted 胶囊
+    // 行 2：次要控制（停止 / 退出 / 自启）—— 小号胶囊同语言
     private var controls: some View {
-        VStack(spacing: 8) {
-            gatewayButton
+        VStack(spacing: 6) {
             HStack(spacing: 6) {
-                Toggle(t("autostart"), isOn: $autostart)
+                chip(icon: "safari", label: t("github"), tint: .accentColor, help: t("github")) {
+                    NSWorkspace.shared.open(Config.githubURL)
+                }
+                chip(icon: "gauge.with.needle", label: t("dashboard"), tint: .accentColor, help: t("dashboard")) {
+                    if let url = URL(string: Config.baseURL) { NSWorkspace.shared.open(url) }
+                }
+            }
+            HStack(spacing: 6) {
+                gatewayChip
+                chip(icon: "power", label: t("quit"), tint: .red, help: t("quit"), danger: true) {
+                    showExitConfirm = true
+                }
+                Spacer(minLength: 2)
+                Toggle(isOn: $autostart) { EmptyView() }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
-                    .font(.system(size: 11))
-                    .onChange(of: autostart) { on in
-                        applyAutostart(on)
-                    }
-                Spacer()
-                Link(destination: Config.githubURL) {
-                    Image(systemName: "safari")
-                        .font(.system(size: 12))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help(t("github"))
-                Button {
-                    NSWorkspace.shared.open(URL(string: Config.baseURL)!)
-                } label: {
-                    Image(systemName: "gauge.with.needle")
-                        .font(.system(size: 12))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .help(t("dashboard"))
-                Button(role: .destructive) {
-                    showExitConfirm = true
-                } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 12))
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.red)
-                .help(t("quit"))
+                    .labelsHidden()
+                    .onChange(of: autostart) { on in applyAutostart(on) }
+                Text(t("autostart"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
-    private var gatewayButton: some View {
+    private func chip(icon: String, label: String, tint: Color, help: String,
+                      danger: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Image(systemName: icon).font(.system(size: 10, weight: .semibold))
+                Text(label).font(.system(size: 11, weight: .medium)).lineLimit(1)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.055)))
+            .foregroundStyle(tint)
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// 停止/启动 胶囊：healthy → 红调（停止），否则 accent（启动）
+    private var gatewayChip: some View {
         Button {
             Task { await toggleGateway() }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 if state.starting {
-                    ProgressView()
-                        .controlSize(.mini)
+                    ProgressView().controlSize(.mini)
                 } else {
                     Image(systemName: state.healthy ? "stop.fill" : "play.fill")
                         .font(.system(size: 10, weight: .semibold))
                 }
-                Text(gatewayButtonLabel)
-                    .font(.system(size: 12, weight: .medium))
-                Spacer()
+                Text(gatewayChipLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 8)
+                .fill((state.healthy ? Color.red : Color.accentColor).opacity(0.12)))
+            .foregroundStyle(state.healthy ? Color.red : Color.accentColor)
         }
         .buttonStyle(.plain)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(state.healthy ? Color.red.opacity(0.12) : Color.accentColor.opacity(0.16))
-        )
-        .foregroundStyle(state.healthy ? Color.red : Color.accentColor)
         .disabled(state.starting)
+        .help(state.healthy ? t("stop_gw") : t("start_gw"))
     }
 
-    private var gatewayButtonLabel: String {
+    private var gatewayChipLabel: String {
         if state.starting { return t("starting") }
         return state.healthy ? t("stop_gw") : t("start_gw")
+    }
+
+    /// 品牌徽章 = 官方 v5 彩盘（与菜单栏/桌面图标同源）
+    @MainActor
+    private var brandBadge: some View {
+        let img = NSImage(contentsOf:
+            Bundle.module.url(forResource: "tray-icon-color@2x", withExtension: "png")!
+        ) ?? NSImage()
+        img.size = NSSize(width: 28, height: 28)
+        return Image(nsImage: img).frame(width: 28, height: 28)
     }
 
     // MARK: - 小件
@@ -389,5 +413,12 @@ public struct PanelView: View {
             await GatewayProcess.shared.stop()
             NSApp.terminate(nil)
         }
+    }
+}
+
+// 时长格式：>=1s 折秒，<1s 毫秒
+extension PanelView {
+    static func fmtMs(_ ms: Int) -> String {
+        ms >= 1000 ? String(format: "%.1fs", Double(ms) / 1000) : "\(ms)ms"
     }
 }

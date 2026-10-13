@@ -3,3 +3,8 @@
 *.local.toml
 .DS_Store
 dist/
+
+# 本地 agent 技能安装产物
+.agents/
+.claude/
+skills-lock.json

@@ -39,12 +39,12 @@ cat > "$APP_DIR/Info.plist" <<PLIST
 </plist>
 PLIST
 # 图标管线（源 logo-template.svg → assets/logo-alpha-1024.png；不存在则跳过 icns）
-[[ -f "$ROOT/apps/tray/assets/logo-alpha-1024.png" ]] || bash "$ROOT/apps/tray/make-icons.sh" >/dev/null 2>&1 || true
-if [[ -f "$ROOT/apps/tray/assets/logo-alpha-1024.png" ]]; then
+[[ -f "$ROOT/docs/assets/logo-color.png" ]] || bash "$ROOT/apps/tray/make-icons.sh" >/dev/null 2>&1 || true
+if [[ -f "$ROOT/docs/assets/logo-color.png" ]]; then
     ICONSET="build/${APP_NAME}.iconset"
     rm -rf "$ICONSET" && mkdir -p "$ICONSET"
     for s in 16 32 64 128 256 512 1024; do
-        sips -z $s $s "$ROOT/apps/tray/assets/logo-alpha-1024.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
+        sips -z $s $s "$ROOT/docs/assets/logo-color.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
     done
     iconutil -c icns "$ICONSET" -o "$APP_DIR/Resources/${APP_NAME}.icns" 2>/dev/null || true
 fi
