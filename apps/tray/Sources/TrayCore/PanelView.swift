@@ -192,7 +192,8 @@ public struct PanelView: View {
     private var providersCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionLabel("server.rack", t("providers"))
-            ForEach(state.providers) { p in
+            let provs = state.providers
+            ForEach(provs, id: \.id) { p in
                 HStack(spacing: 7) {
                     Circle()
                         .fill(p.enabled ? (p.available ? Color.green : Color.orange) : Color.gray)
@@ -255,8 +256,14 @@ public struct PanelView: View {
                             .monospacedDigit()
                             .foregroundStyle(.secondary)
                             .frame(width: 36, alignment: .trailing)
+                    } else if let bal = p.paygBalance {
+                        Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
+                            .font(.system(size: 10, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(bal.available ? Color.secondary : Color.red)
+                            .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
                     } else {
-                        Text(p.planKind == "api" ? t("payg") : "—")
+                        Text(t("payg"))
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                     }

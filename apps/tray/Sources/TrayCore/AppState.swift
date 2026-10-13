@@ -23,6 +23,15 @@ public struct RecentDecision: Identifiable {
     public let failReason: String?
 }
 
+public struct PaygBalance: Equatable {
+    public let currency: String
+    public let total: Double
+    public let available: Bool
+    public init(currency: String, total: Double, available: Bool) {
+        self.currency = currency; self.total = total; self.available = available
+    }
+}
+
 public struct ChatResult: Equatable {
     public let decisionId: String
     public let status: Int
@@ -33,11 +42,12 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
         self.tokens5h = tokens5h; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePct5h = cachePct5h
+        self.paygBalance = paygBalance
     }
     public let key: String
     public let enabled: Bool
@@ -51,6 +61,7 @@ public struct ProviderRow: Identifiable {
     public let avgTtftMs: Int?
     public let avgRate: Double?
     public let cachePct5h: Int?
+    public let paygBalance: PaygBalance?
     public var id: String { key }
 }
 
@@ -59,6 +70,14 @@ public enum IconState { case idle, busy, success, fail, stopped, starting }
 @MainActor
 public final class AppState: ObservableObject {
     public init() {}
+
+    static func payg(from row: [String: Any]) -> PaygBalance? {
+        guard let b = row["payg_balance"] as? [String: Any],
+              let total = (b["total"] as? Double) ?? (b["total"] as? String).flatMap(Double.init) else { return nil }
+        let currency = (b["currency"] as? String) ?? ""
+        let avail = (b["is_available"] as? Bool) ?? true
+        return PaygBalance(currency: currency, total: total, available: avail)
+    }
     @Published public var healthy = true
     @Published public var external = false
     @Published public var starting = false
@@ -105,6 +124,8 @@ public final class AppState: ObservableObject {
         healthy = net
         starting = gw.starting || (!net && gw.isChildAlive)
         external = !gw.owned && net
+        // 自愈：网关不在且非外部实例 → 周期性尝试拉起（ensureRunning 内部 10s 节流）
+        if !net && !external { await gw.ensureRunning() }
     }
 
     /// 低频明细轮询（3s）：统计/Provider/事件
@@ -177,7 +198,8 @@ public final class AppState: ObservableObject {
                 let tok24 = (p["tokens_24h"] as? Int) ?? Int((p["tokens_24h"] as? Double) ?? 0)
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: pct,
-                                        tokens24h: tok24, planKind: kind))
+                                        tokens24h: tok24, planKind: kind,
+                                        paygBalance: AppState.payg(from: p)))
             }
         }
         rows.sort {
@@ -213,7 +235,8 @@ public final class AppState: ObservableObject {
                                tokens5h: e.tok,
                                avgTtftMs: e.ttftN > 0 ? Int(e.ttftW / Double(e.ttftN)) : nil,
                                avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,
-                               cachePct5h: cachePct)
+                               cachePct5h: cachePct,
+                               paygBalance: r.paygBalance)
         }
         providers = Array(rows.prefix(8))
         if case (200, let data)? = try? await get("/api/events?limit=30"),

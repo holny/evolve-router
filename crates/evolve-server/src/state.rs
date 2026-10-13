@@ -3,7 +3,7 @@ use evolve_core::config::FileConfig;
 use evolve_core::engine::Engine;
 use evolve_decision::DecisionBackend;
 use evolve_memory::{EventLog, Flywheel, HealthRegistry, QuotaLedger, SessionStore};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -29,6 +29,8 @@ pub struct Inner {
     pub distiller: Option<evolve_decision::decision_backend::DecisionModelBackend>,
     /// A3 completion cache（逻辑请求指纹 → 响应，本地内存 TTL 缓存）
     pub ccache: Mutex<crate::relay::CompletionCache>,
+    /// 按量 provider 余额缓存（provider key → /user/balance 响应节选；60s 节流刷新）
+    pub payg_balance: Mutex<HashMap<String, Value>>,
 }
 
 /// 全局扫描进度快照（/api/providers/scan-progress 响应体）
@@ -165,6 +167,7 @@ pub fn build_state(config: FileConfig) -> AppState {
         scan_progress: Mutex::new(ScanProgress::default()),
         distiller,
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
+        payg_balance: Mutex::new(HashMap::new()),
     })
 }
 

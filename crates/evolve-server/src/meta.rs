@@ -959,6 +959,29 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                 let _ = refresh_observed(&st2, &k, &bu, &pk, ak, now_ms).await;
             });
         }
+        // 按量 provider 余额（deepseek）：缓存过期（>60s）→ 后台拉
+        let ds_stale = {
+            let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
+            !pb.contains_key("deepseek")
+                || pb.get("deepseek").and_then(|v| v["ts"].as_u64())
+                    .map(|t| now0.saturating_sub(t) > 60 * 1000)
+                    .unwrap_or(true)
+        };
+        if ds_stale {
+            let st2 = st.clone();
+            std::fs::write("/tmp/ev-tmp/ds-spawn.txt", format!("spawn at {now0}")).ok();
+            tokio::spawn(async move {
+                let now_ms = evolve_memory::health::now();
+                let res = deepseek_balance(&st2, "deepseek", None).await;
+                std::fs::write("/tmp/ev-tmp/ds-res.txt", format!("res={res:?}")).ok();
+                if let Some(mut bal) = res {
+                    bal["ts"] = json!(now_ms);
+                    if let Ok(mut pb) = st2.payg_balance.lock() {
+                        pb.insert("deepseek".into(), bal);
+                    }
+                }
+            });
+        }
     }
     let budgets = st.plan_budgets.lock().map(|b| b.clone()).unwrap_or_default();
     let soft_pct = st.config.policy.plan_soft_pct;
@@ -1219,6 +1242,20 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let kb = b.get("key").and_then(|v| v.as_str()).unwrap_or("");
         ka.cmp(kb)
     });
+    // 附加按量 provider 余额（payg_balance 缓存；deepseek 等）
+    {
+        let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
+        for row in out.iter_mut() {
+            if let Some(k) = row["key"].as_str() {
+                if let Some(bal) = pb.get(k) {
+                    row["payg_balance"] = json!({
+                        "currency": bal["currency"], "total": bal["total"],
+                        "is_available": bal["is_available"],
+                    });
+                }
+            }
+        }
+    }
     (axum::Json(json!({"providers": out}))).into_response()
 }
 
@@ -1322,6 +1359,31 @@ pub async fn api_providers_set(
 
 /// MiniMax M Plan 官方 remains 端点拉取 → 写 quota observed（5h/周，百分比口径）。
 /// 由 reconcile 手动触发 + api_providers 轮询时过期自动刷新（60s 节流）。
+
+/// 按量 provider 余额查询（deepseek 官方 /user/balance；Bearer key）。
+/// 返回 {currency, total, is_available} 或 None。
+async fn deepseek_balance(
+    st: &AppState, key: &str, api_key: Option<String>,
+) -> Option<Value> {
+    let key_resolved = api_key.or_else(|| {
+        st.engine.catalog_snapshot().iter()
+            .find(|m| m.provider == key)
+            .and_then(|m| m.key_values().first().cloned())
+    })?;
+    let mut req = st.http.get("https://api.deepseek.com/user/balance")
+        .timeout(std::time::Duration::from_secs(8));
+    req = req.bearer_auth(&key_resolved);
+    let j = req.send().await.ok()?.json::<serde_json::Value>().await.ok()?;
+    let avail = j["is_available"].as_bool()?;
+    let infos = j["balance_infos"].as_array()?;
+    let first = infos.first()?;
+    Some(json!({
+        "is_available": avail,
+        "currency": first["currency"].as_str().unwrap_or(""),
+        "total": first["total_balance"].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0),
+    }))
+}
+
 async fn refresh_observed(
     st: &AppState, key: &str, base_url: &str, plan_key: &str, api_key: Option<String>, now_ms: u64,
 ) -> Option<serde_json::Map<String, Value>> {
