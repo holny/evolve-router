@@ -149,6 +149,17 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
                 until_epoch_ms: None,
             }
         }
+        // 协议不支持（实证：opencode zen 的 gpt-*/grok-* 只接受 Responses API，
+        // 对 chat/completions 与 messages 均回 400 ModelProtocolUnsupported）：
+        // 归入 Unsupported → 由 relay 按"在列表 5h / 不在列表永久"处理，
+        // 避免当作瞬态错误每 1-2 分钟重试同一模型（面板长期显示冷却）
+        400 if lower.contains("protocol") && (lower.contains("unsupported") || lower.contains("not support")) => {
+            Failure {
+                kind: HealthKind::Unsupported,
+                message: "model does not support this protocol (provider requires another API)".into(),
+                until_epoch_ms: None,
+            }
+        }
         401 | 403 => Failure {
             kind: HealthKind::AuthFailed,
             message: first_hit(&lower, &["invalid", "unauthorized", "forbidden", "无权", "鉴权"])
@@ -245,6 +256,20 @@ mod tests {
         assert_eq!(classify_failure(401, "invalid api key", None).kind, HealthKind::AuthFailed);
         assert_eq!(classify_failure(503, "overloaded", None).kind, HealthKind::Transient);
         assert_eq!(classify_failure(529, "overloaded", None).kind, HealthKind::Transient);
+    }
+
+    #[test]
+    #[test]
+    fn protocol_unsupported_is_classified() {
+        let body = r#"{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}"#;
+        let f = classify_failure(400, body, None);
+        assert_eq!(f.kind, HealthKind::Unsupported, "protocol-unsupported must not be transient");
+        // 普通 400（上下文类）仍归 ContextOverflow
+        let f2 = classify_failure(400, "context length exceeded", None);
+        assert_eq!(f2.kind, HealthKind::ContextOverflow);
+        // 其它 400 仍是瞬态
+        let f3 = classify_failure(400, "bad request: invalid tool schema", None);
+        assert_eq!(f3.kind, HealthKind::Transient);
     }
 
     #[test]

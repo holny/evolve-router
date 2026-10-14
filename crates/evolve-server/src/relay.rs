@@ -430,11 +430,15 @@ pub async fn chat_completions(
             // w3 404 语义二分（用户裁决）：
             //  - 模型仍在 provider 的模型列表里 → 临时不可用，5h 冷却后自动重试
             //  - 列表里没有（上游已移除）→ 永久黑名单（until=哨兵），仅手动恢复
-            if status.as_u16() == 404 {
+            if status.as_u16() == 404 || failure.kind == HealthKind::Unsupported {
                 if crate::meta::provider_lists_model(&st, &record.provider, &record.upstream_model) {
                     failure = Failure {
                         kind: HealthKind::Unsupported,
-                        message: format!("{} not serving now (still listed; retry in 5h)", record.upstream_model),
+                        message: if status.as_u16() == 404 {
+                            format!("{} not serving now (still listed; retry in 5h)", record.upstream_model)
+                        } else {
+                            format!("{} protocol unsupported (still listed; retry in 5h)", record.upstream_model)
+                        },
                         until_epoch_ms: Some(evolve_memory::quota::now_ms() + 5 * 3600 * 1000),
                     };
                 } else {
