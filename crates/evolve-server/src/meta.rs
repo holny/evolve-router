@@ -94,6 +94,9 @@ fn windowed_view(
     let cutoff_ms: Option<u64> = match window {
         "7d" => Some(7 * 24 * 3600 * 1000),
         "24h" => Some(24 * 3600 * 1000),
+        // 5h = 订阅配额窗口（Coding/Go/Agent plan）；macOS 面板按此窗口取数并标注
+        // "last 5h"，此前未支持 → 落 None 分支退化为"最近 300 条样本"，口径与标注不符
+        "5h" => Some(5 * 3600 * 1000),
         "1h" => Some(3600 * 1000),
         "10m" => Some(10 * 60 * 1000),
         _ => None,
@@ -1001,29 +1004,10 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
         });
         out.push(e);
     }
-    // 字段名规范化：snake_case → camelCase（Rust serde 默认 snake；Swift 端按 camelCase 读）
-    let camel_out: Vec<Value> = out.into_iter().map(|mut p| {
-        if let Some(o) = p.as_object_mut() {
-            let remap: &[(&str, &str)] = &[
-                ("plan_kind", "planKind"),
-                ("base_url", "baseUrl"),
-                ("docs_url", "docsUrl"),
-                ("has_key", "hasKey"),
-                ("tokens_24h", "tokens24h"),
-                ("key_fp", "keyFp"),
-                ("used_5h", "used5h"),
-                ("next_reset_epoch_ms", "nextResetEpochMs"),
-                ("quota_source", "quotaSource"),
-            ];
-            for (a, b) in remap {
-                if let Some(v) = o.remove(*a) {
-                    o.insert(b.to_string(), v);
-                }
-            }
-        }
-        p
-    }).collect();
-    (axum::Json(json!({"providers": camel_out, "soft_pct": soft_pct, "now": now_ms})))
+    // 契约：全接口统一 snake_case（与 /api/health、/api/stats、/api/model-tags 一致）
+    // ——web 面板与 macOS 面板共用同一字段名，禁止在此做 camelCase 重映射（曾因
+    // 重映射只改服务端、web 未跟随而整块 Provider 卡失效）。
+    (axum::Json(json!({"providers": out, "soft_pct": soft_pct, "now": now_ms})))
         .into_response()
 }
 
@@ -1351,28 +1335,8 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             if let Some(o) = row.as_object_mut() { o.insert("quota_source".into(), json!(src)); }
         }
     }
-    let camel_out: Vec<Value> = out.into_iter().map(|mut p| {
-        if let Some(o) = p.as_object_mut() {
-            let remap: &[(&str, &str)] = &[
-                ("plan_kind", "planKind"),
-                ("base_url", "baseUrl"),
-                ("docs_url", "docsUrl"),
-                ("has_key", "hasKey"),
-                ("tokens_24h", "tokens24h"),
-                ("key_fp", "keyFp"),
-                ("used_5h", "used5h"),
-                ("next_reset_epoch_ms", "nextResetEpochMs"),
-                ("quota_source", "quotaSource"),
-            ];
-            for (a, b) in remap {
-                if let Some(v) = o.remove(*a) {
-                    o.insert(b.to_string(), v);
-                }
-            }
-        }
-        p
-    }).collect();
-    (axum::Json(json!({"providers": camel_out})))
+    // 契约：snake_case（与 /api/providers 同源同命名，勿重映射）
+    (axum::Json(json!({"providers": out})))
         .into_response()
 }
 
@@ -1747,10 +1711,16 @@ pub fn assign_tags_within(
         if rank < TAG_Q1 { PriceTier::Cheap } else if rank < TAG_Q2 { PriceTier::Medium } else { PriceTier::Premium }
     };
     // 混合分档：**可用池内用分位秩**（并列值也能精确 70/20/10），
-    // 池外（冷却/闸门/无凭据）用阈值映射（避免此前"查不到位置 → rank 0 → 全 basic"）
+    // 池外（冷却/闸门/无凭据）用阈值映射（避免此前"查不到位置 → rank 0 → 全 basic"）。
+    // ⚠ rank 必须建立在**按能力升序排序后的**列表上（与价位桶内 rank 同法）——
+    // basis 是目录序，直接取 position 会让标签随目录位置漂移（强模型落 basic）。
+    let mut cap_ranked: Vec<&evolve_core::types::ModelRecord> = basis.clone();
+    cap_ranked.sort_by(|a, b| {
+        cap_score(a).partial_cmp(&cap_score(b)).unwrap_or(std::cmp::Ordering::Equal)
+    });
     let cap_of = |m: &evolve_core::types::ModelRecord| -> Capability {
-        let by_rank = basis.iter().position(|x| x.id == m.id).map(|idx| {
-            let rank = idx as f32 / (basis.len().max(2) - 1) as f32;
+        let by_rank = cap_ranked.iter().position(|x| x.id == m.id).map(|idx| {
+            let rank = idx as f32 / (cap_ranked.len().max(2) - 1) as f32;
             if rank < TAG_Q1 { Capability::Basic } else if rank < TAG_Q2 { Capability::Standard } else { Capability::Powerful }
         });
         by_rank.unwrap_or_else(|| {
@@ -2705,5 +2675,33 @@ mod tag_tests {
         // 能力分位也只看可用池：最强者（m7）应落在可用池的 powerful 档
         assert_eq!(tags.get("m7").map(|(c, _)| *c), Some(Capability::Powerful));
         let _ = (cap_counts, price_counts);
+    }
+
+    #[test]
+    fn capability_rank_ignores_catalog_order() {
+        // 回归：cap_of 曾在**未排序**的 basis 上取 position → 标签随目录位置漂移。
+        // 这里把能力打乱（最强在中间、弱者在末位），标签必须按能力值分配。
+        let caps = [0.30f32, 0.80, 0.35, 0.90, 0.40, 0.85, 0.45, 0.95, 0.50, 0.55];
+        let mut snap: Vec<ModelRecord> = Vec::new();
+        for (i, c) in caps.iter().enumerate() {
+            snap.push(mk(&format!("m{i}"), *c, 1.0 + i as f32));
+        }
+        let usable: HashSet<String> = (0..caps.len()).map(|i| format!("m{i}")).collect();
+        let tags = assign_tags_within(&snap, &usable);
+        assert_eq!(
+            tags.get("m7").map(|(c, _)| *c),
+            Some(Capability::Powerful),
+            "strongest (m7=0.95) must be powerful regardless of catalog position"
+        );
+        assert_eq!(
+            tags.get("m0").map(|(c, _)| *c),
+            Some(Capability::Basic),
+            "weakest (m0=0.30) must be basic"
+        );
+        assert_ne!(
+            tags.get("m9").map(|(c, _)| *c),
+            Some(Capability::Powerful),
+            "mid model at catalog tail must not be promoted by position"
+        );
     }
 }

@@ -189,10 +189,10 @@ public final class AppState: ObservableObject {
             for p in arr {
                 let key = (p["key"] as? String) ?? "-"
                 let mergedKeys = (p["merged_from"] as? [Any])?.compactMap { $0 as? String } ?? [key]
-                let kind = (p["planKind"] as? String) ?? "-"
+                let kind = (p["plan_kind"] as? String) ?? "-"
                 let windows = p["windows"] as? [String: Any]
                 let w5 = (windows?["5h"] as? Double) ?? (windows?["5h"] as? Int).map(Double.init)
-                let used5 = (p["used5h"] as? Double) ?? 0
+                let used5 = (p["used_5h"] as? Double) ?? 0
                 var pct: Int? = nil
                 if let obs = p["observed"] as? [String: Any],
                    let o5 = obs["5h"] as? [String: Any],
@@ -232,7 +232,7 @@ public final class AppState: ObservableObject {
                                         tokens24h: tok24, planKind: kind,
                                         paygBalance: AppState.payg(from: p), observedRaw: (p["observed"] as? [String: Any]) ?? nil,
                                         cooldownModel: cooldownModel.flatMap { AppState.shortModel($0, key: key) },
-                                        quotaSource: (p["quotaSource"] as? String) ?? ((p["quota_source"] as? String) ?? ""),
+                                        quotaSource: (p["quota_source"] as? String) ?? "",
                                         blockedModels: blockedModels.map { AppState.shortModel($0, key: "") }))
             }
         }
