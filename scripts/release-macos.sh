@@ -62,10 +62,12 @@ codesign --force --sign - "$APPDIR/MacOS/${APP_NAME}"
 codesign --force --sign - "$APP" 2>/dev/null || true
 
 echo "[4/6] 归档产物（用户裁决：只发 .app zip + 校验和，单文件 tar 停发）..."
-ditto -c -k --keepParent "$APP" "$OUT/$APP_NAME-$VER.zip"
+# 资产名标注平台（与 Homebrew cask 的 URL 模板一致）：
+# EvolveRouter-v<ver>-macos-universal2.zip
+ditto -c -k --keepParent "$APP" "$OUT/$APP_NAME-$VER-macos-universal2.zip"
 
-echo "[5/6] 校验和..."
-( cd "$OUT" && shasum -a 256 * > SHA256SUMS.txt )
+echo "[5/6] 校验和（仅发布资产；不含中间产物 evo-router）..."
+( cd "$OUT" && shasum -a 256 "$APP_NAME-$VER-macos-universal2.zip" > SHA256SUMS.txt )
 
 echo "[6/6] 完成。清单："
 ls -lh "$OUT"
