@@ -328,9 +328,11 @@ public final class AppState: ObservableObject {
         lastSync = Date()
     }
 
+    // Recent Requests：时分秒（24h 进制，零时区本地）
     private func tsString(_ ts: Any?) -> String {
-        let d = Date(timeIntervalSince1970: ((ts as? Double) ?? 0) / 1000)
-        return d.formatted(date: .omitted, time: .shortened)
+        let ms = Int(((ts as? Double) ?? 0))
+        let s = max(0, (ms / 1000) % 86400)
+        return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
     }
 
     public static func fmtTok(_ n: Int) -> String {
