@@ -39,17 +39,3 @@ switchyard-protocol = "0.3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1"
-
-# 菜单栏托盘：AppKit 原生 NSStatusItem，单二进制双模式（serve/tray）。
-# 默认启用——objc2 系是 target 可选依赖，Linux 构建时该 feature 空转无害。
-[features]
-default = ["tray"]
-tray = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit", "dep:block2", "dep:dispatch2"]
-
-[target.'cfg(target_os = "macos")'.dependencies]
-objc2 = { workspace = true, optional = true }
-objc2-foundation = { workspace = true, optional = true }
-objc2-app-kit = { workspace = true, optional = true }
-block2 = { workspace = true, optional = true }
-dispatch2 = { version = "0.3", optional = true, features = ["block2"] }
-libc = "0.2"

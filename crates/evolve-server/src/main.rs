@@ -20,14 +20,6 @@ enum Cmd {
         #[arg(long)]
         port: Option<u16>,
     },
-    /// 菜单栏托盘：同进程网关 + AppKit 原生菜单栏（macOS；.app 壳免参启动自动进入）
-    #[cfg(all(target_os = "macos", feature = "tray"))]
-    Tray {
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long)]
-        port: Option<u16>,
-    },
     /// Print the resolved model catalog with source labels
     Models {
         #[arg(long)]
@@ -109,21 +101,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "info,ev::event=info".into()),
         )
         .init();
-    // 双模式单二进制：从 .app 壳启动（argv0 含 .app 且无参数）→ 托盘模式
-    let mut args = std::env::args();
-    let argv0 = args.next().unwrap_or_default();
-    let no_args = args.next().is_none();
-    if no_args && argv0.contains(".app") {
-        #[cfg(all(target_os = "macos", feature = "tray"))]
-        return evolve_server::tray::run(None, None);
-        #[cfg(not(all(target_os = "macos", feature = "tray")))]
-        anyhow::bail!("tray 模式需要 macOS 并以 --features tray 构建");
-    }
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Serve { config, port } => serve(config, port),
-        #[cfg(all(target_os = "macos", feature = "tray"))]
-        Cmd::Tray { config, port } => evolve_server::tray::run(config, port),
         Cmd::Models { config } => models(config),
         Cmd::Doctor { config } => doctor(config),
         Cmd::MockUpstream { port } => mock_upstream(port),

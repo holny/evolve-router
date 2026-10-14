@@ -905,3 +905,71 @@ async fn quality_cascade_escalates_to_next_candidate() {
         assert!(headers.get("x-ev-quality-cascade").is_none(), "successful escalation must not use fallback path");
     }
 }
+
+// ── API 契约测试：对外字段名统一 snake_case ────────────────────────────────
+// 背景：曾出现服务端把 /api/providers* 单方面重映射成 camelCase、web 面板未
+// 跟随，导致 Provider 卡整块失效（web 读 plan_kind/used_5h 全落空）。此处锁定
+// 字段命名，两端口径漂移时测试直接失败，而不是静默显示空值。
+const CAMEL_LEAK: [&str; 9] = [
+    "planKind", "baseUrl", "docsUrl", "hasKey", "tokens24h", "keyFp", "used5h",
+    "nextResetEpochMs", "quotaSource",
+];
+
+fn assert_no_camel(obj: &Value, ctx: &str) {
+    let map = obj.as_object().expect("object");
+    for k in CAMEL_LEAK {
+        assert!(
+            !map.contains_key(k),
+            "{ctx} leaked camelCase key `{k}` — the provider contract is snake_case"
+        );
+    }
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn providers_payload_is_snake_case() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/providers")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    let arr = j["providers"].as_array().expect("providers array");
+    assert!(!arr.is_empty(), "expected at least one provider from the mock models");
+    for p in arr {
+        assert_no_camel(p, "/api/providers");
+        for k in ["key", "plan_kind", "tokens_24h"] {
+            assert!(p.get(k).is_some(), "/api/providers provider row missing `{k}`");
+        }
+    }
+}
+
+#[tokio::test]
+async fn providers_status_payload_is_snake_case() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/providers/status")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    let arr = j["providers"].as_array().expect("providers array");
+    assert!(!arr.is_empty());
+    for p in arr {
+        assert_no_camel(p, "/api/providers/status");
+        assert!(p.get("key").is_some());
+    }
+}
+
+#[tokio::test]
+async fn model_tags_payload_is_snake_case() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/model-tags")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    let arr = j["models"].as_array().expect("models array");
+    assert!(!arr.is_empty());
+    for m in arr {
+        for k in ["model", "capability", "price_tier", "unusable_reason", "release_ts"] {
+            assert!(m.get(k).is_some(), "/api/model-tags model missing `{k}`");
+        }
+    }
+}
