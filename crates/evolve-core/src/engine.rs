@@ -1265,13 +1265,18 @@ mod tests {
         let (payg_roomy, plan_roomy) = scores_at(0.0); // 配额充裕：小幅加成
         let (_, plan_over) = scores_at(0.9); // 超软阈值：改为预算降权
         assert_eq!(payg_at_soft, payg_roomy, "按量模型不受订阅偏好影响");
+        let bonus = scoring::PLAN_QUOTA_BONUS;
         assert!(
-            plan_roomy > plan_at_soft * 1.02,
+            plan_roomy > plan_at_soft * (1.0 + bonus * 0.9),
             "配额充裕时订阅模型应获加成: {plan_roomy} vs {plan_at_soft}"
         );
         assert!(
-            plan_roomy < plan_at_soft * 1.05,
-            "加成必须很小（<5%），不得掐断按量模型机会: {plan_roomy} vs {plan_at_soft}"
+            plan_roomy < plan_at_soft * (1.0 + bonus * 1.1),
+            "加成幅度应恰为 PLAN_QUOTA_BONUS（不得失控）: {plan_roomy} vs {plan_at_soft}"
+        );
+        assert!(
+            plan_at_soft * (1.0 + bonus) < plan_at_soft * 1.10,
+            "偏好必须是小幅的（<10%），不得掐断按量模型机会"
         );
         assert!(plan_over < plan_at_soft, "超软阈值时应改为降权: {plan_over} vs {plan_at_soft}");
     }

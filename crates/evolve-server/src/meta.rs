@@ -1797,17 +1797,24 @@ pub fn assign_tags_within(
     // 成本代理三级（2026-10 修正：不依赖 m.plan 标志——用户只标了少数订阅模型，
     // 同家族其余模型 plan=false 会被误判为按量而拿不到配额口径提示）：
     // ① 命中套餐家族（plans::plan_for）→ 配额/系数口径  ② 官方按量价目  ③ 目录价
-    let cost_proxy = |m: &evolve_core::types::ModelRecord| -> Option<(f32, &'static str)> {
+    //
+    // 桶键**细化到口径内不可比的那一维**（否则分位被稀释/整体偏移）：
+    //  - plan → 按 **plan_key 分桶**：智谱"积分系数"与 opencode-go"美元系数"量纲
+    //    不同，混在一个桶里会把积分口径的大数值整体推到 premium（实测 zhipu 全族
+    //    premium，进而被 `difficulty≤0.8 → 只允许 tier 0` 的硬闸全族挡死）
+    //  - official / catalog → 按**币种**分桶（CNY 与 USD 不能直接比大小）
+    let cost_proxy = |m: &evolve_core::types::ModelRecord| -> Option<(f32, String)> {
         if evolve_core::plans::plan_for(&m.base_url).is_some()
             && let Some(h) = evolve_core::plans::model_price_hint(&m.base_url, &m.id)
         {
-            return Some((h, "plan"));
+            let pk = evolve_core::plans::plan_key_for(&m.base_url).unwrap_or("plan");
+            return Some((h, format!("plan:{pk}")));
         }
         if let Some(sc) = evolve_core::provider_info::price_for(&m.base_url, &m.id) {
             let in_eff = sc.in_miss * 0.5 + sc.in_hit * 0.5;
-            return Some((in_eff + sc.out * 0.3, "official"));
+            return Some((in_eff + sc.out * 0.3, format!("official:{}", m.currency)));
         }
-        m.cost.map(|c| (c.input + c.output * 0.3, "catalog"))
+        m.cost.map(|c| (c.input + c.output * 0.3, format!("catalog:{}", m.currency)))
     };
 
     // 分位基准：**可用池**（<8 个时退回全量兜底）
@@ -1853,31 +1860,31 @@ pub fn assign_tags_within(
         })
     };
 
-    // 2) 价位：按口径分桶，每桶取 70/90 分位**阈值**（同样用值分档）
-    let mut groups: HashMap<&'static str, Vec<(String, f32)>> = HashMap::new();
+    // 2) 价位：按口径（+plan_key/币种）分桶，每桶取 70/90 分位**阈值**（同样用值分档）
+    let mut groups: HashMap<String, Vec<(String, f32)>> = HashMap::new();
     for m in basis.iter() {
         if let Some((c, src)) = cost_proxy(m) {
             groups.entry(src).or_default().push((m.id.clone(), c));
         }
     }
-    let mut t1_of: HashMap<&'static str, f32> = HashMap::new();
-    let mut t2_of: HashMap<&'static str, f32> = HashMap::new();
+    let mut t1_of: HashMap<String, f32> = HashMap::new();
+    let mut t2_of: HashMap<String, f32> = HashMap::new();
     for (src, list) in groups.iter_mut() {
         list.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         let vals: Vec<f32> = list.iter().map(|(_, c)| *c).collect();
-        t1_of.insert(src, qval(&vals, TAG_Q1));
-        t2_of.insert(src, qval(&vals, TAG_Q2));
+        t1_of.insert(src.clone(), qval(&vals, TAG_Q1));
+        t2_of.insert(src.clone(), qval(&vals, TAG_Q2));
     }
     let price_of = |m: &evolve_core::types::ModelRecord| -> PriceTier {
         let Some((c, src)) = cost_proxy(m) else { return PriceTier::Medium }; // 无成本信息：中性档
         // 可用池内：桶内分位秩（精确 7:2:1）；池外：桶内阈值映射
-        if let Some(list) = groups.get(src)
+        if let Some(list) = groups.get(&src)
             && let Some(idx) = list.iter().position(|(i, _)| i == &m.id)
         {
             return tier_by_rank(idx as f32 / (list.len().max(2) - 1) as f32);
         }
-        let t1 = t1_of.get(src).copied().unwrap_or(f32::MAX);
-        let t2 = t2_of.get(src).copied().unwrap_or(f32::MAX);
+        let t1 = t1_of.get(&src).copied().unwrap_or(f32::MAX);
+        let t2 = t2_of.get(&src).copied().unwrap_or(f32::MAX);
         if c <= t1 { PriceTier::Cheap } else if c <= t2 { PriceTier::Medium } else { PriceTier::Premium }
     };
 
@@ -2759,6 +2766,47 @@ mod tag_tests {
             source: Source::User,
             ..Default::default()
         }
+    }
+
+    fn mk_plan(id: &str, base_url: &str) -> ModelRecord {
+        ModelRecord {
+            id: id.into(),
+            provider: id.split('/').next().unwrap_or("p").into(),
+            base_url: base_url.into(),
+            upstream_model: id.split('/').last().unwrap_or(id).into(),
+            tiers: Tiers { coding: 0.6, reasoning: 0.6, agentic: 0.6, vision: 0.0 },
+            source: Source::User,
+            ..Default::default()
+        }
+    }
+
+    /// 价位分桶必须细化到方案：智谱"积分系数"与 opencode-go"美元系数"量纲不同，
+    /// 混在一个桶里会把积分口径的大数值整体推到 premium（实测 zhipu 全族 premium，
+    /// 再被 `difficulty≤0.8 → 只允许 tier 0` 的硬闸全族挡死）。分桶后**每个方案
+    /// 内部各自呈 7:2:1**，每个方案都有 cheap 可用。
+    #[test]
+    fn price_tier_buckets_plans_per_scheme() {
+        let zhipu = "https://open.bigmodel.cn/api/coding/paas/v4";
+        let go = "https://opencode.ai/zen/go/v1";
+        let mut snap: Vec<ModelRecord> = Vec::new();
+        for i in 0..10 {
+            snap.push(mk_plan(&format!("zhipuai-coding-plan/glm-5.{i}"), zhipu));
+        }
+        for i in 0..10 {
+            snap.push(mk_plan(&format!("opencode-go/m{i}"), go));
+        }
+        let usable: HashSet<String> = snap.iter().map(|m| m.id.clone()).collect();
+        let tags = assign_tags_within(&snap, &usable);
+        let tier = |id: &str| tags.get(id).map(|(_, p)| *p);
+        // 两个方案各自桶内最便宜者都应是 cheap
+        assert_eq!(tier("zhipuai-coding-plan/glm-5.0"), Some(PriceTier::Cheap), "zhipu 桶内应有 cheap（旧行为：全族 premium）");
+        assert_eq!(tier("opencode-go/m0"), Some(PriceTier::Cheap));
+        // zhipu 不再全族 premium：桶内 70/90 分位应产生 cheap/medium/premium 分布
+        let zhipu_tiers: Vec<PriceTier> = (0..10)
+            .filter_map(|i| tier(&format!("zhipuai-coding-plan/glm-5.{i}")))
+            .collect();
+        assert!(zhipu_tiers.iter().any(|t| *t == PriceTier::Cheap));
+        assert!(zhipu_tiers.iter().any(|t| *t != PriceTier::Cheap), "桶内应有非 cheap 档");
     }
 
     #[test]
