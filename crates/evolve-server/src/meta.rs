@@ -921,7 +921,29 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
         });
         out.push(e);
     }
-    (axum::Json(json!({"providers": out, "soft_pct": soft_pct, "now": now_ms}))).into_response()
+    // 字段名规范化：snake_case → camelCase（Rust serde 默认 snake；Swift 端按 camelCase 读）
+    let camel_out: Vec<Value> = out.into_iter().map(|mut p| {
+        if let Some(o) = p.as_object_mut() {
+            let remap: &[(&str, &str)] = &[
+                ("plan_kind", "planKind"),
+                ("base_url", "baseUrl"),
+                ("docs_url", "docsUrl"),
+                ("has_key", "hasKey"),
+                ("tokens_24h", "tokens24h"),
+                ("key_fp", "keyFp"),
+                ("used_5h", "used5h"),
+                ("next_reset_epoch_ms", "nextResetEpochMs"),
+            ];
+            for (a, b) in remap {
+                if let Some(v) = o.remove(*a) {
+                    o.insert(b.to_string(), v);
+                }
+            }
+        }
+        p
+    }).collect();
+    (axum::Json(json!({"providers": camel_out, "soft_pct": soft_pct, "now": now_ms})))
+        .into_response()
 }
 
 /// Provider 管理列表：内置注册表 + 扫描发现 + 手动定义，合并展示
@@ -1258,7 +1280,28 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             }
         }
     }
-    (axum::Json(json!({"providers": out}))).into_response()
+    let camel_out: Vec<Value> = out.into_iter().map(|mut p| {
+        if let Some(o) = p.as_object_mut() {
+            let remap: &[(&str, &str)] = &[
+                ("plan_kind", "planKind"),
+                ("base_url", "baseUrl"),
+                ("docs_url", "docsUrl"),
+                ("has_key", "hasKey"),
+                ("tokens_24h", "tokens24h"),
+                ("key_fp", "keyFp"),
+                ("used_5h", "used5h"),
+                ("next_reset_epoch_ms", "nextResetEpochMs"),
+            ];
+            for (a, b) in remap {
+                if let Some(v) = o.remove(*a) {
+                    o.insert(b.to_string(), v);
+                }
+            }
+        }
+        p
+    }).collect();
+    (axum::Json(json!({"providers": camel_out})))
+        .into_response()
 }
 
 /// Provider 测实时配额（每次响应头到达即更新，含失败响应 429 reset/remaining）——
