@@ -18,7 +18,7 @@ let T: [String: String] = [
     "last_24h": "last 5h",
     "last_sync": "synced",
     "plan_5h": "Plan usage · 5h",
-    "recent": "Recent decisions",
+    "recent": "Recent requests",
     "fail_short": "fail",
     "providers": "Providers",
     "cooldown": "cooldown",

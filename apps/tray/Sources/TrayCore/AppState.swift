@@ -42,12 +42,15 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, observedRaw: [String: Any]? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
         self.tokens5h = tokens5h; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePct5h = cachePct5h
         self.paygBalance = paygBalance
+        self.observedRaw = observedRaw
+        self.quotaUsed = quotaUsed; self.quotaScope = quotaScope
+        self.quotaExhausted = quotaExhausted; self.quotaReset = quotaReset
     }
     public let key: String
     public let enabled: Bool
@@ -62,6 +65,11 @@ public struct ProviderRow: Identifiable {
     public let avgRate: Double?
     public let cachePct5h: Int?
     public let paygBalance: PaygBalance?
+    public let observedRaw: [String: Any]?
+    public let quotaUsed: Int?
+    public let quotaScope: String?
+    public let quotaExhausted: Bool
+    public let quotaReset: Date?
     public var id: String { key }
 }
 
@@ -199,7 +207,7 @@ public final class AppState: ObservableObject {
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: pct,
                                         tokens24h: tok24, planKind: kind,
-                                        paygBalance: AppState.payg(from: p)))
+                                        paygBalance: AppState.payg(from: p), observedRaw: (p["observed"] as? [String: Any]) ?? nil))
             }
         }
         rows.sort {
@@ -229,6 +237,29 @@ public final class AppState: ObservableObject {
         rows = rows.map { r in
             guard let e = agg[r.key] else { return r }
             let cachePct: Int? = e.promptSum > 0 ? Int(round(100.0 * Double(e.cacheSum) / Double(e.promptSum))) : nil
+            // binding quota：5h/周/月 任一窗口都足以卡死请求——取用量最大者展示；
+            // 多窗耗尽时恢复时间取最长（用户裁决）
+            var qUsed: Int? = nil; var qScope: String? = nil
+            var qExhausted = false; var qReset: Date? = nil
+            if let obsRaw = r.observedRaw {
+                let scopeLabel = ["5h": "5h", "weekly": "weekly", "monthly": "monthly"]
+                for (scope, label) in scopeLabel {
+                    guard let w = obsRaw[scope] as? [String: Any],
+                          let limit = (w["limit"] as? Double) ?? (w["limit"] as? Int).map(Double.init),
+                          limit > 0,
+                          let remaining = (w["remaining"] as? Double) ?? (w["remaining"] as? Int).map(Double.init) else { continue }
+                    let used = Int(round(100.0 * (limit - remaining) / limit))
+                    let exhausted = remaining <= 0
+                    let reset = (w["reset_epoch_ms"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
+                    if qUsed == nil || used > qUsed! {
+                        qUsed = used; qScope = label
+                    }
+                    if exhausted {
+                        qExhausted = true
+                        if qReset == nil || (reset ?? .distantFuture) > qReset! { qReset = reset }
+                    }
+                }
+            }
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
                                pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
@@ -236,7 +267,9 @@ public final class AppState: ObservableObject {
                                avgTtftMs: e.ttftN > 0 ? Int(e.ttftW / Double(e.ttftN)) : nil,
                                avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,
                                cachePct5h: cachePct,
-                               paygBalance: r.paygBalance)
+                               paygBalance: r.paygBalance,
+                               quotaUsed: qUsed, quotaScope: qScope,
+                               quotaExhausted: qExhausted, quotaReset: qReset)
         }
         providers = Array(rows.prefix(8))
         if case (200, let data)? = try? await get("/api/events?limit=30"),

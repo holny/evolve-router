@@ -194,86 +194,118 @@ public struct PanelView: View {
             sectionLabel("server.rack", t("providers"))
             let provs = state.providers
             ForEach(provs, id: \.id) { p in
-                HStack(spacing: 7) {
-                    Circle()
-                        .fill(p.enabled ? (p.available ? Color.green : Color.orange) : Color.gray)
-                        .frame(width: 5, height: 5)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(p.key)
-                            .font(.system(size: 11, weight: .medium))
-                            .lineLimit(1)
-                        HStack(spacing: 5) {
-
-                            if !p.enabled {
-                                Text(t("disabled"))
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            if p.tokens5h > 0 {
-                                Text("\(AppState.fmtTok(p.tokens5h))·5h")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                            if let cp = p.cachePct5h {
-                                Text("hit \(cp)%")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                            if let rt = p.avgRate {
-                                Text(String(format: "%.0f t/s", rt))
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                            if let tt = p.avgTtftMs {
-                                Text("TTFT \(Self.fmtMs(tt))")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.tertiary)
-                                    .monospacedDigit()
-                            }
-                        }
-                            if let until = p.cooldownUntil, until > Date() {
-                                let remain = Int(until.timeIntervalSinceNow)
-                                let txt = remain >= 3600
-                                    ? "\(remain/3600)h \(remain%3600/60)m"
-                                    : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
-                                Text("\(t("cooldown")) \(txt)\(p.cooldownCause.map { c in " · \(c)" } ?? "")")
-                                    .font(.system(size: 9.5))
-                                    .foregroundStyle(.red)
-                                    .monospacedDigit()
-                                    .lineLimit(1)
-                                    .help(p.cooldownCause ?? "")
-                            }
-                    }
-                    Spacer(minLength: 0)
-                    if let pct = p.pct {
-                        quotaBar(pct)
-                            .frame(width: 46)
-                        Text("\(pct)%")
-                            .font(.system(size: 10, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .frame(width: 36, alignment: .trailing)
-                    } else if let bal = p.paygBalance {
-                        Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
-                            .font(.system(size: 10, design: .rounded))
-                            .monospacedDigit()
-                            .foregroundStyle(bal.available ? Color.secondary : Color.red)
-                            .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
-                    } else {
-                        Text(t("payg"))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                providerRow(p)
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(groupBackground)
     }
+
+
+    @ViewBuilder
+    private func providerRow(_ p: ProviderRow) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(p.enabled ? (p.available && !p.quotaExhausted ? Color.green : Color.orange) : Color.gray)
+                .frame(width: 5, height: 5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(p.key)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    if let cd = p.cooldownUntil, cd > Date() {
+                        let remain = Int(cd.timeIntervalSinceNow)
+                        let txt = remain >= 3600 ? "\(remain/3600)h \(remain%3600/60)m"
+                            : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
+                        Text("\(t("cooldown")) \(txt)")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.red)
+                            .monospacedDigit()
+                        if let cause = p.cooldownCause, !cause.isEmpty {
+                            Text(cause)
+                                .font(.system(size: 9.5))
+                                .foregroundStyle(.red)
+                                .lineLimit(1)
+                                .help(cause)
+                        }
+                    }
+                    if !p.enabled {
+                        Text(t("disabled"))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                    }
+                    if p.tokens5h > 0 {
+                        Text("\(AppState.fmtTok(p.tokens5h))·5h")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let cp = p.cachePct5h {
+                        Text("hit \(cp)%")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let rt = p.avgRate {
+                        Text(String(format: "%.0f t/s", rt))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let tt = p.avgTtftMs {
+                        Text("TTFT \(Self.fmtMs(tt))")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                }
+                .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            trailingCell(p)
+        }
+    }
+
+    @ViewBuilder
+    private func trailingCell(_ p: ProviderRow) -> some View {
+        if let used = p.quotaUsed, let scope = p.quotaScope {
+            if p.quotaExhausted {
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(scope) full")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(.red)
+                    if let reset = p.quotaReset {
+                        Text(Self.fmtCountdown(reset))
+                            .font(.system(size: 9, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.red.opacity(0.8))
+                    }
+                }
+                .lineLimit(1)
+                .help("\(scope) quota exhausted — recovers at \(p.quotaReset.map { Self.fmtAbs($0) } ?? "?")")
+            } else {
+                quotaBar(used).frame(width: 46)
+                Text("\(used)%")
+                    .font(.system(size: 10, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: 38, alignment: .trailing)
+                    .help("\(scope) quota usage")
+            }
+        } else if let bal = p.paygBalance {
+            Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
+                .font(.system(size: 10, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(bal.available ? Color.secondary : Color.red)
+                .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
+        } else {
+            Text(t("payg"))
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
+        }
+    }
+
 
     // MARK: - 控制区
     // 行 1：主行动（GitHub / 完整面板）—— 等宽 tinted 胶囊
@@ -427,5 +459,12 @@ public struct PanelView: View {
 extension PanelView {
     static func fmtMs(_ ms: Int) -> String {
         ms >= 1000 ? String(format: "%.1fs", Double(ms) / 1000) : "\(ms)ms"
+    }
+    static func fmtCountdown(_ until: Date) -> String {
+        let s = max(0, Int(until.timeIntervalSinceNow))
+        return s >= 3600 ? "\(s/3600)h \(s%3600/60)m" : s >= 60 ? "\(s/60)m \(s%60)s" : "\(s)s"
+    }
+    static func fmtAbs(_ d: Date) -> String {
+        d.formatted(date: .abbreviated, time: .shortened)
     }
 }

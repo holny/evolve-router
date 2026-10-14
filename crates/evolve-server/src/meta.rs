@@ -1130,8 +1130,10 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     let mut merged: Vec<Value> = Vec::new();
     let mut merged_idx: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for e in out {
-        let pk = e.get("plan_key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        // 合并键：API key 指纹（不同账号不同行；同账号聚合多 provider 名）
+        let pk = e.get("key_fp").and_then(|v| v.as_str()).unwrap_or("").to_string();
         if pk.is_empty() {
+            // 无 key 的发现型（未自动登记）保持独立行
             merged.push(e);
             continue;
         }
@@ -1142,7 +1144,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                     let k0 = o.get("key").cloned().unwrap_or(json!(""));
                     o.insert("merged_from".into(), json!([k0]));
                     // 行名归一为套餐名（plan_key），同套餐多账号聚合后不再以账号名为主键
-                    o.insert("key".into(), json!(pk.clone()));
+                        o.insert("key".into(), json!(k0.as_str().unwrap_or(&pk).to_string()));
                 }
                 merged_idx.insert(pk, merged.len());
                 merged.push(e);
