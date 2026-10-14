@@ -630,19 +630,23 @@ impl Engine {
         // 消耗超软阈值后按超出幅度压分，难度越高压制越轻（硬任务保留好模型）
         let soft = self.policy.plan_soft_pct.clamp(10.0, 95.0) / 100.0;
         for s in scores.iter_mut() {
-            let plan_key = eligible
-                .iter()
-                .find(|m| m.id == s.model_id)
+            let rec = eligible.iter().find(|m| m.id == s.model_id);
+            let plan_key = rec
                 .and_then(|m| crate::plans::plan_key_for(&m.base_url))
                 .map(|k| k.to_string());
-            if let Some(pk) = plan_key
-                && let Some(p) = input.plan_pressure.get(&pk)
-                && *p > soft
-            {
-                let over = (p - soft) / (0.95 - soft).max(0.01);
+            let Some(pk) = plan_key else { continue };
+            let pressure = input.plan_pressure.get(&pk).copied().unwrap_or(0.0);
+            if pressure > soft {
+                let over = (pressure - soft) / (0.95 - soft).max(0.01);
                 let damp = (1.0 - 0.9 * over).max(0.05) * (1.0 - 0.6 * difficulty_eff / 3.0);
                 s.score *= damp.max(0.05);
                 s.qp = damp.max(0.05);
+            } else if rec.map(|m| m.plan).unwrap_or(false) {
+                // 配额内偏好（用户裁决 2026-10）：订阅模型配额已预付、用不掉即浪费 →
+                // 未过软阈值时给一个小幅加成；越接近软阈值加成越小（余量留给更难的
+                // 任务）。幅度刻意很小（PLAN_QUOTA_BONUS），明显更优的按量模型仍胜出。
+                let headroom = 1.0 - (pressure / soft.max(0.01)).clamp(0.0, 1.0);
+                s.score *= 1.0 + scoring::PLAN_QUOTA_BONUS * headroom;
             }
         }
         scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -1228,6 +1232,48 @@ mod tests {
         let dec = e.decide(input("你好", 500, &d, None, &h));
         assert_eq!(dec.chosen, "mini", "reason: {}", dec.reason);
         assert_eq!(dec.judgment.domain, Domain::Chitchat);
+    }
+
+    /// 配额内偏好（用户裁决 2026-10）：订阅模型在配额充裕时获得小幅加成，用于
+    /// "把已付配额用掉"；超软阈值后改为预算降权；按量模型全程不受影响。
+    #[test]
+    fn quota_headroom_gives_plan_models_a_small_edge() {
+        let base = "https://open.bigmodel.cn/api/coding/paas/v4";
+        let mut payg = model("payg", 128_000, 1.0, 4.0, 0.80, 0.7);
+        payg.base_url = "http://127.0.0.1:9101/v1".into();
+        let mut plan = model("plan", 128_000, 1.0, 4.0, 0.80, 0.7);
+        plan.base_url = base.into();
+        plan.plan = true;
+        let e = Engine::new(
+            Catalog::from_records(vec![payg, plan]),
+            det_policy(),
+            Box::new(crate::heuristic::HeuristicJudge),
+        );
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let pk = crate::plans::plan_key_for(base).expect("plan key").to_string();
+        let scores_at = |pressure: f32| -> (f32, f32) {
+            let mut p = HashMap::new();
+            p.insert(pk.clone(), pressure);
+            let mut inp = input("你好", 500, &d, None, &h);
+            inp.plan_pressure = &p;
+            let dec = e.decide(inp);
+            let get = |id: &str| dec.scored.iter().find(|s| s.model_id == id).map(|s| s.score).unwrap_or(0.0);
+            (get("payg"), get("plan"))
+        };
+        let (payg_at_soft, plan_at_soft) = scores_at(0.6); // 软阈值处：无加成、无降权
+        let (payg_roomy, plan_roomy) = scores_at(0.0); // 配额充裕：小幅加成
+        let (_, plan_over) = scores_at(0.9); // 超软阈值：改为预算降权
+        assert_eq!(payg_at_soft, payg_roomy, "按量模型不受订阅偏好影响");
+        assert!(
+            plan_roomy > plan_at_soft * 1.02,
+            "配额充裕时订阅模型应获加成: {plan_roomy} vs {plan_at_soft}"
+        );
+        assert!(
+            plan_roomy < plan_at_soft * 1.05,
+            "加成必须很小（<5%），不得掐断按量模型机会: {plan_roomy} vs {plan_at_soft}"
+        );
+        assert!(plan_over < plan_at_soft, "超软阈值时应改为降权: {plan_over} vs {plan_at_soft}");
     }
 
     #[test]
