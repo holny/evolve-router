@@ -1724,53 +1724,74 @@ pub fn assign_tags_within(
         m.cost.map(|c| (c.input + c.output * 0.3, "catalog"))
     };
 
-    // 1) 能力：全局分位
+    // 分位基准：**可用池**（<8 个时退回全量兜底）
     let pool: Vec<&evolve_core::types::ModelRecord> =
         snap.iter().filter(|m| usable.contains(&m.id)).collect();
-    let basis: &[&evolve_core::types::ModelRecord] =
-        if pool.len() >= 8 { &pool } else { &snap.iter().collect::<Vec<_>>() };
-    let mut caps: Vec<(String, f32)> = basis.iter().map(|m| {
-        let t = m.tiers.coding.max(m.tiers.reasoning).max(m.tiers.agentic).max(m.tiers.vision * 0.9);
-        (m.id.clone(), t)
-    }).collect();
-    caps.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    let cap_of = |id: &str| -> Capability {
-        let rank = caps.iter().position(|(i, _)| i == id).unwrap_or(0) as f32
-            / (caps.len().max(2) - 1) as f32;
-        if rank < TAG_Q1 { Capability::Basic }
-        else if rank < TAG_Q2 { Capability::Standard }
-        else { Capability::Powerful }
+    let basis: Vec<&evolve_core::types::ModelRecord> =
+        if pool.len() >= 8 { pool.clone() } else { snap.iter().collect() };
+
+    // 1) 能力：在**可用池**上取分位阈值（值分档；不可用模型按同一阈值映射，
+    //    修回归：此前用 position 在 basis 里找 index，不可用模型查不到 → rank 0
+    //    → 全部落 basic（实测 87% basic））
+    let cap_score = |m: &evolve_core::types::ModelRecord| -> f32 {
+        m.tiers.coding.max(m.tiers.reasoning).max(m.tiers.agentic).max(m.tiers.vision * 0.9)
+    };
+    let mut cap_vals: Vec<f32> = basis.iter().map(|m| cap_score(m)).collect();
+    cap_vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let qval = |v: &[f32], q: f32| -> f32 {
+        if v.is_empty() { return 0.0; }
+        v[(((v.len() - 1) as f32) * q).round() as usize]
+    };
+    let (cap_t1, cap_t2) = (qval(&cap_vals, TAG_Q1), qval(&cap_vals, TAG_Q2));
+    let tier_by_rank = |rank: f32| -> PriceTier {
+        if rank < TAG_Q1 { PriceTier::Cheap } else if rank < TAG_Q2 { PriceTier::Medium } else { PriceTier::Premium }
+    };
+    // 混合分档：**可用池内用分位秩**（并列值也能精确 70/20/10），
+    // 池外（冷却/闸门/无凭据）用阈值映射（避免此前"查不到位置 → rank 0 → 全 basic"）
+    let cap_of = |m: &evolve_core::types::ModelRecord| -> Capability {
+        let by_rank = basis.iter().position(|x| x.id == m.id).map(|idx| {
+            let rank = idx as f32 / (basis.len().max(2) - 1) as f32;
+            if rank < TAG_Q1 { Capability::Basic } else if rank < TAG_Q2 { Capability::Standard } else { Capability::Powerful }
+        });
+        by_rank.unwrap_or_else(|| {
+            let t = cap_score(m);
+            if t <= cap_t1 { Capability::Basic }
+            else if t <= cap_t2 { Capability::Standard }
+            else { Capability::Powerful }
+        })
     };
 
-    // 2) 价位：按口径分桶 → 桶内 70/90 分位
+    // 2) 价位：按口径分桶，每桶取 70/90 分位**阈值**（同样用值分档）
     let mut groups: HashMap<&'static str, Vec<(String, f32)>> = HashMap::new();
     for m in basis.iter() {
         if let Some((c, src)) = cost_proxy(m) {
             groups.entry(src).or_default().push((m.id.clone(), c));
         }
     }
-    for v in groups.values_mut() {
-        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut t1_of: HashMap<&'static str, f32> = HashMap::new();
+    let mut t2_of: HashMap<&'static str, f32> = HashMap::new();
+    for (src, list) in groups.iter_mut() {
+        list.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let vals: Vec<f32> = list.iter().map(|(_, c)| *c).collect();
+        t1_of.insert(src, qval(&vals, TAG_Q1));
+        t2_of.insert(src, qval(&vals, TAG_Q2));
     }
-    let bucket_sizes: Vec<(String, usize)> = groups.iter().map(|(k, v)| (k.to_string(), v.len())).collect();
-    let no_cost = basis.iter().filter(|m| cost_proxy(m).is_none()).count();
-    tracing::info!(catalog = snap.len(), usable = pool.len(), basis = basis.len(), ?bucket_sizes, no_cost, "tag assignment input");
+    let price_of = |m: &evolve_core::types::ModelRecord| -> PriceTier {
+        let Some((c, src)) = cost_proxy(m) else { return PriceTier::Medium }; // 无成本信息：中性档
+        // 可用池内：桶内分位秩（精确 7:2:1）；池外：桶内阈值映射
+        if let Some(list) = groups.get(src)
+            && let Some(idx) = list.iter().position(|(i, _)| i == &m.id)
+        {
+            return tier_by_rank(idx as f32 / (list.len().max(2) - 1) as f32);
+        }
+        let t1 = t1_of.get(src).copied().unwrap_or(f32::MAX);
+        let t2 = t2_of.get(src).copied().unwrap_or(f32::MAX);
+        if c <= t1 { PriceTier::Cheap } else if c <= t2 { PriceTier::Medium } else { PriceTier::Premium }
+    };
 
     let mut out = HashMap::new();
     for m in snap {
-        let cap = cap_of(&m.id);
-        let tier = cost_proxy(m)
-            .and_then(|(_, src)| groups.get(src))
-            .and_then(|list| {
-                list.iter().position(|(i, _)| i == &m.id).map(|idx| {
-                    let rank = idx as f32 / (list.len().max(2) - 1) as f32;
-                    if rank < TAG_Q1 { PriceTier::Cheap }
-                    else if rank < TAG_Q2 { PriceTier::Medium }
-                    else { PriceTier::Premium }
-                })
-            })
-            .unwrap_or(PriceTier::Medium);
-        out.insert(m.id.clone(), (cap, tier));
+        out.insert(m.id.clone(), (cap_of(m), price_of(m)));
     }
     out
 }
@@ -2646,6 +2667,21 @@ mod tag_tests {
             source: Source::User,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn unusable_models_map_by_value_not_to_lowest() {
+        // 回归修复：不可用模型此前在 basis 里查不到位置 → rank 0 → 全落 basic/cheap。
+        // 现在按阈值（值）映射：最贵最强的不可用模型应落 premium/powerful。
+        let mut snap: Vec<ModelRecord> = Vec::new();
+        for i in 0..12 {
+            snap.push(mk(&format!("m{i}"), 0.3 + i as f32 * 0.05, 1.0 + i as f32));
+        }
+        let usable: HashSet<String> = (0..8).map(|i| format!("m{i}")).collect();
+        let tags = assign_tags_within(&snap, &usable);
+        let (cap, price) = tags.get("m11").cloned().unwrap();
+        assert_eq!(cap, Capability::Powerful, "unusable top model must map by value");
+        assert_eq!(price, PriceTier::Premium, "unusable priciest model must map by value");
     }
 
     #[test]

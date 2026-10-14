@@ -8,18 +8,22 @@ VER="${1:?用法: release-macos.sh <version>，例 v0.1.1}"
 OUT="apps/tray/build/release"
 rm -rf "$OUT" && mkdir -p "$OUT"
 
-echo "[1/6] cargo 双架构 release 构建..."
+echo "[1/6] cargo 双架构 release 构建（**总是构建**：cargo 自身做增量，
+        早期"存在即跳过"曾把 10-13 的旧二进制打进 v0.1.3 发布包）..."
 for T in aarch64-apple-darwin x86_64-apple-darwin; do
-    if [[ -f "target/$T/release/evo-router" ]]; then
-        echo "  $T 已存在，跳过"
-    else
-        echo "  building $T ..."
-        cargo build -p evolve-server --release --target "$T"
-    fi
+    echo "  building $T ..."
+    cargo build -p evolve-server --release --target "$T"
 done
 
-echo "[2/6] lipo universal 单文件..."
+echo "[2/6] lipo universal 单文件 + 版本校验（防止脏产物进包）..."
 lipo -create target/aarch64-apple-darwin/release/evo-router target/x86_64-apple-darwin/release/evo-router -output "$OUT/evo-router"
+GOT="$("$OUT/evo-router" --version | awk '{print $2}')"
+WANT="${VER#v}"
+if [[ "$GOT" != "$WANT" ]]; then
+    echo "  !! 版本不符：打包内网关 = $GOT，期望 = $WANT（检查 Cargo.toml version 与 target 缓存）" >&2
+    exit 1
+fi
+echo "  packaged gateway version: $GOT  ✓"
 
 echo "[3/6] Swift 壳双芯构建 + 组装 .app..."
 ( cd apps/tray && swift build -c release --triple arm64-apple-macosx >/dev/null 2>&1 || true )
