@@ -1032,6 +1032,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
         let entry = grouped.entry(m.provider.clone()).or_insert_with(|| json!({
             "key": m.provider.clone(),
             "source": "scanned",
+            "disabled": false,
             "plan_kind": profile.map(|p| p.plan_kind).unwrap_or("api"),
             "docs_url": profile.map(|p| p.docs_url).unwrap_or(""),
             "model_count": 0u64,
@@ -1228,6 +1229,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let model_ids: Vec<&str> = models_at_url.iter().map(|mm| mm.id.as_str()).collect();
         out.push(json!({
             "key": m.provider.clone(), "source": "discovered",
+            "disabled": false,
             "base_url": m.base_url, "protocol": if m.protocol == evolve_core::types::Protocol::Anthropic { "anthropic" } else { "openai" },
             "plan_key": plan_key,
             "plan_kind": profile.map(|p| p.plan_kind).unwrap_or("api"),

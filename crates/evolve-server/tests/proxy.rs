@@ -942,8 +942,8 @@ async fn providers_payload_is_snake_case() {
         for k in ["key", "plan_kind", "tokens_24h"] {
             assert!(p.get(k).is_some(), "/api/providers provider row missing `{k}`");
         }
-        // 派生视图字段（服务端单一事实源；两端只渲染）
-        for k in ["quota", "binding", "available"] {
+        // 派生视图字段（服务端单一事实源；两端只渲染）——每行都须齐备（键统一）
+        for k in ["quota", "binding", "available", "disabled", "cooling", "blocked_models"] {
             assert!(p.get(k).is_some(), "/api/providers row missing derived `{k}`");
         }
         assert!(p["quota"].is_object(), "quota must be an object");
