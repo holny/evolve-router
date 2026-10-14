@@ -11,7 +11,7 @@ let T: [String: String] = [
     "starting": "Starting…",
     "external": "External instance running (read-only)",
     "inflight": "in flight",
-    "copy_cfg": "Copy wiring config (baseURL / model=auto / provider)",
+    "copy_cfg": "Copy wiring config (baseURL / model / provider)",
     "reqs": "reqs",
     "success_rate": "success",
     "tokens": "tokens",

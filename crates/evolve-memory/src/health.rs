@@ -120,8 +120,16 @@ impl Default for HealthRegistry {
 /// refine 429s into quota-exhausted vs plain rate limits.
 pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<u64>) -> Failure {
     let lower = body_snippet.to_lowercase();
-    let no_credit = ["insufficient balance", "insufficient_quota", "balance", "arrears", "欠费", "余额不足", "no credit", "payment required", "billing"];
-    let quota = ["quota", "exceeded your", "usage limit", "limit reached", "rate limit exceeded", "额度", "配额", "用量", "超限"];
+    // 余额/付费类关键词（含实证的上游写法：volcengine "Insufficient account funds"）
+    let no_credit = ["insufficient balance", "insufficient_quota", "insufficient account funds",
+        "insufficient funds", "account funds", "funds", "balance", "arrears", "欠费", "余额不足",
+        "no credit", "payment required", "billing"];
+    // 配额类关键词（含中文实证：智谱"您已达到每周/每月使用上限，您的限额将在 … 重置。"）。
+    // 中文只取**配额专用**词（使用/用量/额度/配额上限、限额、每周/每月）——不用裸
+    // "上限"，否则"请求频率上限""速率上限"这类真实限流会被误判为长冷却的配额超限。
+    let quota = ["quota", "exceeded your", "usage limit", "limit reached", "rate limit exceeded",
+        "使用上限", "用量上限", "额度上限", "配额上限", "限额", "每周", "每月",
+        "额度", "配额", "用量", "超限"];
 
     match status {
         413 => Failure {
@@ -181,10 +189,17 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
                 Failure { kind: HealthKind::PaymentRequired, message: "no credit".into(), until_epoch_ms: None }
             } else if quota.iter().any(|k| lower.contains(k)) {
                 // 窗口标签（用户裁决：哪个门限超了要可判定——5h/weekly/monthly）；
-                // 上游告知重置时间时精确冷却；否则固定 5 分钟探测节奏
-                let win = if lower.contains("weekly") || lower.contains("week") { " (weekly)" }
-                    else if lower.contains("monthly") || lower.contains("month") { " (monthly)" }
-                    else { " (5h)" };
+                // 上游告知重置时间时精确冷却；否则固定 5 分钟探测节奏。
+                // 中英双语判定（实证：智谱正文为中文"每周/每月使用上限"）；两者
+                // 同时出现时标 weekly/monthly（诚实：不限缩小到单一窗口）
+                let wk = lower.contains("weekly") || lower.contains("week") || lower.contains("每周");
+                let mo = lower.contains("monthly") || lower.contains("month") || lower.contains("每月");
+                let win = match (wk, mo) {
+                    (true, true) => " (weekly/monthly)",
+                    (true, false) => " (weekly)",
+                    (false, true) => " (monthly)",
+                    (false, false) => " (5h)",
+                };
                 Failure { kind: HealthKind::QuotaExhausted, message: format!("quota window exhausted{win}"), until_epoch_ms: until }
             } else {
                 Failure {
@@ -271,9 +286,41 @@ mod tests {
         assert_eq!(f3.kind, HealthKind::Transient);
     }
 
+    /// 上游实证报错样本（volcengine / 智谱 / opencode）——分类必须不退化
     #[test]
-    fn repeat_failures_extend_cooldown() {
-        let reg = HealthRegistry::new();
+    fn classifies_real_world_provider_errors() {
+        // volcengine：请求过频（真实限流，不是配额）
+        let f = classify_failure(
+            429,
+            "Requests are too frequent. Please reduce your request frequency, wait a short moment, and retry your request. Request id: 021791865158209fd0de7354b348b065f00b895e07126b84a56d1",
+            None,
+        );
+        assert_eq!(f.kind, HealthKind::RateLimited, "frequency warning is a plain rate limit");
+        // volcengine：5 小时配额超限（正文带 C 时区）
+        let f = classify_failure(
+            429,
+            "You have exceeded the 5-hour usage quota. It will reset at 2026-10-13 19:13:46 +0800 CST. We recommend upgrading your plan for more quota, or waiting for the reset.",
+            None,
+        );
+        assert_eq!(f.kind, HealthKind::QuotaExhausted);
+        assert!(f.message.contains("5h"), "got {}", f.message);
+        // 智谱：中文"每周/每月使用上限"——不得退化为普通限流
+        let f = classify_failure(429, "您已达到每周/每月使用上限，您的限额将在 2026-10-14 20:06:34 重置。", None);
+        assert_eq!(f.kind, HealthKind::QuotaExhausted, "chinese quota text must not degrade to rate-limited");
+        assert!(f.message.contains("weekly/monthly"), "got {}", f.message);
+        // opencode go：用量上限
+        let f = classify_failure(429, "Go usage limit exceeded", None);
+        assert_eq!(f.kind, HealthKind::QuotaExhausted);
+        // opencode：账户余额不足（此前 "funds" 不在关键词表 → 误判为限流）
+        let f = classify_failure(429, "Upstream request failed: Insufficient account funds", None);
+        assert_eq!(f.kind, HealthKind::PaymentRequired, "account funds must be payment-required");
+        // 中文限流（含"上限"字面但不是配额）不得被误判为长冷却的配额超限
+        let f = classify_failure(429, "您已达到请求频率上限，请稍后重试。", None);
+        assert_eq!(f.kind, HealthKind::RateLimited, "chinese rate-limit wording must stay rate-limited");
+    }
+
+    #[test]
+    fn repeat_failures_extend_cooldown() {        let reg = HealthRegistry::new();
         for _ in 0..3 {
             reg.mark_failure("m", classify_failure(429, "rate limit exceeded", None));
         }
@@ -415,9 +462,19 @@ mod reset_tests {
         assert!(ms > now);
     }
 
+    /// 智谱中文通知的重置时间（无时区后缀 → 按 +08 近似；正文混有中文）
     #[test]
-    fn parses_relative_minutes_and_hours() {
+    fn parses_chinese_zhipu_notice() {
         let now = 1_760_000_000_000;
+        let body = "您已达到每周/每月使用上限，您的限额将在 2026-10-14 20:06:34 重置。";
+        let ms = parse_reset_epoch_ms(body, now).unwrap();
+        // 2026-10-14 20:06:34 +0800 = 12:06:34 UTC
+        let expected = 1_791_979_594_000u64;
+        assert!((ms as i64 - expected as i64).abs() < 1_000, "got {ms}");
+    }
+
+    #[test]
+    fn parses_relative_minutes_and_hours() {        let now = 1_760_000_000_000;
         assert_eq!(parse_reset_epoch_ms("resets in 47 minutes", now), Some(now + 47 * 60_000));
         assert_eq!(parse_reset_epoch_ms("try again in 2 hours", now), Some(now + 2 * 3_600_000));
     }

@@ -987,15 +987,23 @@ enum Target {
     Direct(Decision),
 }
 
+/// `model` 字段归一（容错）：面板「复制网关配置」输出的人读写法
+/// `Auto (smart routing)`（含大小写/空白变体）与 `auto` 等价。
+pub(crate) fn auto_request(model_field: &str) -> bool {
+    matches!(
+        model_field.trim().to_ascii_lowercase().as_str(),
+        "auto" | "auto (smart routing)" | "auto (smart)" | "smart routing"
+    )
+}
+
 #[allow(clippy::result_large_err)]
-fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> {
-    if let Some(alias) = model_field.strip_prefix("auto:") {
+fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> {    if let Some(alias) = model_field.strip_prefix("auto:") {
         let policy = PolicyProfile::parse(alias).ok_or_else(|| {
             json_error(StatusCode::NOT_FOUND, &format!("unknown policy alias '{alias}'"))
         })?;
         return Ok(Target::Auto(Some(policy)));
     }
-    if model_field == "auto" {
+    if auto_request(model_field) {
         return Ok(Target::Auto(None));
     }
     if let Some(m) = st.catalog_get(model_field) {
@@ -1216,5 +1224,30 @@ mod winner_queue_tests {
     fn empty_chain_falls_back_to_scores() {
         let q = winner_queue(&[], &scores(&[("x", 0.2), ("y", 0.8)]), 5);
         assert_eq!(q, vec!["y", "x"]);
+    }
+}
+
+#[cfg(test)]
+mod auto_alias_tests {
+    use super::auto_request;
+
+    #[test]
+    fn accepts_human_readable_auto_wiring() {
+        // 面板「复制网关配置」输出 + 大小写/空白变体
+        assert!(auto_request("auto"));
+        assert!(auto_request("Auto"));
+        assert!(auto_request("auto"));
+        assert!(auto_request("Auto (smart routing)"));
+        assert!(auto_request("  auto (smart routing) "));
+        assert!(auto_request("AUTO (SMART ROUTING)"));
+        assert!(auto_request("auto (smart)"));
+    }
+
+    #[test]
+    fn rejects_real_model_ids() {
+        assert!(!auto_request("deepseek/deepseek-v4-pro"));
+        assert!(!auto_request("opencode-go/glm-5.3"));
+        assert!(!auto_request(""));
+        assert!(!auto_request("autopilot"));
     }
 }

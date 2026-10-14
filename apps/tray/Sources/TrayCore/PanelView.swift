@@ -73,7 +73,7 @@ public struct PanelView: View {
             Button {
                 let cfg = """
                 baseURL  = \(Config.baseURL)/v1
-                model    = auto
+                model    = Auto (smart routing)
                 provider = evo-router
                 """
                 NSPasteboard.general.clearContents()

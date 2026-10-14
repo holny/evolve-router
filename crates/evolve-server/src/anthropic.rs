@@ -572,7 +572,8 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
         })?;
         return Ok(Target::Auto(Some(policy)));
     }
-    if model_field == "auto" {
+    // 与 OpenAI 入口同规则：面板复制的人读写法 `Auto (smart routing)` 等价 auto
+    if crate::relay::auto_request(model_field) {
         return Ok(Target::Auto(None));
     }
     if let Some(m) = st.catalog_get(model_field) {
