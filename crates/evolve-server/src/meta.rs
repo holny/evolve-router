@@ -220,6 +220,8 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
         "ts": evolve_memory::health::now(),
+        // 版本号（编译期常量）：面板与 web 面板已在轮询本端点 → 顺带下发，前端展示
+        "version": env!("CARGO_PKG_VERSION"),
         "decision": { "backend": cfg, "status": status },
     }))
     .into_response()

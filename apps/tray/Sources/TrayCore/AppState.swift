@@ -101,6 +101,8 @@ public final class AppState: ObservableObject {
     @Published public var inflight = 0
     /// 决策模型可用性：ok / stale（已配置待重启）/ missing（未配置）——/api/live 每次 1s 轮询现读 env
     @Published public var decisionStatus = "ok"
+    /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
+    @Published public var version = ""
     @Published public var pulse = false
     @Published public var requests = 0
     @Published public var successRate = 0
@@ -137,6 +139,7 @@ public final class AppState: ObservableObject {
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             inflight = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
             decisionStatus = ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok"
+            version = (obj["version"] as? String) ?? version
         } else {
             inflight = 0
         }

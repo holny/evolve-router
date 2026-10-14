@@ -56,10 +56,17 @@ public struct PanelView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                 }
-                if let ts = state.lastSync {
-                    Text("\(t("last_sync")) \(ts.formatted(date: .omitted, time: .shortened))")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                if state.lastSync != nil || !state.version.isEmpty {
+                    HStack(spacing: 6) {
+                        if let ts = state.lastSync {
+                            Text("\(t("last_sync")) \(ts.formatted(date: .omitted, time: .shortened))")
+                        }
+                        if !state.version.isEmpty {
+                            Text("v\(state.version)")
+                        }
+                    }
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
                 }
             }
             Spacer()

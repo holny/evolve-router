@@ -239,7 +239,7 @@ table.mx tr.win td { color:var(--green); }
 <header class="topbar">
   <div>
     <h1 data-i18n="title">EvolveRouter Dashboard</h1>
-    <div class="sub"><span class="dot" id="sse-dot"></span><span id="sse-status" data-i18n="sse_conn">SSE 连接中…</span></div>
+    <div class="sub"><span class="dot" id="sse-dot"></span><span id="sse-status" data-i18n="sse_conn">SSE 连接中…</span><span id="app-version" class="dim2" style="margin-left:8px"></span></div>
   </div>
   <div class="chips" id="chips"></div>
   <button class="lang-sel" id="theme-btn" title="Theme" style="padding:5px 11px;display:inline-flex;align-items:center">
@@ -1949,7 +1949,11 @@ async function refresh(){
     state.trends = (await trendsR.json()).series || [];
     state.providers = (await provR.json()).providers || [];
     state.providersStatus = (await statR.json());
-    state.decision = (await liveR.json()).decision || null;
+    const liveBody = (await liveR.json()) || {};
+    state.decision = liveBody.decision || null;
+    state.version = liveBody.version || '';
+    { const v = document.getElementById('app-version');
+      if (v) v.textContent = state.version ? 'v' + state.version : ''; }
     renderPlans();
     renderTrends();
     renderChips();
