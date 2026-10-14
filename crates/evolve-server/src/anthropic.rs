@@ -121,29 +121,15 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     let original_choice = decision.chosen.clone();
     let is_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // 胜出队列（与 relay 同规则）：chain 按序尝试，失败顺延；不可重试错误当场剔除；
+    // 队列上限 min(fallback_depth, 5)，整体失败或为空后才走队列外 sweep 段。
+    const WINNER_QUEUE_MAX: usize = 5;
     let (attempts, sweep_from): (Vec<String>, usize) = match &target {
         Target::Auto(_) => {
-            let mut seen = std::collections::HashSet::new();
-            let mut list: Vec<String> = decision
-                .chain
-                .iter()
-                .filter(|c| seen.insert((*c).clone()))
-                .cloned()
-                .collect();
-            let depth = st.config.policy.fallback_depth.max(3) as usize;
-            if list.len() < depth && !decision.scores.is_empty() {
-                let mut ranked: Vec<(String, f32)> =
-                    decision.scores.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                for (m, _) in ranked {
-                    if list.len() >= depth {
-                        break;
-                    }
-                    if seen.insert(m.clone()) {
-                        list.push(m);
-                    }
-                }
-            }
+            let queue_max =
+                (st.config.policy.fallback_depth.max(3) as usize).min(WINNER_QUEUE_MAX);
+            let mut list = crate::relay::winner_queue(&decision.chain, &decision.scores, queue_max);
+            let mut seen: std::collections::HashSet<String> = list.iter().cloned().collect();
             // 链外兜底（用户裁决，与 relay 同规则）：主链全灭时目录里其余
             // provider 的模型队尾一试（含冷却中/未评分的），上限 6 个
             let sweep_from = list.len();
@@ -294,6 +280,26 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             let snippet =
                 String::from_utf8_lossy(&err_body.slice(..err_body.len().min(MAX_ERROR_BODY))).into_owned();
             let failure = classify_failure(status.as_u16(), &snippet, retry_after_ms);
+            // 协议不支持（Responses-only 等）且用户未显式配置的模型：进程内整体
+            // 剔除（与 relay 同规则；Source::User 保留）。按模型不可重试，跳出 key 池。
+            if status.as_u16() == 400
+                && failure.kind == HealthKind::Unsupported
+                && record.source != evolve_core::types::Source::User
+            {
+                let reason = format!("protocol unsupported ({})", record.upstream_model);
+                tracing::info!(model = %cand, "protocol-unsupported model excluded (in-process)");
+                st.events.record(json!({
+                    "kind": "model_excluded",
+                    "model": cand,
+                    "upstream_model": record.upstream_model,
+                    "reason": reason,
+                    "session": session_key,
+                }));
+                st.exclude_models(vec![(cand.clone(), reason)]);
+                skipped.push(format!("{cand}(protocol-unsupported, excluded)"));
+                last_error = Some((map_status(status), err_body));
+                break;
+            }
             st.events.record(json!({
                 "kind": "upstream_error", "model": cand,
                 "upstream_model": record.upstream_model,

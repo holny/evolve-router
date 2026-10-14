@@ -259,7 +259,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn protocol_unsupported_is_classified() {
         let body = r#"{"type":"error","error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}"#;
         let f = classify_failure(400, body, None);

@@ -209,38 +209,22 @@ pub async fn chat_completions(
     let original_choice = decision.chosen.clone();
     let is_stream = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // Candidate chain: auto decisions try the ranked chain on quota/auth
-    // failures; explicit model selections return the upstream error as-is.
-    // Chain exhausted → keep pulling from the full eligible ranking (scores,
-    // desc) up to fallback_depth so a top-3 outage never takes the whole
-    // provider fleet down with it.
+    // 胜出队列（用户裁决 2026-10）：最终决策的 chain 即胜出队列——按序尝试，
+    // 失败顺延下一个；不可重试错误（配额/协议不支持）当场剔除该队列项（配额走
+    // dead_providers 账号级熔断，协议不支持走 exclude_models 整体剔除）。队列尝试
+    // 上限 = min(fallback_depth, WINNER_QUEUE_MAX)；队列整体失败或为空后，才尝试
+    // 队列外模型（sweep 段，评分序 + 目录长尾，防单点大面积不可用）。
+    const WINNER_QUEUE_MAX: usize = 5;
     let (attempts, sweep_from): (Vec<String>, usize) = match &target {
         Target::Auto(_) => {
-            let mut seen = std::collections::HashSet::new();
-            let mut list: Vec<String> = decision
-                .chain
-                .iter()
-                .filter(|c| seen.insert((*c).clone()))
-                .cloned()
-                .collect();
-            let depth = st.config.policy.fallback_depth.max(3) as usize;
-            if list.len() < depth && !decision.scores.is_empty() {
-                let mut ranked: Vec<(String, f32)> =
-                    decision.scores.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                for (m, _) in ranked {
-                    if list.len() >= depth {
-                        break;
-                    }
-                    if seen.insert(m.clone()) {
-                        list.push(m);
-                    }
-                }
-            }
-            // 链外兜底（用户裁决）：链+评分补位全灭时，目录里其余 provider 的
-            // 模型仍一试（冷却中的 zhipu / 未入评分的 MiniMax 也纳入）——队尾
-            // 追加即天然只在全灭路径被尝试；上限 6 个防长尾延迟。自指 base_url 的不试
-            // （无凭据模型与主链同权照试——本地上游可免鉴权）。
+            let queue_max =
+                (st.config.policy.fallback_depth.max(3) as usize).min(WINNER_QUEUE_MAX);
+            let mut list = winner_queue(&decision.chain, &decision.scores, queue_max);
+            // 链外兜底（用户裁决）：胜出队列（链+评分补位）全灭时，目录里其余
+            // provider 的模型仍一试（冷却中的 zhipu / 未入评分的 MiniMax 也纳入）——
+            // 队尾追加即天然只在全灭路径被尝试；上限 6 个防长尾延迟。自指 base_url
+            // 的不试（无凭据模型与主链同权照试——本地上游可免鉴权）。
+            let mut seen: std::collections::HashSet<String> = list.iter().cloned().collect();
             let sweep_from = list.len();
             let cat = st.engine.catalog_snapshot();
             let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
@@ -427,6 +411,28 @@ pub async fn chat_completions(
                 tracing::warn!(model = %cand, status = 400, body = %head, "upstream 400 — request rejected");
             }
             let mut failure = classify_failure(status.as_u16(), &snippet, retry_after_ms);
+            // 协议不支持（Responses-only 等）**且用户未显式配置**的模型：进程内
+            // 整体剔除（用户裁决 2026-10）——目录/路由/面板/探活一并消失，不落冷却；
+            // 仅存内存，网关重启复位（Source::User 的用户显式配置保留，走下方 5h
+            // 冷却路径）。此类错误按模型不可重试——换 key 无意义，直接跳出 key 池。
+            if status.as_u16() == 400
+                && failure.kind == HealthKind::Unsupported
+                && record.source != evolve_core::types::Source::User
+            {
+                let reason = format!("protocol unsupported ({})", record.upstream_model);
+                tracing::info!(model = %cand, "protocol-unsupported model excluded (in-process)");
+                st.events.record(json!({
+                    "kind": "model_excluded",
+                    "model": cand,
+                    "upstream_model": record.upstream_model,
+                    "reason": reason,
+                    "session": session_key,
+                }));
+                st.exclude_models(vec![(cand.clone(), reason)]);
+                skipped.push(format!("{cand}(protocol-unsupported, excluded)"));
+                last_error = Some((map_status(status), err_body));
+                break; // 该模型（含其它 key）整体剔除，不再重试
+            }
             // w3 404 语义二分（用户裁决）：
             //  - 模型仍在 provider 的模型列表里 → 临时不可用，5h 冷却后自动重试
             //  - 列表里没有（上游已移除）→ 永久黑名单（until=哨兵），仅手动恢复
@@ -939,6 +945,36 @@ fn fallback_eligible(status: u16) -> bool {
     matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
 }
 
+/// 胜出队列（用户裁决 2026-10）：最终决策的 chain 去重后为主序列，不足
+/// `queue_max` 时按评分序（降序）补位；总量以 `queue_max` 封顶。队列整体
+/// 失败或为空才走队列外的 sweep 段（见调用点）。
+pub(crate) fn winner_queue(
+    chain: &[String],
+    scores: &std::collections::BTreeMap<String, f32>,
+    queue_max: usize,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut list: Vec<String> = chain
+        .iter()
+        .filter(|c| seen.insert((*c).clone()))
+        .take(queue_max)
+        .cloned()
+        .collect();
+    if list.len() < queue_max && !scores.is_empty() {
+        let mut ranked: Vec<(String, f32)> = scores.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (m, _) in ranked {
+            if list.len() >= queue_max {
+                break;
+            }
+            if seen.insert(m.clone()) {
+                list.push(m);
+            }
+        }
+    }
+    list
+}
+
 fn insert_header(h: &mut axum::http::HeaderMap, k: &'static str, v: &str) {
     if let Ok(val) = axum::http::HeaderValue::from_str(&v.chars().map(|c| if c.is_ascii() { c } else { ' ' }).collect::<String>()) {
         h.insert(k, val);
@@ -1139,4 +1175,46 @@ fn cache_fingerprint(parsed: &Value) -> Option<[u8; 32]> {
     }
     let canonical = serde_json::to_vec(&logic).ok()?;
     Some(Sha256::digest(&canonical).into())
+}
+
+#[cfg(test)]
+mod winner_queue_tests {
+    use super::winner_queue;
+    use std::collections::BTreeMap;
+
+    fn scores(pairs: &[(&str, f32)]) -> BTreeMap<String, f32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn chain_first_then_score_fill() {
+        let chain = vec!["a".to_string(), "b".to_string()];
+        let s = scores(&[("c", 0.9), ("d", 0.8), ("b", 0.7)]);
+        let q = winner_queue(&chain, &s, 5);
+        // chain 先行（去重）；再用评分序补位，上限 5
+        assert_eq!(q, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn queue_is_capped() {
+        let chain: Vec<String> = (0..8).map(|i| format!("m{i}")).collect();
+        let q = winner_queue(&chain, &scores(&[]), 5);
+        assert_eq!(q.len(), 5);
+        assert_eq!(q[0], "m0");
+        assert_eq!(q[4], "m4");
+    }
+
+    #[test]
+    fn dedupes_chain_and_scores() {
+        let chain = vec!["a".to_string(), "a".to_string(), "b".to_string()];
+        let s = scores(&[("a", 0.5), ("b", 0.9), ("c", 0.1)]);
+        let q = winner_queue(&chain, &s, 5);
+        assert_eq!(q, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn empty_chain_falls_back_to_scores() {
+        let q = winner_queue(&[], &scores(&[("x", 0.2), ("y", 0.8)]), 5);
+        assert_eq!(q, vec!["y", "x"]);
+    }
 }

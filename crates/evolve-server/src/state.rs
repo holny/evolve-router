@@ -33,6 +33,11 @@ pub struct Inner {
     pub payg_balance: Mutex<HashMap<String, Value>>,
     /// models.dev 参考刷新待执行（build_state 同步上下文不能 spawn，交给 start_background）
     pub modelsdev_refresh_due: bool,
+    /// 进程内剔除表（用户裁决 2026-10）：协议不支持（如 Responses-only）且用户
+    /// **未显式配置**的模型，从目录/路由/面板/探活整体剔除（id → 原因）。仅内存
+    /// 不落盘——网关重启即复位，用户在 evolve.toml 显式声明的模型（Source::User）
+    /// 自然复活。
+    pub excluded_models: Mutex<HashMap<String, String>>,
 }
 
 /// 全局扫描进度快照（/api/providers/scan-progress 响应体）
@@ -179,6 +184,7 @@ pub fn build_state(config: FileConfig) -> AppState {
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
         modelsdev_refresh_due,
+        excluded_models: Mutex::new(HashMap::new()),
     })
 }
 
@@ -186,6 +192,36 @@ impl Inner {
     /// 按 id 查模型（读锁短临界区，克隆返回）
     pub fn catalog_get(&self, id: &str) -> Option<evolve_core::types::ModelRecord> {
         self.engine.catalog.read().ok().and_then(|c| c.get(id).cloned())
+    }
+
+    /// 进程内剔除模型（协议不支持）：登记原因并从 catalog 物理移除——路由选型、
+    /// 面板展示、周期探活三处都读 catalog_snapshot，一并消失。幂等；仅内存，
+    /// 重启复位（见 `excluded_models` 字段说明）。
+    pub fn exclude_models(&self, ids: Vec<(String, String)>) {
+        if ids.is_empty() {
+            return;
+        }
+        if let Ok(mut ex) = self.excluded_models.lock() {
+            for (id, reason) in &ids {
+                ex.insert(id.clone(), reason.clone());
+            }
+        }
+        let mut models = self.engine.catalog_snapshot();
+        let before = models.len();
+        models.retain(|m| !ids.iter().any(|(id, _)| id == &m.id));
+        let removed = before - models.len();
+        if removed > 0 {
+            self.engine.replace_catalog(models);
+            tracing::info!(removed, "protocol-unsupported models excluded from catalog");
+        }
+    }
+
+    /// 已在剔除表内的模型 id（重扫/重拉时跳过，避免复活被剔除的模型）
+    pub fn excluded_ids(&self) -> std::collections::HashSet<String> {
+        self.excluded_models
+            .lock()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Provider 实时配额上报（每次响应头部到达即写）——面板展示以此为准。
@@ -369,6 +405,7 @@ impl Inner {
         let discovered = evolve_discovery::discover(&self.config.discovery.agents);
         let removed: std::collections::HashSet<String> =
             load_overrides(&self.config.data.dir).removed_base_urls.into_iter().collect();
+        let excluded = self.excluded_ids();
         let mut models = self.engine.catalog_snapshot();
         let mut added = 0usize;
         for d in discovered {
@@ -376,6 +413,9 @@ impl Inner {
                 continue;
             }
             if !models.iter().any(|m| m.id == d.id) {
+                if excluded.contains(&d.id) {
+                    continue; // 协议不支持被剔除的模型不再复活（重启复位）
+                }
                 tracing::info!(model = %d.id, "discovery rescan: new model added");
                 models.push(d);
                 added += 1;
@@ -398,6 +438,7 @@ impl Inner {
         );
         let removed: std::collections::HashSet<String> =
             load_overrides(&self.config.data.dir).removed_base_urls.into_iter().collect();
+        let excluded = self.excluded_ids();
         let mut models = base_records;
         let mut added = 0usize;
         for r in fresh {
@@ -405,6 +446,9 @@ impl Inner {
                 continue;
             }
             if !models.iter().any(|m| m.id == r.id) {
+                if excluded.contains(&r.id) {
+                    continue; // 协议不支持被剔除的模型不再复活（重启复位）
+                }
                 models.push(r);
                 added += 1;
             }
