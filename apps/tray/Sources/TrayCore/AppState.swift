@@ -42,13 +42,12 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, observedRaw: [String: Any]? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
         self.tokens5h = tokens5h; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePct5h = cachePct5h
         self.paygBalance = paygBalance
-        self.observedRaw = observedRaw
         self.quotaUsed = quotaUsed; self.quotaScope = quotaScope
         self.quotaExhausted = quotaExhausted; self.quotaReset = quotaReset
         self.cooldownModel = cooldownModel
@@ -74,7 +73,6 @@ public struct ProviderRow: Identifiable {
     public let avgRate: Double?
     public let cachePct5h: Int?
     public let paygBalance: PaygBalance?
-    public let observedRaw: [String: Any]?
     public let quotaUsed: Int?
     public let quotaScope: String?
     public let quotaExhausted: Bool
@@ -173,21 +171,8 @@ public final class AppState: ObservableObject {
             tokensK = Self.fmtTok(toks)
         }
         var rows: [ProviderRow] = []
-        var coolByKey: [String: (Bool, Date?, String, String?, [String])] = [:]
-        if case (200, let sdata)? = try? await get("/api/providers/status"),
-           let sw = try? JSONSerialization.jsonObject(with: sdata) as? [String: Any],
-           let sarr = sw["providers"] as? [[String: Any]] {
-            for s in sarr {
-                let k = (s["key"] as? String) ?? ""
-                let cd = (s["cooldown_remaining_ms"] as? Int)
-                    ?? (s["cooldown_remaining_ms"] as? Double).map(Int.init)
-                let cause = (s["message"] as? String) ?? ((s["kind"] as? String) ?? "")
-                let model = s["cooldown_model"] as? String
-                let until = cd.map { Date().addingTimeInterval(Double($0)/1000.0) }
-                let blocked = (s["blocked_models"] as? [String]) ?? []
-                coolByKey[k] = (((s["available"] as? Bool) ?? true), until, cause, model, blocked)
-            }
-        }
+        // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
+        // 面板与 web 面板同源，客户端只渲染（消除两端各自计算的口径漂移）
         if case (200, let data)? = try? await get("/api/providers"),
            let wrapper = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let arr = wrapper["providers"] as? [[String: Any]] {
@@ -201,52 +186,34 @@ public final class AppState: ObservableObject {
                     softPct = Int(sp)
                 }
                 let key = (p["key"] as? String) ?? "-"
-                let mergedKeys = (p["merged_from"] as? [Any])?.compactMap { $0 as? String } ?? [key]
                 let kind = (p["plan_kind"] as? String) ?? "-"
-                let windows = p["windows"] as? [String: Any]
-                let w5 = (windows?["5h"] as? Double) ?? (windows?["5h"] as? Int).map(Double.init)
-                let used5 = (p["used_5h"] as? Double) ?? 0
-                var pct: Int? = nil
-                if let obs = p["observed"] as? [String: Any],
-                   let o5 = obs["5h"] as? [String: Any],
-                   let limit = (o5["limit"] as? Double) ?? (o5["limit"] as? Int).map(Double.init),
-                   let remaining = (o5["remaining"] as? Double) ?? (o5["remaining"] as? Int).map(Double.init),
-                   limit > 0 {
-                    pct = Int(((limit - remaining) / limit * 100).rounded())
-                }
-                if pct == nil, let w5, w5 > 0 {
-                    pct = Int((used5 / w5 * 100).rounded())
-                }
-                var available = true
-                var cooldownUntil: Date? = nil
-                var cooldownCause: String? = nil
-                var cooldownModel: String? = nil
-                var blockedModels: [String] = []
-                for k in mergedKeys {
-                    if let (av, until, cause, model, blocked) = coolByKey[k] {
-                        available = available && av
-                        if !blocked.isEmpty {
-                            blockedModels.append(contentsOf: blocked)
-                        }
-                        // cause 独立收集（永久黑名单条目没有 cooldown 时长但带 message）
-                        if cooldownCause == nil || cooldownCause!.isEmpty, !cause.isEmpty { cooldownCause = cause }
-                        if let until, until > Date() {
-                            if cooldownUntil == nil || until > cooldownUntil! {
-                                cooldownUntil = until
-                                cooldownModel = model
-                            }
-                        }
-                    }
-                }
                 let disabled = (p["disabled"] as? Bool) ?? false
+                // 冷却/黑名单/可用性/配额——服务端派生（merged_from 聚合也在服务端）
+                let available = (p["available"] as? Bool) ?? true
+                let cooling = p["cooling"] as? [String: Any]
+                let coolMs = (cooling?["remaining_ms"] as? Int)
+                    ?? (cooling?["remaining_ms"] as? Double).map(Int.init)
+                let cooldownUntil = coolMs.map { Date().addingTimeInterval(Double($0) / 1000.0) }
+                let cooldownCause = cooling?["cause"] as? String
+                let cooldownModel = (cooling?["model"] as? String).flatMap { AppState.shortModel($0, key: key) }
+                let blockedModels = ((p["blocked_models"] as? [Any])?.compactMap { $0 as? String } ?? [])
+                    .map { AppState.shortModel($0, key: "") }
+                let binding = p["binding"] as? [String: Any]
+                let usedPct = (binding?["used_pct"] as? Double).map { Int($0.rounded()) }
+                let quotaScope = binding?["scope"] as? String
+                let quotaExhausted = (binding?["exhausted"] as? Bool) ?? false
+                let quotaReset = (binding?["reset_epoch_ms"] as? Double)
+                    .map { Date(timeIntervalSince1970: $0 / 1000) }
                 let tok24 = (p["tokens_24h"] as? Int) ?? Int((p["tokens_24h"] as? Double) ?? 0)
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
-                                        cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: pct,
+                                        cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: usedPct,
                                         tokens24h: tok24, planKind: kind,
-                                        paygBalance: AppState.payg(from: p), observedRaw: (p["observed"] as? [String: Any]) ?? nil,
-                                        cooldownModel: cooldownModel.flatMap { AppState.shortModel($0, key: key) },
+                                        paygBalance: AppState.payg(from: p),
+                                        quotaUsed: usedPct, quotaScope: quotaScope,
+                                        quotaExhausted: quotaExhausted, quotaReset: quotaReset,
+                                        cooldownModel: cooldownModel,
                                         quotaSource: (p["quota_source"] as? String) ?? "",
-                                        blockedModels: blockedModels.map { AppState.shortModel($0, key: "") }))
+                                        blockedModels: blockedModels))
             }
         }
         rows.sort {
@@ -276,37 +243,7 @@ public final class AppState: ObservableObject {
         rows = rows.map { r in
             guard let e = agg[r.key] else { return r }
             let cachePct: Int? = e.promptSum > 0 ? Int(round(100.0 * Double(e.cacheSum) / Double(e.promptSum))) : nil
-            // binding quota：5h/周/月 任一窗口都足以卡死请求——取用量最大者展示；
-            // 多窗耗尽时恢复时间取最长（用户裁决）
-            var qUsed: Int? = nil; var qScope: String? = nil
-            var qExhausted = false; var qReset: Date? = nil
-            if let obsRaw = r.observedRaw {
-                let scopeLabel = ["5h": "5h", "weekly": "weekly", "monthly": "monthly"]
-                for (scope, label) in scopeLabel {
-                    // scope 映射：7d ≈ weekly（Anthropic 系把周窗写成 7d）——与 Web 的
-                    // obsWin 同规则；此前只认 "weekly" → 该系周配额在面板缺失
-                    guard let w = (obsRaw[scope] as? [String: Any])
-                            ?? (scope == "weekly" ? obsRaw["7d"] as? [String: Any] : nil),
-                          let limit = (w["limit"] as? Double) ?? (w["limit"] as? Int).map(Double.init),
-                          limit > 0,
-                          let remaining = (w["remaining"] as? Double) ?? (w["remaining"] as? Int).map(Double.init) else { continue }
-                    let used = Int(round(100.0 * (limit - remaining) / limit))
-                    let exhausted = remaining <= 0
-                    let reset = (w["reset_epoch_ms"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-                    if qUsed == nil || used > qUsed! {
-                        qUsed = used; qScope = label
-                    }
-                    if exhausted {
-                        qExhausted = true
-                        if qReset == nil || (reset ?? .distantFuture) > qReset! { qReset = reset }
-                    }
-                }
-            }
-            if qUsed == nil, r.planKind != "api", let pct = r.pct {
-                // credits 兜底：无 observed 官方端点时用 used5/窗口限额（AFP/credit 计划）
-                // tokens 历史累计可超预算（watchdog 90s 内官方数据接管）——bar 封顶 100%
-                qUsed = min(pct, 100); qScope = "5h"
-            }
+            // 配额/冷却等派生量已在服务端算好（见上），此处只叠加 /api/stats 的指标
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
                                pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
@@ -315,8 +252,8 @@ public final class AppState: ObservableObject {
                                avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,
                                cachePct5h: cachePct,
                                paygBalance: r.paygBalance,
-                               quotaUsed: qUsed, quotaScope: qScope,
-                               quotaExhausted: qExhausted, quotaReset: qReset,
+                               quotaUsed: r.quotaUsed, quotaScope: r.quotaScope,
+                               quotaExhausted: r.quotaExhausted, quotaReset: r.quotaReset,
                                cooldownModel: r.cooldownModel,
                                quotaSource: r.quotaSource,
                                blockedModels: r.blockedModels)

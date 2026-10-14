@@ -842,6 +842,107 @@ fn tokens_24h_by_provider(
     (out, last_used)
 }
 
+/// 账号（provider）级健康聚合：返回 (最紧冷却项, 永久黑名单模型名列表)。
+/// 冷却项 = (剩余ms, model_id, kind, message)。`/api/providers` 与
+/// `/api/providers/status` 共用——单一事实源，避免两端各自聚合口径漂移。
+#[allow(clippy::type_complexity)]
+fn provider_health(
+    health_snap: &evolve_core::types::HealthMap,
+    snap: &[evolve_core::types::ModelRecord],
+    provider: &str,
+    now_ms: u64,
+) -> (Option<(u64, String, String, String)>, Vec<String>) {
+    let mut coolest: Option<(u64, String, String, String)> = None;
+    let mut blocked: Vec<String> = Vec::new();
+    for (k, h) in health_snap.iter() {
+        let mid = k.split('\u{1f}').next().unwrap_or("");
+        if !snap.iter().any(|mm| mm.id == mid && mm.provider == provider) {
+            continue;
+        }
+        // 永久黑名单（404 且不在模型列表）：不进冷却数字，单独暴露给面板/网页做恢复入口
+        if h.until_epoch_ms == Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL) {
+            blocked.push(mid.split('/').last().unwrap_or(mid).to_string());
+            continue;
+        }
+        if let Some(remain) = h.cooldown_remaining_ms(now_ms)
+            && coolest.as_ref().map(|(r, _, _, _)| remain > *r).unwrap_or(true)
+        {
+            coolest = Some((remain, mid.to_string(), h.kind.label().to_string(), h.message.clone()));
+        }
+    }
+    (coolest, blocked)
+}
+
+/// 配额窗口派生（单一事实源）：官方 observed 实测优先，本地 5h 用量估算兜底。
+/// 返回 `(逐窗, 绑定窗口)`。窗口固定 5h/weekly/monthly；weekly 兼容 `7d` 键名
+/// （Anthropic 系把周窗写成 7d）。绑定窗口 = 用量最高者；有窗口实测耗尽时
+/// exhausted=true、reset 取耗尽窗口里最长的恢复时间。
+/// 客户端（macOS 面板 / web 面板）只渲染，不再各自计算——此前两端各写一份，
+/// 已多次出现口径漂移。
+fn derive_quota(observed: &Value, windows: &Value, used_5h: f64) -> (Value, Value) {
+    let mut per = serde_json::Map::new();
+    let obs_at = |scope: &str| -> Option<&Value> {
+        observed
+            .get(scope)
+            .filter(|v| !v.is_null())
+            .or_else(|| if scope == "weekly" { observed.get("7d").filter(|v| !v.is_null()) } else { None })
+    };
+    for (scope, sim) in [("5h", 1.0f64), ("weekly", 7.0), ("monthly", 30.0)] {
+        if let Some(o) = obs_at(scope)
+            && let (Some(limit), Some(remaining)) = (
+                o.get("limit").and_then(|v| v.as_f64()),
+                o.get("remaining").and_then(|v| v.as_f64()),
+            )
+            && limit > 0.0
+        {
+            let used_pct = (((limit - remaining) / limit) * 100.0).round().clamp(0.0, 100.0);
+            per.insert(scope.to_string(), json!({
+                "used_pct": used_pct, "limit": limit, "remaining": remaining,
+                "reset_epoch_ms": o.get("reset_epoch_ms").cloned().unwrap_or(Value::Null),
+                "source": "observed",
+            }));
+            continue;
+        }
+        // 估算：本地 5h 用量 × 窗口系数 ÷ 声明额度（无用量/无额度则不出该窗）
+        let allowance = windows.get(scope).and_then(|v| v.as_f64()).filter(|a| *a > 0.0);
+        if let Some(a) = allowance
+            && used_5h > 0.0
+        {
+            let used = used_5h * sim;
+            per.insert(scope.to_string(), json!({
+                "used_pct": ((used / a) * 100.0).round().clamp(0.0, 100.0),
+                "limit": a, "remaining": (a - used).max(0.0),
+                "reset_epoch_ms": Value::Null, "source": "estimate",
+            }));
+        }
+    }
+    let mut b_used = 0.0f64;
+    let mut b_scope = Value::Null;
+    let mut exhausted = false;
+    let mut b_reset: Option<f64> = None;
+    for (scope, w) in &per {
+        if let Some(used) = w.get("used_pct").and_then(|v| v.as_f64())
+            && used > b_used
+        {
+            b_used = used;
+            b_scope = json!(scope);
+        }
+        if w.get("source").and_then(|v| v.as_str()) == Some("observed")
+            && w.get("remaining").and_then(|v| v.as_f64()).unwrap_or(1.0) <= 0.0
+        {
+            exhausted = true;
+            if let Some(r) = w.get("reset_epoch_ms").and_then(|v| v.as_f64()) {
+                b_reset = Some(b_reset.map_or(r, |c: f64| c.max(r)));
+            }
+        }
+    }
+    let binding = json!({
+        "scope": b_scope, "used_pct": b_used, "exhausted": exhausted,
+        "reset_epoch_ms": b_reset,
+    });
+    (Value::Object(per), binding)
+}
+
 pub async fn api_providers_status(State(st): State<AppState>) -> Response {
     let now_ms = evolve_memory::health::now();
     let health_snap = st.health.snapshot();
@@ -864,9 +965,9 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             .map(|k| key_fp(&k))
             .unwrap_or_default()
     };
-    // 身份遮蔽（与 /api/providers 同规则）：baseUrl+apiKey 指纹
+    // 身份遮蔽（与 /api/providers 同规则）：baseUrl+apiKey 指纹。
+    // 含 disabled 条目——禁用行仍要展示（可恢复），其发现型孪生必须继续被遮蔽
     let manual_idents: std::collections::HashSet<(String, String)> = ov.providers.iter()
-        .filter(|(_, p)| !p.disabled)
         .map(|(k, p)| {
             let fp = p.api_key.as_deref().map(|s| key_fp(s))
                 .or_else(|| p.key_fp.clone())
@@ -886,7 +987,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
         }
     }
     for (key, pd) in &ov.providers {
-        if pd.disabled { continue; }
+        // 禁用行仍展示（带 disabled 标记）——否则面板/网页的"恢复"入口永不出现
         let has_named = snap.iter().any(|m| &m.provider == key);
         let used = if has_named {
             used_by_provider.get(key).copied().unwrap_or(0.0)
@@ -898,25 +999,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             evolve_core::plans::tier_allowance_by_key(pk, &pd.tier, 0)
         });
         let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let mut coolest: Option<(u64, String, String, String)> = None;
-        let mut blocked: Vec<String> = Vec::new();
-        for (k, h) in health_snap.iter() {
-            let mid = k.split('\u{1f}').next().unwrap_or("");
-            if !snap.iter().any(|mm| mm.id == mid && mm.provider == *key) {
-                continue;
-            }
-            // w3 永久黑名单（404 且不在模型列表）：不进冷却数字，单独暴露给
-            // 面板/网页做"手动恢复"入口
-            if h.until_epoch_ms == Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL) {
-                blocked.push(mid.split('/').last().unwrap_or(mid).to_string());
-                continue;
-            }
-            if let Some(remain) = h.cooldown_remaining_ms(now_ms)
-                && coolest.as_ref().map(|(r, _, _, _)| remain > *r).unwrap_or(true)
-            {
-                coolest = Some((remain, mid.to_string(), h.kind.label().to_string(), h.message.clone()));
-            }
-        }
+        let (coolest, blocked) = provider_health(&health_snap, &snap, key, now_ms);
         let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
         let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
         let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
@@ -924,6 +1007,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
         out.push(json!({
             "key": key, "source": "manual",
             "base_url": pd.base_url, "tier": pd.tier, "plan_kind": pd.plan_kind,
+            "disabled": pd.disabled,
             "allowance_5h": allowance,
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
             "pressure": pressure,
@@ -973,23 +1057,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             .unwrap_or(0.0);
         let allowance = e.get("allowance_5h").and_then(|v| v.as_f64());
         let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let mut coolest: Option<(u64, String, String, String)> = None;
-        let mut blocked: Vec<String> = Vec::new();
-        for (k, h) in health_snap.iter() {
-            let mid = k.split('\u{1f}').next().unwrap_or("");
-            if !snap.iter().any(|mm| mm.id == mid && mm.provider == provider) {
-                continue;
-            }
-            if h.until_epoch_ms == Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL) {
-                blocked.push(mid.split('/').last().unwrap_or(mid).to_string());
-                continue;
-            }
-            if let Some(remain) = h.cooldown_remaining_ms(now_ms)
-                && coolest.as_ref().map(|(r, _, _, _)| remain > *r).unwrap_or(true)
-            {
-                coolest = Some((remain, mid.to_string(), h.kind.label().to_string(), h.message.clone()));
-            }
-        }
+        let (coolest, blocked) = provider_health(&health_snap, &snap, &provider, now_ms);
         let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
         let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
         let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
@@ -1058,7 +1126,8 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     let (tok24, last_used) = tokens_24h_by_provider(&snap_all, &st.events, now_ms);
     let credits5h = usage_5h_by_provider(&snap_all, &st.events, now_ms);
     for (key, pd) in &ov.providers {
-        if pd.disabled { continue; }
+        // 禁用行仍展示（带 disabled 标记）——其发现型孪生已被身份遮蔽抑制，
+        // 用户可在面板/网页一键恢复
         // 档位联动：显式窗口额度 > 注册表档位额度（选档位后配额条立即生效）
         let plan_key = evolve_core::plans::plan_for(&pd.base_url).map(|p| p.key).unwrap_or("");
         let tier_allow = |w: usize| evolve_core::plans::tier_allowance_by_key(plan_key, &pd.tier, w);
@@ -1077,6 +1146,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         out.push(json!({
             "key": key, "source": "manual",
             "base_url": pd.base_url, "protocol": pd.protocol,
+            "disabled": pd.disabled,
             "plan_key": plan_key,
             "plan_kind": pd.plan_kind, "docs_url": pd.docs_url,
             "tier": pd.tier,
@@ -1107,7 +1177,6 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             .unwrap_or_default()
     };
     let manual_idents: std::collections::HashSet<(String, String)> = ov.providers.iter()
-        .filter(|(_, p)| !p.disabled)
         .map(|(k, p)| {
             // 无显式 key 时回退：编辑自发现 provider 的 overlay 条目按同组现有 key 指纹回填
             let fp = p.api_key.as_deref().map(|s| key_fp(s))
@@ -1335,6 +1404,55 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                 ""
             };
             if let Some(o) = row.as_object_mut() { o.insert("quota_source".into(), json!(src)); }
+        }
+    }
+    // 派生视图（单一事实源）：配额窗口 + 绑定窗口 + 冷却/黑名单/可用性——macOS 面板
+    // 与 web 面板只渲染，不再各自计算（此前两端各写一份，已多次出现口径漂移）。
+    // 冷却/黑名单按 merged_from 跨来源账号聚合（本端点合并行，status 端不合并）。
+    {
+        let now_d = evolve_memory::health::now();
+        for row in out.iter_mut() {
+            let keys: Vec<String> = row
+                .get("merged_from")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_else(|| {
+                    row.get("key").and_then(|v| v.as_str()).map(|k| vec![k.to_string()]).unwrap_or_default()
+                });
+            let mut cool: Option<(u64, String, String, String)> = None;
+            let mut blocked: Vec<String> = Vec::new();
+            for k in &keys {
+                let (c, b) = provider_health(&health_snap, &snap_all, k, now_d);
+                if let Some(c) = c
+                    && cool.as_ref().map(|x| c.0 > x.0).unwrap_or(true)
+                {
+                    cool = Some(c);
+                }
+                blocked.extend(b);
+            }
+            blocked.sort();
+            blocked.dedup();
+            let disabled = row.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false);
+            let available = cool.is_none() && blocked.is_empty() && !disabled;
+            let observed = row.get("observed").cloned().unwrap_or_else(|| json!({}));
+            let windows = row.get("windows").cloned().unwrap_or_else(|| json!({}));
+            let used_5h = row.get("used_5h").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let (quota, binding) = derive_quota(&observed, &windows, used_5h);
+            if let Some(o) = row.as_object_mut() {
+                o.insert("quota".into(), quota);
+                o.insert("binding".into(), binding);
+                o.insert("blocked_models".into(), json!(blocked));
+                o.insert("available".into(), json!(available));
+                o.insert(
+                    "cooling".into(),
+                    match cool {
+                        Some((ms, model, kind, cause)) => json!({
+                            "remaining_ms": ms, "model": model, "kind": kind, "cause": cause,
+                        }),
+                        None => Value::Null,
+                    },
+                );
+            }
         }
     }
     // 契约：snake_case（与 /api/providers 同源同命名，勿重映射）
@@ -2705,5 +2823,53 @@ mod tag_tests {
             Some(Capability::Powerful),
             "mid model at catalog tail must not be promoted by position"
         );
+    }
+}
+
+#[cfg(test)]
+mod quota_derive_tests {
+    use super::derive_quota;
+    use serde_json::json;
+
+    #[test]
+    fn observed_wins_and_binds_to_most_used_window() {
+        let observed = json!({
+            "5h": {"limit": 100.0, "remaining": 40.0, "reset_epoch_ms": 111},
+            "7d": {"limit": 500.0, "remaining": 0.0, "reset_epoch_ms": 222},
+        });
+        let windows = json!({"5h": 100.0, "weekly": 500.0, "monthly": 3000.0});
+        let (per, binding) = derive_quota(&observed, &windows, 12.0);
+        // 5h 实测 60%；weekly 兼容 7d 键名（100%，耗尽）
+        assert_eq!(per["5h"]["used_pct"], 60.0);
+        assert_eq!(per["5h"]["source"], "observed");
+        assert_eq!(per["weekly"]["used_pct"], 100.0);
+        assert_eq!(per["weekly"]["source"], "observed");
+        // 绑定窗口 = 用量最高者；有实测耗尽 → exhausted + 最长恢复时间
+        assert_eq!(binding["scope"], "weekly");
+        assert_eq!(binding["exhausted"], true);
+        assert_eq!(binding["reset_epoch_ms"], 222.0);
+    }
+
+    #[test]
+    fn estimates_when_no_observed() {
+        let (per, binding) = derive_quota(
+            &json!({}),
+            &json!({"5h": 100.0, "weekly": 700.0, "monthly": 3000.0}),
+            50.0,
+        );
+        assert_eq!(per["5h"]["used_pct"], 50.0);
+        assert_eq!(per["5h"]["source"], "estimate");
+        assert_eq!(per["weekly"]["used_pct"], 50.0);
+        assert_eq!(per["monthly"]["used_pct"], 50.0);
+        // 仅估算不算耗尽（无实测 remaining）
+        assert_eq!(binding["exhausted"], false);
+    }
+
+    #[test]
+    fn empty_when_nothing_declared() {
+        let (per, binding) = derive_quota(&json!({}), &json!({}), 0.0);
+        assert_eq!(per.as_object().unwrap().len(), 0);
+        assert!(binding["scope"].is_null());
+        assert_eq!(binding["exhausted"], false);
     }
 }

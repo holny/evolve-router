@@ -1205,7 +1205,7 @@ function renderAutopsy(e){
   if (hint) hint.style.display = 'none';
 }
 
-const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'overview', twin:'24h', providers:[], providersStatus:null, statusTs:0 };
+const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'overview', twin:'24h', providers:[] };
 
 // 评分矩阵模型名 → 飞轮行高亮（事件委托，覆盖后续新增的矩阵单元格）
 feed.addEventListener('click', ev => {
@@ -1375,20 +1375,14 @@ function renderChips(){
   const rate = reqs ? Math.round(100*ok/reqs) : null;
   const rateCls = rate===null ? '' : (rate >= 95 ? ' good' : (rate < 90 ? ' warn' : ''));
   const toks = all.reduce((a,s) => a+(s.prompt_tokens||0)+(s.completion_tokens||0), 0);
-  // 套餐用量：按方案聚合 5h 消耗/额度占比，取最紧套餐展示
-  // （数据源与 Provider 卡同源 state.providers——providersStatus 轮询缺 windows 字段）
+  // 套餐用量：按方案聚合 5h 消耗/额度占比，取最紧套餐展示（源自 p.quota，与 Provider 卡同源）
   const byPlan = {};
   (state.providers||[]).forEach(p => {
     const k = PK_SHORT[p.plan_kind] || p.plan_kind || '-';
-    // observed 实测优先（provider remains 端点/响应头捕获）；credits 数学仅兜底
-    const obs5 = p.observed && p.observed['5h'];
-    if (obs5 && obs5.limit > 0 && obs5.remaining != null) {
-      byPlan[k] = Math.max(byPlan[k]||0, Math.min(100, Math.round(100*(obs5.limit-obs5.remaining)/obs5.limit)));
-      return;
-    }
-    const allow = (p.windows && p.windows['5h']) || p.allowance;
-    if (!allow) return;
-    byPlan[k] = Math.max(byPlan[k]||0, Math.round(100*(p.used_5h||0)/allow));
+    // 派生配额视图（服务端算好，与 macOS 面板同源）——取 5h 窗口占用
+    const w = p.quota && p.quota['5h'];
+    if (!w) return;
+    byPlan[k] = Math.max(byPlan[k]||0, Math.min(100, Math.round(w.used_pct || 0)));
   });
   const planTxt = Object.entries(byPlan).length
     ? Object.entries(byPlan).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
@@ -1458,66 +1452,39 @@ function renderProviders(){
     const tierBadge = p.tier
       ? '<span class="pbadge" style="background:var(--card2);color:'+tierColor+'">'+esc(tName)+'</span>'
       : '';
-    // 配额展示：5h 额度 + 已用 + 进度条 + 下次重置
+    // 配额展示：全部取自服务端派生视图 p.quota（单一事实源，与 macOS 面板同源）
     const allowance = (p.windows && p.windows['5h']) || p.allowance;
-    const used = p.used_5h || 0;
     const soft = p.soft_pct || 60;
-    // 三窗口配额（5h/周/月）+ 重复标记
-    const wkAllow = p.windows && p.windows['weekly'];
-    const moAllow = p.windows && p.windows['monthly'];
+    const quota = p.quota || {};
     // 重复标记（后端按 baseURL+apiKey 指纹判定，指明跟谁重复）
     const dupBadge = p.duplicate_of
       ? '<span class="la f" style="margin-left:4px">'+esc(t('pv_dup_of').replace('{x}', p.duplicate_of))+'</span>'
       : '';
     let budgetHtml = '';
-    const bar = (a, u, label) => {
-      if (a == null || a <= 0) return '';
-      const pct = Math.min(100, Math.round(100 * u / a));
+    const winBar = (label, scope) => {
+      const w = quota[scope];
+      if (!w) return '';
+      const pct = Math.min(100, Math.round(w.used_pct || 0));
       const col = pct >= 90 ? 'var(--red)' : pct >= soft ? 'var(--amber)' : 'var(--green)';
-      const uS = Math.round(u * 100) / 100;
-      const aS = Math.round(a * 100) / 100;
+      const est = w.source === 'estimate' ? '~' : '';
+      const uS = Math.round((w.limit - w.remaining) * 100) / 100;
+      const aS = Math.round(w.limit * 100) / 100;
+      const resetTxt = w.reset_epoch_ms
+        ? ' · <span style="color:var(--fg)">'+esc(t('plan_next_reset'))+' '+timeStr(new Date(w.reset_epoch_ms))+'</span>'
+        : '';
       return '<div style="display:flex;align-items:center;gap:6px;margin-top:2px;font-size:10px">'
         + '<span style="min-width:28px;color:var(--dim)">'+esc(label)+'</span>'
         + '<div style="flex:1;height:4px;background:var(--row-line);border-radius:2px">'
         + '<div style="width:'+pct+'%;height:4px;background:'+col+';border-radius:2px"></div></div>'
         + '<span style="min-width:80px;text-align:right;color:'+col+'">'+pct+'%</span>'
-        + '<span style="min-width:90px;text-align:right;color:var(--dim)">'+uS+' / '+aS+'</span></div>';
+        + '<span style="min-width:120px;text-align:right;color:var(--dim)">'+est+uS+' / '+aS+resetTxt+'</span></div>';
     };
-    // 三窗口展示（用户裁决）：provider 实测优先（observed.remaining / limit /
-    // reset），本地 token 估算兜底；重置时间显示钟面时刻而非倒计时。
-    // scope 映射：7d ≈ weekly（同一窗口，不同 provider 命名不同）
-    const obs = p.observed || {};
-    const obsWin = (k) => obs[k] || (k === 'weekly' ? obs['7d'] : null);
-    const winBar = (label, allowanceKey, simFactor) => {
-      const a = p.windows && p.windows[allowanceKey];
-      const o = obsWin(allowanceKey);
-      // provider 实测 with reset time
-      if (o && o.remaining != null && o.limit != null && o.limit > 0) {
-        const rem = o.remaining, lim = o.limit;
-        const pct = Math.min(100, Math.round(100 * (lim - rem) / lim));
-        const col = pct >= 90 ? 'var(--red)' : pct >= soft ? 'var(--amber)' : 'var(--green)';
-        const resetTxt = o.reset_epoch_ms
-          ? ' · <span style="color:var(--fg)">'+esc(t('plan_next_reset'))+' '+timeStr(new Date(o.reset_epoch_ms))+'</span>'
-          : '';
-        return '<div style="display:flex;align-items:center;gap:6px;margin-top:2px;font-size:10px">'
-          + '<span style="min-width:28px;color:var(--dim)">'+esc(label)+'</span>'
-          + '<div style="flex:1;height:4px;background:var(--row-line);border-radius:2px">'
-          + '<div style="width:'+pct+'%;height:4px;background:'+col+';border-radius:2px"></div></div>'
-          + '<span style="min-width:80px;text-align:right;color:'+col+'">'+pct+'%</span>'
-          + '<span style="min-width:120px;text-align:right;color:var(--dim)">'+(lim-rem)+' / '+lim+resetTxt+'</span></div>';
-      }
-      // 本地估算兜底（无 provider 观测值）
-      if (a == null || a <= 0) return '';
-      return bar(a, used * simFactor, label);
-    };
-    if (allowance || wkAllow || moAllow || Object.keys(obs).length) {
+    if (Object.keys(quota).length) {
       budgetHtml = '<div style="margin-top:6px;max-width:520px">'
-        + winBar(t('pv_5h'), '5h', 1)
-        + winBar(t('pv_week'), 'weekly', 7)
-        + winBar(t('pv_month'), 'monthly', 30);
-      if (p.next_reset_epoch_ms)
-        budgetHtml += '<span class="la f" style="margin-top:2px">'+esc(t('plan_next_reset'))+' '+timeStr(new Date(p.next_reset_epoch_ms))+'</span>';
-      budgetHtml += '</div>';
+        + winBar(t('pv_5h'), '5h')
+        + winBar(t('pv_week'), 'weekly')
+        + winBar(t('pv_month'), 'monthly')
+        + '</div>';
     }
     // Provider 测实时余量（用户裁决：以 Provider 测为准；本地 token 估算仅兜底）
     let provHtml = '';
@@ -1547,15 +1514,9 @@ function renderProviders(){
         + '</div>';
     }
     const summary = tierBadge;
-    // 实时状态（providersStatus 轮询数据）。合并行（服务端按 key_fp 合并同账号多
-    // provider，带 merged_from）必须跨全部来源账号聚合——/api/providers 合并、
-    // /api/providers/status 不合并，只按 p.key 查会漏掉第二账号的冷却/黑名单
-    // （与 macOS 面板口径分叉）。
-    const statusAll = (state.providersStatus||{}).providers || [];
+    // 实时状态：冷却/黑名单已由服务端按 merged_from 聚合（单一事实源，与 macOS 面板同源）
     const mkeys = (p.merged_from && p.merged_from.length) ? p.merged_from : [p.key];
-    const statRows = statusAll.filter(s => mkeys.indexOf(s.key) >= 0);
-    const stat = statRows[0] || {};
-    const coolMs = statRows.reduce((m, s) => Math.max(m, s.cooldown_remaining_ms || 0), 0);
+    const coolMs = (p.cooling && p.cooling.remaining_ms) || 0;
     const onCool = coolMs > 0;
     // 倒计时档位（用户裁决）：≥24h → xxdxxhxxm；≥1h → xxhxxm；<1h → xxmxxs
     const fmtCd = (ms) => {
@@ -1568,8 +1529,8 @@ function renderProviders(){
     const statusBadge = onCool
       ? '<span class="la f">⏳ '+fmtCd(coolMs)+'</span>'
       : '<span class="la c">✓</span>';
-    // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口（并集；清除按来源账号逐个）
-    const blocked = [...new Set(statRows.flatMap(s => s.blocked_models || []))];
+    // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口（按来源账号逐个清）
+    const blocked = p.blocked_models || [];
     const unblockBtn = blocked.length
       ? '<button class="lang-btn" data-pv-unblock="'+esc(mkeys.join(','))+'" style="border-color:var(--red);color:var(--red)" title="'+esc(blocked.join(', '))+'">⛔ '+blocked.length+' · '+esc(t('pv_restore_models'))+'</button>'
       : '';
@@ -1942,11 +1903,11 @@ document.getElementById('pw-btn').addEventListener('click', () => {
 
 async function refresh(){
   try {
-    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, statR, liveR] = await Promise.all([
+    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, liveR] = await Promise.all([
       fetch('/api/stats?window='+encodeURIComponent(state.win)), fetch('/api/health'), fetch('/api/quota'), fetch('/api/benchmarks'),
       fetch('/api/policy-weights'), fetch('/api/plans'),
       fetch('/api/trends?window='+encodeURIComponent(state.twin)),
-      fetch('/api/providers'), fetch('/api/providers/status'), fetch('/api/live')]);
+      fetch('/api/providers'), fetch('/api/live')]);
     const statsRoot = await statsR.json();
     state.statsRoot = statsRoot;
     state.stats  = statsRoot.models  || {};
@@ -1957,7 +1918,6 @@ async function refresh(){
     state.plans  = (await plansR.json()).providers || [];
     state.trends = (await trendsR.json()).series || [];
     state.providers = (await provR.json()).providers || [];
-    state.providersStatus = (await statR.json());
     const liveBody = (await liveR.json()) || {};
     state.decision = liveBody.decision || null;
     state.version = liveBody.version || '';

@@ -942,6 +942,14 @@ async fn providers_payload_is_snake_case() {
         for k in ["key", "plan_kind", "tokens_24h"] {
             assert!(p.get(k).is_some(), "/api/providers provider row missing `{k}`");
         }
+        // 派生视图字段（服务端单一事实源；两端只渲染）
+        for k in ["quota", "binding", "available"] {
+            assert!(p.get(k).is_some(), "/api/providers row missing derived `{k}`");
+        }
+        assert!(p["quota"].is_object(), "quota must be an object");
+        assert!(p["binding"].is_object(), "binding must be an object");
+        assert!(p["binding"].get("used_pct").is_some(), "binding.used_pct required");
+        assert!(p["binding"].get("exhausted").is_some(), "binding.exhausted required");
     }
 }
 
@@ -972,4 +980,31 @@ async fn model_tags_payload_is_snake_case() {
             assert!(m.get(k).is_some(), "/api/model-tags model missing `{k}`");
         }
     }
+}
+
+// 软删除的 provider 仍须出现在列表里（否则面板/网页的"恢复"入口永不出现）
+#[tokio::test]
+async fn disabled_manual_provider_is_listed_for_restore() {
+    let cfg = test_config(9101);
+    let dir = cfg.data.dir.clone();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        std::path::Path::new(&dir).join("overrides.json"),
+        r#"{"providers":{"manual-x":{"base_url":"https://example.test/v1","disabled":true}}}"#,
+    )
+    .unwrap();
+    let app = build_router(build_state(cfg));
+    let (status, _h, raw) = send(app, get("/api/providers")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    let row = j["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["key"] == "manual-x")
+        .expect("disabled manual provider must still be listed (so the restore action is reachable)");
+    assert_eq!(row["disabled"], true);
+    // 禁用行仍带派生字段（面板/网页按同一契约渲染）
+    assert!(row.get("quota").is_some());
+    assert_eq!(row["available"], false, "disabled provider is not available");
 }
