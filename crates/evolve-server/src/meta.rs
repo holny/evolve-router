@@ -197,16 +197,35 @@ pub async fn api_stats(State(st): State<AppState>) -> Response {
 
 /// /api/live：菜单栏伴侣的轻量实时状态（1s 轮询）——in-flight 请求计数。
 /// 计数由 relay/anthropic 入口的 RAII LiveGuard 维护，覆盖全部 return 路径。
-pub async fn api_live(State(_st): State<AppState>) -> Response {
+/// `decision.status`：决策模型可用性（面板/网页横幅定时检测依据，每次调用现读 env）。
+/// - ok: 蒸馏器在 = 启动时已按 decision_model/hybrid 建 backend；或显式 heuristic； laya 有 env
+/// - stale: 网络起后 env 才补上——重启网关生效
+/// - missing: 未配置
+pub async fn api_live(State(st): State<AppState>) -> Response {
+    let cfg = st.config.decision.backend.clone();
+    // w2 槽位链 + 评审 #5：distiller 是**启动时**快照——env 现在有但启动时没建成
+    // 后端时报 "stale"（面板/网页提示"已配置，重启生效"），避免误报 ok
+    let started_active = st.distiller.is_some();
+    let env_now = evolve_decision::slots::any_slot_configured();
+    let status = if cfg == "heuristic" || started_active {
+        "ok"
+    } else if env_now {
+        "stale"
+    } else {
+        "missing"
+    };
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
         "ts": evolve_memory::health::now(),
+        "decision": { "backend": cfg, "status": status },
     }))
     .into_response()
 }
 
 async fn api_stats_inner(st: &AppState, window: &str) -> Response {
     let mut stats = st.flywheel.stats();
+    // 难度分布观测（2026-10）：raw vs 校准后三档占比 + 目标——验证 7:2:1 收敛
+    let (dsnap, dtarget, dcal) = st.engine.difficulty_snapshot();
     let telemetry = st.flywheel.telemetry_snapshot();
     // 窗口模式：用近期样本环折算聚合，覆盖累计口径（总览保持原样）
     if window != "overview" {
@@ -383,7 +402,24 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
     for (id, entry) in ranked {
         models.insert(id, entry);
     }
-    (axum::Json(json!({"models": models}))).into_response()
+    // 难度分布观测（raw vs 校准 + 目标）——前端/巡检据此验证 7:2:1 收敛
+    let difficulty = json!({
+        "samples": dsnap.samples,
+        "enabled": dcal,
+        "target": { "l1": dtarget[0], "l2": dtarget[1], "l3": dtarget[2] },
+        "raw":  { "l1": dsnap.raw_l1, "l2": dsnap.raw_l2, "l3": dsnap.raw_l3 },
+        "calibrated": { "l1": dsnap.cal_l1, "l2": dsnap.cal_l2, "l3": dsnap.cal_l3 },
+    });
+    let (rsnap, rtarget, rband, renabled) = st.engine.ratio_snapshot();
+    let ratio = json!({
+        "samples": rsnap.samples, "enabled": renabled,
+        "target": {"cheap": rtarget[0], "medium": rtarget[1], "premium": rtarget[2]},
+        "band": rband,
+        "observed": {"cheap": rsnap.cheap, "medium": rsnap.medium, "premium": rsnap.premium},
+        "penalties": {"cheap": rsnap.penalties[0], "medium": rsnap.penalties[1], "premium": rsnap.penalties[2]},
+    });
+    let recent100 = recent_distribution(st, 100);
+    (axum::Json(json!({"models": models, "difficulty": difficulty, "last100": recent100, "ratio": ratio}))).into_response()
 }
 
 /// Benchmark feed status + currently applied tier overlay.
@@ -857,10 +893,29 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             evolve_core::plans::tier_allowance_by_key(pk, &pd.tier, 0)
         });
         let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let cool = health_snap.iter()
-            .filter(|(k, _)| k.split('\u{1f}').next().map(|m| snap.iter().any(|mm| mm.id == m && mm.provider == *key)).unwrap_or(false))
-            .map(|(_, h)| h.cooldown_remaining_ms(now_ms))
-            .max();
+        let mut coolest: Option<(u64, String, String, String)> = None;
+        let mut blocked: Vec<String> = Vec::new();
+        for (k, h) in health_snap.iter() {
+            let mid = k.split('\u{1f}').next().unwrap_or("");
+            if !snap.iter().any(|mm| mm.id == mid && mm.provider == *key) {
+                continue;
+            }
+            // w3 永久黑名单（404 且不在模型列表）：不进冷却数字，单独暴露给
+            // 面板/网页做"手动恢复"入口
+            if h.until_epoch_ms == Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL) {
+                blocked.push(mid.split('/').last().unwrap_or(mid).to_string());
+                continue;
+            }
+            if let Some(remain) = h.cooldown_remaining_ms(now_ms)
+                && coolest.as_ref().map(|(r, _, _, _)| remain > *r).unwrap_or(true)
+            {
+                coolest = Some((remain, mid.to_string(), h.kind.label().to_string(), h.message.clone()));
+            }
+        }
+        let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
+        let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
+        let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
+        let cool_kind = coolest.as_ref().map(|(_, _, kd, _)| kd.clone()).unwrap_or_default();
         out.push(json!({
             "key": key, "source": "manual",
             "base_url": pd.base_url, "tier": pd.tier, "plan_kind": pd.plan_kind,
@@ -869,7 +924,11 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             "pressure": pressure,
             "soft_pct": soft_pct,
             "cooldown_remaining_ms": cool,
-            "available": cool.is_none(),
+            "cooldown_model": cool_model,
+            "message": cool_msg,
+            "kind": cool_kind,
+            "blocked_models": blocked,
+            "available": cool.is_none() && blocked.is_empty(),
             "tokens_24h": tok24.get(key).copied().unwrap_or(0),
             "last_used_ms": last_used.get(key).copied().unwrap_or(0),
             "fetched_models_count": pd.fetched_models.len(),
@@ -909,15 +968,36 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
             .unwrap_or(0.0);
         let allowance = e.get("allowance_5h").and_then(|v| v.as_f64());
         let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let cool = health_snap.iter()
-            .filter(|(k, _)| k.split('\u{1f}').next().map(|m| snap.iter().any(|mm| mm.id == m && mm.provider == provider)).unwrap_or(false))
-            .map(|(_, h)| h.cooldown_remaining_ms(now_ms))
-            .max();
+        let mut coolest: Option<(u64, String, String, String)> = None;
+        let mut blocked: Vec<String> = Vec::new();
+        for (k, h) in health_snap.iter() {
+            let mid = k.split('\u{1f}').next().unwrap_or("");
+            if !snap.iter().any(|mm| mm.id == mid && mm.provider == provider) {
+                continue;
+            }
+            if h.until_epoch_ms == Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL) {
+                blocked.push(mid.split('/').last().unwrap_or(mid).to_string());
+                continue;
+            }
+            if let Some(remain) = h.cooldown_remaining_ms(now_ms)
+                && coolest.as_ref().map(|(r, _, _, _)| remain > *r).unwrap_or(true)
+            {
+                coolest = Some((remain, mid.to_string(), h.kind.label().to_string(), h.message.clone()));
+            }
+        }
+        let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
+        let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
+        let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
+        let cool_kind = coolest.as_ref().map(|(_, _, kd, _)| kd.clone()).unwrap_or_default();
         e.as_object_mut().map(|o| {
             o.insert("used_5h".into(), json!((used * 100.0).round() / 100.0));
             o.insert("pressure".into(), json!(pressure));
             o.insert("cooldown_remaining_ms".into(), json!(cool));
-            o.insert("available".into(), json!(cool.is_none()));
+            o.insert("cooldown_model".into(), json!(cool_model));
+            o.insert("message".into(), json!(cool_msg));
+            o.insert("kind".into(), json!(cool_kind));
+            o.insert("blocked_models".into(), json!(blocked));
+            o.insert("available".into(), json!(cool.is_none() && blocked.is_empty()));
         });
         out.push(e);
     }
@@ -933,6 +1013,7 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
                 ("key_fp", "keyFp"),
                 ("used_5h", "used5h"),
                 ("next_reset_epoch_ms", "nextResetEpochMs"),
+                ("quota_source", "quotaSource"),
             ];
             for (a, b) in remap {
                 if let Some(v) = o.remove(*a) {
@@ -949,54 +1030,23 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
 /// Provider 管理列表：内置注册表 + 扫描发现 + 手动定义，合并展示
 pub async fn api_providers(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
-    // MiniMax remains 自动刷新：observed 过期（>60s）就后台拉（面板 3s 轮询自然驱动，60s 节流在 freshness 检查）
+    // 积分制官方配额刷新：observed 过期（>60s）后台并行拉取（面板轮询自然驱动；
+    // 另有 90s watchdog 兜底——面板不开也在刷）。配额指纹源自官方 API，
+    // 无官方端点的 provider 用响应头/估算，消费侧按 quota_source 标注
+    tokio::spawn(quota_refresh_tick(st.clone(), 60 * 1000));
+    // 按量 provider 余额（deepseek）：缓存过期（>60s）→ 后台拉
     {
+        let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
         let now0 = evolve_memory::health::now();
-        // 积分制 provider（minimax/zhipu/zai）observed 过期（>60s）→ 后台刷官方端点
-        // 覆盖 overrides 与发现型两类；按 plan_key 去重（配额是账号级，一家实测即代表）
-        let mut due: Vec<(String, String, String, Option<String>)> = Vec::new();
-        let mut seen_pk: Vec<String> = Vec::new();
-        let mut push_due = |k: &str, bu: &str, ak: Option<String>| {
-            if let Some(pk) = evolve_core::plans::plan_key_for(bu) {
-                if matches!(pk, "minimax-coding" | "zhipu-coding" | "zai-devpack" | "opencode-go")
-                    && !seen_pk.iter().any(|x| x == pk)
-                    && st.quota.observed_window(pk, "5h", now0, 60 * 1000).is_none()
-                {
-                    seen_pk.push(pk.to_string());
-                    due.push((k.to_string(), bu.to_string(), pk.to_string(), ak));
-                }
-            }
-        };
-        for (k, p) in ov.providers.iter().filter(|(_, p)| !p.disabled) {
-            push_due(k, &p.base_url, p.api_key.clone());
-        }
-        for m in st.engine.catalog_snapshot() {
-            push_due(&m.provider, &m.base_url, m.key_values().first().cloned());
-        }
-        for (k, bu, pk, ak) in due {
-            let st2 = st.clone();
-            let pk = pk.to_string();
-            tokio::spawn(async move {
-                let now_ms = evolve_memory::health::now();
-                let _ = refresh_observed(&st2, &k, &bu, &pk, ak, now_ms).await;
-            });
-        }
-        // 按量 provider 余额（deepseek）：缓存过期（>60s）→ 后台拉
-        let ds_stale = {
-            let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
-            !pb.contains_key("deepseek")
-                || pb.get("deepseek").and_then(|v| v["ts"].as_u64())
-                    .map(|t| now0.saturating_sub(t) > 60 * 1000)
-                    .unwrap_or(true)
-        };
+        let ds_stale = !pb.contains_key("deepseek")
+            || pb.get("deepseek").and_then(|v| v["ts"].as_u64())
+                .map(|t| now0.saturating_sub(t) > 60 * 1000)
+                .unwrap_or(true);
         if ds_stale {
             let st2 = st.clone();
-            std::fs::write("/tmp/ev-tmp/ds-spawn.txt", format!("spawn at {now0}")).ok();
             tokio::spawn(async move {
                 let now_ms = evolve_memory::health::now();
-                let res = deepseek_balance(&st2, "deepseek", None).await;
-                std::fs::write("/tmp/ev-tmp/ds-res.txt", format!("res={res:?}")).ok();
-                if let Some(mut bal) = res {
+                if let Some(mut bal) = deepseek_balance(&st2, "deepseek", None).await {
                     bal["ts"] = json!(now_ms);
                     if let Ok(mut pb) = st2.payg_balance.lock() {
                         pb.insert("deepseek".into(), bal);
@@ -1051,7 +1101,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             },
             "model_rates": pd.model_rates,
             "fetched_models": pd.fetched_models,
-            "observed": observed_for_plan(&st.quota, &pd.base_url, now_ms),
+            "observed": observed_for_provider(&st.quota, key, now_ms),
             "has_key": pd.api_key.is_some(),
             "key_fp": pd.api_key.as_deref().map(key_fp).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
@@ -1113,7 +1163,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let used: f64 = credits5h.get(m.provider.as_str()).copied().unwrap_or(0.0);
         // 下次窗口重置：组内模型的健康冷却取最近
         let next_reset = health_snap.iter()
-            .filter(|(k, h)| {
+            .filter(|(k, _h)| {
                 let km = k.split('\u{1f}').next().unwrap_or(k);
                 models_at_url.iter().any(|mm| mm.id == *km)
             })
@@ -1134,7 +1184,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                 "monthly": allowance_monthly,
             },
             "model_rates": profile.map(|p| p.model_rates).unwrap_or(""),
-            "observed": observed_for_plan(&st.quota, &m.base_url, now_ms),
+            "observed": observed_for_provider(&st.quota, &m.provider, now_ms),
             "model_count": model_ids.len(),
             "models": model_ids,
             "has_key": m.has_credential(),
@@ -1280,6 +1330,27 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             }
         }
     }
+    // w2 信息源标注：配额数字从哪来？"official" = 官方 API 端点/官方响应头
+    // （observed store 5min 内新鲜，或官方余额实测）；"estimated" = 网关 credits
+    // 估算兜底；"" = 无配额概念（api/payg 型，不涉及窗口）
+    {
+        let now_q = evolve_memory::health::now();
+        let has_observed = |provider: &str| ["5h", "7d", "weekly", "monthly"].iter().any(|sc| st.quota.observed_window(provider, sc, now_q, 5 * 60 * 1000).is_some());
+        for row in out.iter_mut() {
+            let pk = row.get("key").and_then(|v| v.as_str()).unwrap_or("");
+            let payg = row.get("payg_balance").is_some();
+            let src = if payg || has_observed(pk) {
+                "official"
+            } else if row.get("windows").map(|w| !w.as_object().map(|m| m.is_empty()).unwrap_or(true)).unwrap_or(false) {
+                "official_headers"
+            } else if row.get("used_5h").and_then(|v| v.as_f64()).map(|u| u > 0.0).unwrap_or(false) {
+                "estimated"
+            } else {
+                ""
+            };
+            if let Some(o) = row.as_object_mut() { o.insert("quota_source".into(), json!(src)); }
+        }
+    }
     let camel_out: Vec<Value> = out.into_iter().map(|mut p| {
         if let Some(o) = p.as_object_mut() {
             let remap: &[(&str, &str)] = &[
@@ -1291,6 +1362,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                 ("key_fp", "keyFp"),
                 ("used_5h", "used5h"),
                 ("next_reset_epoch_ms", "nextResetEpochMs"),
+                ("quota_source", "quotaSource"),
             ];
             for (a, b) in remap {
                 if let Some(v) = o.remove(*a) {
@@ -1306,12 +1378,12 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
 
 /// Provider 测实时配额（每次响应头到达即更新，含失败响应 429 reset/remaining）——
 /// 面板 quota bars 的权威源（用户裁决：以 Provider 测为准）
-fn observed_for_plan(quota: &std::sync::Arc<evolve_memory::quota::QuotaLedger>, base_url: &str, now_ms: u64) -> Value {
-    let Some(pk) = evolve_core::plans::plan_key_for(base_url) else { return json!({}) };
-    // 5 分钟内有效（panel 5s 轮询，足够新鲜）
+/// w2 provider 键控：账号级 observed store（同 plan_key 多账号不互串）
+fn observed_for_provider(quota: &std::sync::Arc<evolve_memory::quota::QuotaLedger>, provider: &str, now_ms: u64) -> Value {
+    if provider.is_empty() { return json!({}) };
     let mut out = serde_json::Map::new();
     for scope in ["5h", "7d", "tokens", "requests", "weekly", "monthly"] {
-        if let Some(w) = quota.observed_window(pk, scope, now_ms, 5 * 60 * 1000) {
+        if let Some(w) = quota.observed_window(provider, scope, now_ms, 5 * 60 * 1000) {
             out.insert(scope.into(), json!({
                 // remaining=0 且 reset 未到 → 窗口对抗（provider 明示该窗口耗尽）
                 "exhausted": w.remaining == Some(0),
@@ -1321,6 +1393,610 @@ fn observed_for_plan(quota: &std::sync::Arc<evolve_memory::quota::QuotaLedger>, 
         }
     }
     json!(out)
+}
+
+/// w3：该 provider 的模型列表是否仍包含此上游模型（404 语义二分）
+/// 来源优先级：手动 provider 的 fetched_models（/models 拉取结果）→ 目录记录
+pub fn provider_lists_model(st: &AppState, provider: &str, upstream_model: &str) -> bool {
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    if let Some(pd) = ov.providers.get(provider)
+        && !pd.fetched_models.is_empty()
+    {
+        return pd.fetched_models.iter().any(|m| m == upstream_model || m.ends_with(upstream_model));
+    }
+    st.engine.catalog_snapshot().iter().any(|m| {
+        m.provider == provider
+            && (m.upstream_model == upstream_model || m.id.ends_with(upstream_model))
+    })
+}
+
+/// w3：官方配额端点可查询（minimax/zhipu/zai/opencode-go）——配额类失败不采信
+/// 上游长 retry-after，交给 API 刷新确认（用户裁决）
+pub fn provider_is_api_backed(_st: &AppState, base_url: &str) -> bool {
+    evolve_core::plans::quota_api_for(base_url).map(|k| k.window_based()).unwrap_or(false)
+}
+
+/// w3 模型手动恢复：POST {provider? | model?}
+/// 清健康条目（永久黑名单 / 任意冷却）——provider 传参时清该 provider 全部模型
+pub async fn api_health_clear(
+    State(st): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let provider = body.get("provider").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let mut cleared: Vec<String> = Vec::new();
+    if !model.is_empty() {
+        st.health.clear(std::slice::from_ref(&model));
+        cleared.push(model.clone());
+    } else if !provider.is_empty() {
+        for m in st.engine.catalog_snapshot().iter().filter(|m| m.provider == provider) {
+            st.health.clear(std::slice::from_ref(&m.id));
+            cleared.push(m.id.clone());
+        }
+    }
+    st.events.record(json!({
+        "kind": "health_cleared",
+        "provider": provider, "model": model, "cleared": cleared.len(),
+    }));
+    (axum::Json(json!({"status": "ok", "cleared": cleared}))).into_response()
+}
+
+/// 模型标签（2026-10）：默认自动推导 + 用户覆盖（持久到 overrides.json）
+/// GET → 全模型标签清单（含来源 auto|user）
+pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
+    let dir = st.config.data.dir.clone();
+    let ov = crate::state::load_overrides(&dir);
+    let snap = st.engine.catalog_snapshot();
+    let assigned = tags_for_catalog(&st, &snap);
+    let usability = model_usability(&st);
+    let (active_ids, ranked) = active_models(&st);
+    let active_set: std::collections::HashSet<&String> = active_ids.iter().collect();
+    let score_of: std::collections::HashMap<&str, u64> =
+        ranked.iter().map(|(i, s)| (i.as_str(), *s)).collect();
+    let out: Vec<Value> = snap.iter().map(|m| {
+        let (auto_cap, auto_tier) = assigned
+            .get(&m.id)
+            .map(|(c, p)| (c.label().to_string(), p.label().to_string()))
+            .unwrap_or_else(|| ("standard".into(), "medium".into()));
+        let user = ov.model_tags.get(&m.id);
+        let cap = user.and_then(|u| u.capability.clone()).unwrap_or_else(|| auto_cap.clone());
+        let tier = user
+            .and_then(|u| u.price_tier.clone())
+            .map(|v| norm_price_tier(&v))
+            .unwrap_or_else(|| auto_tier.clone());
+        json!({
+            "model": m.id, "provider": m.provider,
+            "capability": cap, "price_tier": tier,
+            "capability_auto": auto_cap, "price_tier_auto": auto_tier,
+            "source": if user.is_some() { "user" } else { "auto" },
+            "usable": !matches!(usability.get(&m.id), Some(Some(_))),
+            "unusable_reason": usability.get(&m.id).cloned().flatten(),
+            "active": active_set.contains(&m.id),
+            "release_ts": evolve_core::recency::release_ts_of(m),
+            "release_src": if m.release_ts.is_some() { "provider/models.dev" } else if evolve_core::recency::release_ts_from_id(&m.id).is_some() { "id" } else { "none" },
+            "recency_score": score_of.get(m.id.as_str()).copied().unwrap_or(0),
+        })
+    }).collect();
+    (axum::Json(json!({"models": out}))).into_response()
+}
+
+/// POST {model, capability?, price_tier?, reset?} → 保存/清除用户覆盖
+pub async fn api_model_tags_post(
+    State(st): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let dir = st.config.data.dir.clone();
+    let Some(model) = body.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
+    };
+    let mut ov = crate::state::load_overrides(&dir);
+    let reset = body.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
+    if reset {
+        ov.model_tags.remove(&model);
+    } else {
+        let e = ov.model_tags.entry(model.clone()).or_default();
+        if let Some(c) = body.get("capability").and_then(|v| v.as_str()) {
+            e.capability = if c.is_empty() { None } else { Some(c.to_string()) };
+        }
+        if let Some(p) = body.get("price_tier").and_then(|v| v.as_str()) {
+            e.price_tier = if p.is_empty() { None } else { Some(p.to_string()) };
+        }
+        if e.capability.is_none() && e.price_tier.is_none() {
+            ov.model_tags.remove(&model);
+        }
+    }
+    crate::state::save_overrides(&dir, &ov);
+    (axum::Json(json!({"status": "ok", "model": model}))).into_response()
+}
+
+/// 价位字符串归一（兼容历史 "standard" → "medium"；能力侧保持 standard 不动）
+fn norm_price_tier(v: &str) -> String {
+    evolve_core::tags::PriceTier::parse(v)
+        .map(|p| p.label().to_string())
+        .unwrap_or_else(|| v.to_string())
+}
+
+/// 当前**可用池**（用户裁决：7:2:1 分位要以真实可用的模型为分母）：
+/// 有凭据 ∧ 未被删除 ∧ 无健康冷却（含永久黑名单）∧ 未被配额闸门关闭。
+/// 冷却/闸门是动态的 → 调用方带 TTL 缓存，池变化即重算。
+pub fn usable_model_ids(st: &AppState) -> std::collections::HashSet<String> {
+    model_usability(st)
+        .into_iter()
+        .filter(|(_, r)| r.is_none())
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// 活跃集 id 集合（路由过滤用；空集 = 不启用过滤）
+pub fn active_id_set(st: &AppState) -> std::collections::HashSet<String> {
+    let (active, _) = active_models(st);
+    active.into_iter().collect()
+}
+
+/// 最近使用时间缓存（30s TTL）：model → 最近调用 ts（epoch ms）
+static LAST_USED_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, std::collections::HashMap<String, u64>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn last_used_cached(st: &AppState) -> std::collections::HashMap<String, u64> {
+    if let Ok(g) = LAST_USED_CACHE.lock()
+        && let Some((at, m)) = g.as_ref()
+        && at.elapsed().as_secs() < 30
+    {
+        return m.clone();
+    }
+    let mut last_used: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    if let Some(path) = st.events.path()
+        && let Ok(content) = std::fs::read_to_string(path)
+    {
+        for line in content.lines().rev().take(4000) {
+            if let Ok(e) = serde_json::from_str::<Value>(line)
+                && let Some(chosen) = e.get("chosen").and_then(|v| v.as_str())
+            {
+                let ts = e.get("ts").and_then(|v| v.as_u64()).unwrap_or(0);
+                last_used.entry(chosen.to_string()).and_modify(|t| *t = (*t).max(ts)).or_insert(ts);
+            }
+        }
+    }
+    if let Ok(mut g) = LAST_USED_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), last_used.clone()));
+    }
+    last_used
+}
+
+/// 活跃集（用户裁决）：最近发布 + 最近使用的前 50（ACTIVE_CAP），支持手动
+/// 开启/停用；开启自动顶掉当前最低分者。返回 (活跃 id 有序表, 全量排名表)
+pub fn active_models(
+    st: &AppState,
+) -> (Vec<String>, Vec<(String, u64)>) {
+    let now = evolve_memory::health::now();
+    // 最近使用时间（窗口内才计分；过期使用不占"最近使用"名额）。
+    // 30s TTL 缓存：此前每请求整读 events 文件（32MB 轮转阈值）+ 解析 4000 行，
+    // 是热点路径上的阻塞 I/O（评审 #3）
+    let last_used = last_used_cached(st);
+    // 结构不可用（no-key / deleted）不占活跃名额；冷却/闸门是临时的，不剔除
+    let usability = model_usability(st);
+    let snap = st.engine.catalog_snapshot(); // 先持有快照（避免借用临时值）
+    let eligible: Vec<&evolve_core::types::ModelRecord> = snap
+        .iter()
+        .filter(|m| !matches!(usability.get(&m.id), Some(Some("no-key" | "deleted"))))
+        .collect();
+
+    // 两个池（各自降序）：新发布（有 id 内嵌日期者） / 最近使用（窗口内）
+    let mut by_release: Vec<(String, u64)> = eligible
+        .iter()
+        .filter_map(|m| evolve_core::recency::release_ts_of(m).map(|ts| (m.id.clone(), ts)))
+        .collect();
+    by_release.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let mut by_used: Vec<(String, u64)> = eligible
+        .iter()
+        .filter_map(|m| last_used.get(&m.id).map(|ts| (m.id.clone(), *ts)))
+        .filter(|(_, ts)| now.saturating_sub(*ts) <= evolve_core::recency::USED_WINDOW_MS)
+        .collect();
+    by_used.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let active = evolve_core::recency::select_active(
+        &by_release,
+        &by_used,
+        &ov.active_models.include,
+        &ov.active_models.exclude,
+        evolve_core::recency::ACTIVE_CAP,
+        evolve_core::recency::NEWEST_QUOTA,
+        now,
+    );
+    // 综合排名（供顶替预告与 UI 排序）：max(发布日期, 最近使用)
+    let mut ranked: Vec<(String, u64)> = eligible
+        .iter()
+        .map(|m| {
+            (
+                m.id.clone(),
+                {
+                    let used = last_used.get(&m.id).copied();
+                    evolve_core::recency::release_ts_of(m)
+                        .unwrap_or(0)
+                        .max(used.unwrap_or(0))
+                },
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    (active, ranked)
+}
+
+/// POST /api/models/active {model, action: enable|disable|auto}
+pub async fn api_models_active(
+    State(st): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(model) = body.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
+    };
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("enable");
+    let dir = st.config.data.dir.clone();
+    let (before, _) = active_models(&st); // 变更前快照
+    let mut ov = crate::state::load_overrides(&dir);
+    ov.active_models.include.retain(|m| m != &model);
+    ov.active_models.exclude.retain(|m| m != &model);
+    match action {
+        "enable" => ov.active_models.include.push(model.clone()),
+        "disable" => ov.active_models.exclude.push(model.clone()),
+        _ => {} // auto：回到默认排序
+    }
+    crate::state::save_overrides(&dir, &ov);
+    let (active, _ranked) = active_models(&st);
+    // 真实被顶者 = 变更前有、变更后没有（不是"幸存者里最低分"——见评审 #4）
+    let after: std::collections::HashSet<&String> = active.iter().collect();
+    let victim = if action == "enable" {
+        before.iter().find(|m| !after.contains(m)).cloned()
+    } else {
+        None
+    };
+    (axum::Json(json!({"status": "ok", "model": model, "action": action,
+        "active_count": active.len(), "replaced": victim}))).into_response()
+}
+
+/// 不可用原因（None = 可用）：no-key / deleted / cooldown / quota-gated
+/// ——用于标签卡灰显 + tooltip（用户裁决：分位动态排除的模型要看得见原因）
+pub fn model_usability(st: &AppState) -> std::collections::HashMap<String, Option<&'static str>> {
+    let now = evolve_memory::health::now();
+    let health = st.health.snapshot();
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let deleted: std::collections::HashSet<&str> = ov.deleted_models.iter().map(|s| s.as_str()).collect();
+    let gated: std::collections::HashSet<String> = st.quota.gate_blocked().into_iter().collect();
+    st.engine
+        .catalog_snapshot()
+        .iter()
+        .map(|m| {
+            let reason = if !m.has_credential() {
+                Some("no-key")
+            } else if deleted.contains(m.id.as_str()) {
+                Some("deleted")
+            } else if gated.contains(&m.provider) {
+                Some("quota-gated")
+            } else if health.get(&m.id).map(|h| !h.available(now)).unwrap_or(false) {
+                Some("cooldown")
+            } else {
+                None
+            };
+            (m.id.clone(), reason)
+        })
+        .collect()
+}
+
+/// 目标分布（用户裁决）：能力/价位都要 7:2:1 分布——否则标签没有区分度。
+const TAG_Q1: f32 = 0.70;
+const TAG_Q2: f32 = 0.90;
+
+/// 分配标签（分位法）：
+/// - 能力：**全局分位**（tiers 跨家族可比）→ 70% basic / 20% standard / 10% powerful
+/// - 价位：**按口径分桶**各自 70/90 分位（配额系数 / 官方价 / 目录价三种口径不可
+///   混排，桶内各自 7:2:1 → 总体 ≈7:2:1）；无任何成本信息 → 中性 medium
+pub fn assign_tags(
+    snap: &[evolve_core::types::ModelRecord],
+) -> std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)> {
+    let all: std::collections::HashSet<String> = snap.iter().map(|m| m.id.clone()).collect();
+    assign_tags_within(snap, &all)
+}
+
+/// 分位只在 `usable` 内统计（分母=可用池）；不可用模型用同一档线映射
+/// （仍显示标签供参考，但不影响 7:2:1 形状）
+pub fn assign_tags_within(
+    snap: &[evolve_core::types::ModelRecord],
+    usable: &std::collections::HashSet<String>,
+) -> std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)> {
+    use evolve_core::tags::{Capability, PriceTier};
+    use std::collections::HashMap;
+
+    // 成本代理三级（2026-10 修正：不依赖 m.plan 标志——用户只标了少数订阅模型，
+    // 同家族其余模型 plan=false 会被误判为按量而拿不到配额口径提示）：
+    // ① 命中套餐家族（plans::plan_for）→ 配额/系数口径  ② 官方按量价目  ③ 目录价
+    let cost_proxy = |m: &evolve_core::types::ModelRecord| -> Option<(f32, &'static str)> {
+        if evolve_core::plans::plan_for(&m.base_url).is_some()
+            && let Some(h) = evolve_core::plans::model_price_hint(&m.base_url, &m.id)
+        {
+            return Some((h, "plan"));
+        }
+        if let Some(sc) = evolve_core::provider_info::price_for(&m.base_url, &m.id) {
+            let in_eff = sc.in_miss * 0.5 + sc.in_hit * 0.5;
+            return Some((in_eff + sc.out * 0.3, "official"));
+        }
+        m.cost.map(|c| (c.input + c.output * 0.3, "catalog"))
+    };
+
+    // 1) 能力：全局分位
+    let pool: Vec<&evolve_core::types::ModelRecord> =
+        snap.iter().filter(|m| usable.contains(&m.id)).collect();
+    let basis: &[&evolve_core::types::ModelRecord] =
+        if pool.len() >= 8 { &pool } else { &snap.iter().collect::<Vec<_>>() };
+    let mut caps: Vec<(String, f32)> = basis.iter().map(|m| {
+        let t = m.tiers.coding.max(m.tiers.reasoning).max(m.tiers.agentic).max(m.tiers.vision * 0.9);
+        (m.id.clone(), t)
+    }).collect();
+    caps.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let cap_of = |id: &str| -> Capability {
+        let rank = caps.iter().position(|(i, _)| i == id).unwrap_or(0) as f32
+            / (caps.len().max(2) - 1) as f32;
+        if rank < TAG_Q1 { Capability::Basic }
+        else if rank < TAG_Q2 { Capability::Standard }
+        else { Capability::Powerful }
+    };
+
+    // 2) 价位：按口径分桶 → 桶内 70/90 分位
+    let mut groups: HashMap<&'static str, Vec<(String, f32)>> = HashMap::new();
+    for m in basis.iter() {
+        if let Some((c, src)) = cost_proxy(m) {
+            groups.entry(src).or_default().push((m.id.clone(), c));
+        }
+    }
+    for v in groups.values_mut() {
+        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let bucket_sizes: Vec<(String, usize)> = groups.iter().map(|(k, v)| (k.to_string(), v.len())).collect();
+    let no_cost = basis.iter().filter(|m| cost_proxy(m).is_none()).count();
+    tracing::info!(catalog = snap.len(), usable = pool.len(), basis = basis.len(), ?bucket_sizes, no_cost, "tag assignment input");
+
+    let mut out = HashMap::new();
+    for m in snap {
+        let cap = cap_of(&m.id);
+        let tier = cost_proxy(m)
+            .and_then(|(_, src)| groups.get(src))
+            .and_then(|list| {
+                list.iter().position(|(i, _)| i == &m.id).map(|idx| {
+                    let rank = idx as f32 / (list.len().max(2) - 1) as f32;
+                    if rank < TAG_Q1 { PriceTier::Cheap }
+                    else if rank < TAG_Q2 { PriceTier::Medium }
+                    else { PriceTier::Premium }
+                })
+            })
+            .unwrap_or(PriceTier::Medium);
+        out.insert(m.id.clone(), (cap, tier));
+    }
+    out
+}
+
+/// 标签分配缓存（分位分配需 O(n log n)，按目录规模 + 60s TTL 缓存）
+#[allow(clippy::type_complexity)]
+static TAG_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<
+        Option<(
+            usize,
+            std::time::Instant,
+            (usize, std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)>),
+        )>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn tags_for_catalog(
+    st: &AppState,
+    snap: &[evolve_core::types::ModelRecord],
+) -> std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)> {
+    let usable = usable_model_ids(st);
+    if let Ok(g) = TAG_CACHE.lock()
+        && let Some((len, at, m)) = g.as_ref()
+        && *len == snap.len()
+        && at.elapsed().as_secs() < 30
+        && m.0 == usable.len()
+    {
+        return m.1.clone();
+    }
+    let assigned = assign_tags_within(snap, &usable);
+    if let Ok(mut g) = TAG_CACHE.lock() {
+        *g = Some((snap.len(), std::time::Instant::now(), (usable.len(), assigned.clone())));
+    }
+    assigned
+}
+
+
+/// S2：model_id → 价位层编码（0=cheap / 1=medium / 2=premium；用户覆盖优先）
+/// ——relay/anthropic 构建 RoutingInput 时传入引擎的价格层硬闸
+pub fn price_tier_map(st: &AppState) -> std::collections::HashMap<String, u8> {
+    let snap = st.engine.catalog_snapshot();
+    let assigned = tags_for_catalog(&st, &snap);
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let mut out = std::collections::HashMap::new();
+    for m in &snap {
+        let auto_tier = assigned
+            .get(&m.id)
+            .map(|(_, p)| p.label().to_string())
+            .unwrap_or_else(|| "medium".to_string());
+        let tier = ov.model_tags.get(&m.id)
+            .and_then(|u| u.price_tier.clone())
+            .map(|v| norm_price_tier(&v))
+            .unwrap_or(auto_tier);
+        let code = match tier.as_str() { "cheap" => 0u8, "premium" => 2, _ => 1 };
+        out.insert(m.id.clone(), code);
+    }
+    out
+}
+
+/// /api/report?limit=N：S7 回测验收报告（JSON）
+pub async fn api_report(State(st): State<AppState>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
+    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(500).min(5000);
+    (axum::Json(distribution_report(&st, limit))).into_response()
+}
+
+/// S7 回测验收：对历史 events 做端到端分布报告（难度/能力/价位 + 缓存/成本 KPI
+/// + 目标 7:2:1 判定）。CLI `evo-router report` 与 API `/api/report` 共用。
+pub fn distribution_report(st: &AppState, limit: usize) -> Value {
+    let Some(path) = st.events.path() else { return json!({"error": "events disabled"}) };
+    let Ok(content) = std::fs::read_to_string(path) else { return json!({"error": "events unreadable"}) };
+    let snap = st.engine.catalog_snapshot();
+    let assigned = tags_for_catalog(st, &snap);
+    let usability = model_usability(st);
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let dsnap = st.engine.difficulty_snapshot();
+    let rsnap = st.engine.ratio_snapshot();
+    let by_id: std::collections::HashMap<&str, &evolve_core::types::ModelRecord> =
+        snap.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let mut diff = [0u32; 3];
+    let mut cap = [0u32; 3];
+    let mut price = [0u32; 3];
+    let mut count = 0usize;
+    let mut cached_tok = 0u64;
+    let mut in_tok = 0u64;
+
+    let mut cost_sum = 0f64;
+    let mut cost_n = 0usize;
+    let mut premium_on_easy = 0u32; // L1 却用了 premium（应≈0）
+    let mut l3 = 0u32;
+    let mut l3_premium = 0u32;
+    for line in content.lines().rev() {
+        if count >= limit { break; }
+        let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+        if e.get("kind").and_then(|v| v.as_str()) != Some("chat") { continue; }
+        let Some(chosen) = e.get("chosen").and_then(|v| v.as_str()) else { continue };
+        count += 1;
+        let d = e.pointer("/judgment/difficulty").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let dbin = if d <= 0.8 { 0 } else if d <= 2.0 { 1 } else { 2 };
+        diff[dbin] += 1;
+        if dbin == 2 { l3 += 1; }
+        let (c, p) = match by_id.get(chosen) {
+            Some(m) => {
+                let (ac, ap) = assigned
+                    .get(&m.id)
+                    .map(|(c, p)| (c.label().to_string(), p.label().to_string()))
+                    .unwrap_or_else(|| ("standard".into(), "medium".into()));
+                let u = ov.model_tags.get(&m.id);
+                (
+                    u.and_then(|u| u.capability.clone()).unwrap_or(ac),
+                    u.and_then(|u| u.price_tier.clone()).map(|v| norm_price_tier(&v)).unwrap_or(ap),
+                )
+            }
+            None => ("standard".into(), "medium".into()),
+        };
+        let cbin = match c.as_str() { "basic" => 0, "powerful" => 2, _ => 1 };
+        let pbin = match p.as_str() { "cheap" => 0, "premium" => 2, _ => 1 };
+        cap[cbin] += 1;
+        price[pbin] += 1;
+        if dbin == 0 && pbin == 2 { premium_on_easy += 1; }
+        if dbin == 2 && pbin == 2 { l3_premium += 1; }
+        // token/缓存/成本（事件里带 usage 平铺字段）
+        let it = e.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ct = e.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let ot = e.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        in_tok += it; cached_tok += ct;
+        if let Some(m) = by_id.get(chosen)
+            && let Some(cst) = evolve_core::scoring::est_cost(m, it, ot.max(1), None)
+        {
+            cost_sum += cst as f64;
+            cost_n += 1;
+        }
+    }
+    let share = |v: &[u32; 3]| -> [f32; 3] {
+        let n = v.iter().sum::<u32>().max(1) as f32;
+        [v[0] as f32 / n, v[1] as f32 / n, v[2] as f32 / n]
+    };
+    let target = [0.7f32, 0.2, 0.1];
+    let band = 0.10f32; // 报告用宽松带（历史样本含旧判定，逐步收敛）
+    let verdict = |s: [f32; 3]| -> bool {
+        (0..3).all(|i| (s[i] - target[i]).abs() <= band)
+    };
+    let ds = share(&diff);
+    let cs = share(&cap);
+    let ps = share(&price);
+    let hit_rate = if in_tok > 0 { cached_tok as f64 / in_tok as f64 } else { 0.0 };
+    json!({
+        "count": count,
+        "target": {"l1": target[0], "l2": target[1], "l3": target[2], "band": band},
+        "difficulty": {"l1": ds[0], "l2": ds[1], "l3": ds[2], "pass": verdict(ds)},
+        "capability": {"basic": cs[0], "standard": cs[1], "powerful": cs[2], "pass": verdict(cs)},
+        "price_tier": {"cheap": ps[0], "medium": ps[1], "premium": ps[2], "pass": verdict(ps)},
+        "kpi": {
+            "premium_on_easy": premium_on_easy,
+            "l3_share": if count > 0 { l3 as f64 / count as f64 } else { 0.0 },
+            "l3_premium": l3_premium,
+            "cache_hit_rate": hit_rate,
+            "avg_cost_proxy": if cost_n > 0 { cost_sum / cost_n as f64 } else { 0.0 },
+            "costed_requests": cost_n,
+        },
+        "unusable_models": usability.values().filter(|r| r.is_some()).count(),
+        "live": {
+            "difficulty": {
+                "samples": dsnap.0.samples,
+                "raw": {"l1": dsnap.0.raw_l1, "l2": dsnap.0.raw_l2, "l3": dsnap.0.raw_l3},
+                "calibrated": {"l1": dsnap.0.cal_l1, "l2": dsnap.0.cal_l2, "l3": dsnap.0.cal_l3},
+                "target": {"l1": dsnap.1[0], "l2": dsnap.1[1], "l3": dsnap.1[2]},
+            },
+            "ratio": {
+                "samples": rsnap.0.samples,
+                "observed": {"cheap": rsnap.0.cheap, "medium": rsnap.0.medium, "premium": rsnap.0.premium},
+                "target": {"cheap": rsnap.1[0], "medium": rsnap.1[1], "premium": rsnap.1[2]},
+                "penalties": {"cheap": rsnap.0.penalties[0], "medium": rsnap.0.penalties[1], "premium": rsnap.0.penalties[2]},
+            },
+        },
+    })
+}
+
+/// 近 N 条 chat 请求的分布总览（用户裁决：过去 100 个请求的难度/能力/价位分布）
+pub fn recent_distribution(st: &AppState, n: usize) -> Value {
+    let Some(path) = st.events.path() else { return json!({}) };
+    let Ok(content) = std::fs::read_to_string(path) else { return json!({}) };
+    let snap = st.engine.catalog_snapshot();
+    let assigned = tags_for_catalog(&st, &snap);
+    let by_id: std::collections::HashMap<&str, &evolve_core::types::ModelRecord> =
+        snap.iter().map(|m| (m.id.as_str(), m)).collect();
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+
+    let mut diff = [0u32; 3];
+    let mut cap = [0u32; 3];   // basic/standard/powerful
+    let mut price = [0u32; 3]; // cheap/standard/premium
+    let mut count = 0usize;
+    for line in content.lines().rev() {
+        if count >= n { break; }
+        let Ok(e) = serde_json::from_str::<Value>(line) else { continue };
+        if e.get("kind").and_then(|v| v.as_str()) != Some("chat") { continue; }
+        let Some(chosen) = e.get("chosen").and_then(|v| v.as_str()) else { continue };
+        count += 1;
+        // 难度（judgment.difficulty 为校准后的实际使用值）
+        let d = e.pointer("/judgment/difficulty").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        if d <= 0.8 { diff[0] += 1 } else if d <= 2.0 { diff[1] += 1 } else { diff[2] += 1 }
+        // 能力/价位：用户覆盖优先，否则自动推导
+        let (c, p) = match by_id.get(chosen) {
+            Some(m) => {
+                let (ac, ap) = assigned
+                    .get(&m.id)
+                    .map(|(c, p)| (c.label().to_string(), p.label().to_string()))
+                    .unwrap_or_else(|| ("standard".into(), "medium".into()));
+                let u = ov.model_tags.get(&m.id);
+                (
+                    u.and_then(|u| u.capability.clone()).unwrap_or(ac),
+                    u.and_then(|u| u.price_tier.clone()).map(|v| norm_price_tier(&v)).unwrap_or(ap),
+                )
+            }
+            None => ("standard".into(), "standard".into()),
+        };
+        match c.as_str() { "basic" => cap[0] += 1, "powerful" => cap[2] += 1, _ => cap[1] += 1 }
+        let p = norm_price_tier(&p);
+        match p.as_str() { "cheap" => price[0] += 1, "premium" => price[2] += 1, _ => price[1] += 1 }
+    }
+    json!({
+        "window": n, "count": count,
+        "difficulty": {"l1": diff[0], "l2": diff[1], "l3": diff[2]},
+        "capability": {"basic": cap[0], "standard": cap[1], "powerful": cap[2]},
+        "price_tier": {"cheap": price[0], "medium": price[1], "premium": price[2]},
+    })
 }
 
 /// 新增/修改 provider（手动定义）：baseUrl 变更触发 /models 重拉
@@ -1429,29 +2105,171 @@ async fn deepseek_balance(
     }))
 }
 
-async fn refresh_observed(
-    st: &AppState, key: &str, base_url: &str, plan_key: &str, api_key: Option<String>, now_ms: u64,
+/// w2 配额看门狗：独立于面板轮询的官方端点定时刷新（90s 一轮，observed
+/// 未过期则跳过）——面板不开也在刷新；刷新后把官方窗口结论写进 gate 状态机
+pub fn spawn_quota_watchdog(st: AppState) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(90));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            quota_refresh_tick(st.clone(), 90 * 1000).await;
+        }
+    });
+}
+
+/// 一轮官方配额刷新：observed 过期（>max_age）的积分制 provider 逐一拉取；
+/// 与 api_providers 面板轮询共用（面板用 60s 新鲜度）
+pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
+    let now0 = evolve_memory::health::now();
+    let mut due: Vec<(String, String, String, Option<String>)> = Vec::new();
+    // w3 按账号去重（provider 名 = 账号）：同 baseURL 多 key 各自刷新自己的
+    // observed 槽位（用户裁决：新加的同 host provider 也必须知道可查配额）
+    let mut seen_account: Vec<String> = Vec::new();
+    let mut push_due = |k: &str, bu: &str, ak: Option<String>| {
+        if let Some(api_kind) = evolve_core::plans::quota_api_for(bu) {
+            if api_kind.window_based()
+                && !seen_account.iter().any(|x| x == k)
+            {
+                let fresh = st.quota.observed_window(k, "5h", now0, max_age_ms).is_some();
+                if fresh && st.quota.gate_get(k).is_none() {
+                    return; // 数据新鲜且无闸门 → 无需刷新
+                }
+                seen_account.push(k.to_string());
+                let pk = evolve_core::plans::plan_key_for(bu).unwrap_or_default().to_string();
+                due.push((k.to_string(), bu.to_string(), pk, ak));
+            }
+        }
+    };
+    let ov = crate::state::load_overrides(&st.config.data.dir);
+    for (k, p) in ov.providers.iter().filter(|(_, p)| !p.disabled) {
+        push_due(k, &p.base_url, p.api_key.clone());
+    }
+    for m in st.engine.catalog_snapshot() {
+        push_due(&m.provider, &m.base_url, m.key_values().first().cloned());
+    }
+    for (k, bu, pk, ak) in due {
+        let was = st.quota.gate_get(&k).map(|g| !g.windows_full.is_empty()).unwrap_or(false);
+        let _ = refresh_observed(&st, &k, &bu, &pk, ak, now0).await;
+        let now = st.quota.gate_get(&k).map(|g| !g.windows_full.is_empty()).unwrap_or(false);
+        if was != now {
+            st.events.record(json!({
+                "kind": "quota_state_changed",
+                "provider": k, "state": if now { "quota_limited" } else { "ok" },
+                "source": "api_watchdog",
+            }));
+        }
+        // API 数据反证配额可用（开闸）→ 清该 provider 模型的配额类健康冷却
+        if was && !now {
+            let ids: Vec<String> = st.engine.catalog_snapshot().iter()
+                .filter(|m| m.provider == k).map(|m| m.id.clone()).collect();
+            st.health.clear_kind(&ids, evolve_core::types::HealthKind::QuotaExhausted);
+        }
+    }
+    // w3 无 API 型周期探活（用户裁决：无官方配额端点 → 信任上游给的窗口期做冷却，
+    // 但不干等——每 5~10min 独立发一次真实微请求验证；成功即开闸清冷却）
+    let probe_now = evolve_memory::quota::now_ms();
+    if let Some(provider) = st.quota.gate_pick_probe(probe_now) {
+        // 探活目标 = 该 provider 当前处于配额冷却的模型（而不是随便挑首个模型——
+        // 首模型可能本就没受限，2xx 会误清整账号冷却，造成面板"限制/可用"翻转）
+        let cooling: Vec<String> = st.health.snapshot().iter()
+            .filter(|(id, e)| {
+                id.starts_with(&format!("{provider}/"))
+                    && e.kind == evolve_core::types::HealthKind::QuotaExhausted
+            })
+            .map(|(id, _)| id.split('\u{1f}').next().unwrap_or(id).to_string())
+            .collect();
+        let target = cooling.first().cloned();
+        let ok = probe_provider_model(&st, &provider, target.as_deref()).await;
+        if ok {
+            // 仅清被探活成功的那一个模型；该 provider 若仍有其它模型在配额冷却，
+            // gate 保持关闭（按模型恢复，与失败信号粒度一致）
+            if let Some(t) = &target {
+                st.health.clear_kind(std::slice::from_ref(t), evolve_core::types::HealthKind::QuotaExhausted);
+            }
+            let still_cooling = st.health.snapshot().iter().any(|(id, e)| {
+                id.starts_with(&format!("{provider}/"))
+                    && e.kind == evolve_core::types::HealthKind::QuotaExhausted
+            });
+            if still_cooling {
+                st.quota.gate_probe_fail(&provider, probe_now); // 保持关闭 + 退避重排
+            } else {
+                st.quota.gate_probe_success(&provider, probe_now);
+                st.events.record(json!({
+                    "kind": "quota_state_changed",
+                    "provider": provider, "state": "ok", "source": "probe",
+                }));
+                tracing::info!(provider = %provider, "quota probe succeeded — gate opened");
+            }
+        } else {
+            st.quota.gate_probe_fail(&provider, probe_now);
+        }
+    }
+}
+
+/// 单次探针请求：优先打指定（冷却中）模型，未指定则取该 provider 首模型；
+/// max_tokens=1 的极小 completion，只看是否被上游接受（2xx）
+async fn probe_provider_model(st: &AppState, provider: &str, model_id: Option<&str>) -> bool {
+    let snap = st.engine.catalog_snapshot();
+    let picked = match model_id {
+        Some(mid) => snap.iter().find(|m| m.id == mid).or_else(|| snap.iter().find(|m| m.provider == provider)),
+        None => snap.iter().find(|m| m.provider == provider),
+    };
+    let Some(m) = picked else { return false };
+    let base = m.base_url.trim_end_matches('/').to_string();
+    let key = m.key_values().first().cloned();
+    let upstream = if m.upstream_model.is_empty() { m.id.split('/').last().unwrap_or("").to_string() } else { m.upstream_model.clone() };
+    let body = json!({
+        "model": upstream,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "stream": false,
+    });
+    let url = format!("{base}/chat/completions");
+    let mut req = st.http.post(&url)
+        .header("content-type", "application/json")
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some(k) = key { req = req.bearer_auth(k); }
+    match req.json(&body).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            tracing::info!(provider = %provider, model = %upstream, status = status.as_u16(), "quota probe attempt");
+            status.is_success()
+        }
+        Err(e) => {
+            tracing::warn!(provider = %provider, error = %e, "quota probe transport error");
+            false
+        }
+    }
+}
+
+pub(crate) async fn refresh_observed(
+    st: &AppState, key: &str, base_url: &str, _plan_key: &str, api_key: Option<String>, now_ms: u64,
 ) -> Option<serde_json::Map<String, Value>> {
-    // 分派：minimax → token_plan/remains；zhipu/zai → monitor 积分端点；
-    // opencode-go → zen usage（rolling/weekly/monthly 百分比）
-    let zhipuish = plan_key == "zhipu-coding" || plan_key == "zai-devpack";
-    let minimaxish = plan_key == "minimax-coding";
-    let ocgo = plan_key == "opencode-go";
-    if !zhipuish && !minimaxish && !ocgo { return None; }
-    let origin = if zhipuish {
-        if base_url.contains("z.ai") { "https://api.z.ai".to_string() } else { "https://open.bigmodel.cn".to_string() }
-    } else if ocgo {
-        "https://opencode.ai".to_string()
+    // w3 分派走 hostname 注册表（quota_api_for）——新增同 host 账号（不同 key）
+    // 自动命中同一刷新路径，无需在计划表里另立条目
+    let api_kind = evolve_core::plans::quota_api_for(base_url)?;
+    let host_is_zai = base_url.contains("z.ai");
+    let origin = if host_is_zai {
+        "https://api.z.ai".to_string()
     } else {
-        base_url.split("/v1").next().unwrap_or("https://api.minimax.cn").to_string()
+        base_url.split("://").nth(1).and_then(|r| r.split('/').next())
+            .map(|h| h.split(':').next().unwrap_or(h))
+            .map(|h| format!("https://{h}"))
+            .unwrap_or_default()
     };
-    let url = if zhipuish {
-        format!("{origin}/api/monitor/usage/quota/limit?type=1")
-    } else if ocgo {
-        format!("{origin}/zen/go/v1/usage")
-    } else {
-        format!("{origin}/v1/token_plan/remains")
+    let url = match api_kind {
+        evolve_core::plans::QuotaApi::ZhipuMonitor | evolve_core::plans::QuotaApi::ZaiMonitor =>
+            format!("{origin}/api/monitor/usage/quota/limit?type=1"),
+        evolve_core::plans::QuotaApi::OpencodeZen => format!("{origin}/zen/go/v1/usage"),
+        evolve_core::plans::QuotaApi::MinimaxRemains => format!("{origin}/v1/token_plan/remains"),
+        evolve_core::plans::QuotaApi::DeepseekBalance => return None, // 余额走 deepseek_balance
     };
+    let zhipuish = matches!(
+        api_kind,
+        evolve_core::plans::QuotaApi::ZhipuMonitor | evolve_core::plans::QuotaApi::ZaiMonitor
+    );
+    let ocgo = api_kind == evolve_core::plans::QuotaApi::OpencodeZen;
     let key_resolved = api_key.or_else(|| {
         st.engine.catalog_snapshot().iter()
             .find(|m| m.provider == key)
@@ -1497,7 +2315,9 @@ async fn refresh_observed(
                general["weekly_end_time"].as_u64()),
         ]
     };
-    st.quota.observe_provider(plan_key, &windows);
+    st.quota.observe_provider(key, &windows);
+    // w2 闸门状态机：官方窗口结论直写 gate（恢复路径的数据源；账号级键控）
+    st.quota.gate_observe_windows(key, &windows, now_ms);
     let mut snapshot: serde_json::Map<String, Value> = windows.iter().map(|w| {
         (w.scope.clone(), json!({
             "remaining": w.remaining, "limit": w.limit, "reset_epoch_ms": w.reset_epoch_ms,
@@ -1556,7 +2376,7 @@ pub async fn api_providers_reconcile(
             }
         }
         let windows = evolve_memory::QuotaLedger::parse_headers(resp.headers());
-        st.quota.observe_provider(pk, &windows);
+        st.quota.observe_provider(&key, &windows);
         let snapshot: serde_json::Map<String, Value> = windows.iter().map(|w| {
             (w.scope.clone(), json!({
                 "remaining": w.remaining, "limit": w.limit, "reset_epoch_ms": w.reset_epoch_ms,
@@ -1806,4 +2626,48 @@ pub async fn messages_stub() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tag_tests {
+    use super::assign_tags_within;
+    use evolve_core::tags::{Capability, PriceTier};
+    use evolve_core::types::{Cost, ModelRecord, Source, Tiers};
+    use std::collections::HashSet;
+
+    fn mk(id: &str, coding: f32, in_price: f32) -> ModelRecord {
+        ModelRecord {
+            id: id.into(),
+            provider: "p".into(),
+            base_url: "http://127.0.0.1:7777/v1".into(), // 本地 → has_credential
+            upstream_model: id.into(),
+            tiers: Tiers { coding, reasoning: coding, agentic: coding, vision: 0.0 },
+            cost: Some(Cost { input: in_price, output: in_price * 2.0 }),
+            source: Source::User,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn quantiles_use_usable_pool_only() {
+        // 12 个模型；其中 4 个（最贵/最强的）标记为不可用
+        let mut snap: Vec<ModelRecord> = Vec::new();
+        for i in 0..12 {
+            snap.push(mk(&format!("m{i}"), 0.3 + i as f32 * 0.05, 1.0 + i as f32));
+        }
+        let usable: HashSet<String> = (0..8).map(|i| format!("m{i}")).collect();
+        let tags = assign_tags_within(&snap, &usable);
+        // 分位分母=8：可用池内应呈 70/20/10（8 → 5~6 cheap / 1~2 medium / 0~1 premium）
+        let cap_counts = |t: Capability| tags.values().filter(|(c, _)| *c == t).count();
+        let price_counts = |t: PriceTier| tags.values().filter(|(_, p)| *p == t).count();
+        // 不可用的 4 个（最贵）不得占据"可用池的"分位名额——
+        // 用最贵模型 m11 验证：它不应被当作可用池的 premium 代表
+        assert!(tags.contains_key("m11"));
+        // 可用池 8 个里 premium ≤1（10% of 8）
+        let premium_in_usable = (0..8).filter(|i| tags.get(&format!("m{i}")).map(|(_, p)| *p == PriceTier::Premium).unwrap_or(false)).count();
+        assert!(premium_in_usable <= 1, "premium in usable should track 10% of 8, got {premium_in_usable}");
+        // 能力分位也只看可用池：最强者（m7）应落在可用池的 powerful 档
+        assert_eq!(tags.get("m7").map(|(c, _)| *c), Some(Capability::Powerful));
+        let _ = (cap_counts, price_counts);
+    }
 }

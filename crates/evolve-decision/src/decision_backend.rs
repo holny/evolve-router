@@ -14,8 +14,9 @@ use std::time::Duration;
 
 pub const STATE_TOKEN_BUDGET: usize = 2048;
 
-/// advisor 451/5xx 失败后的全局冷却截止（epoch ms）：风控期内不再白打调用
-static ADVISOR_COOLDOWN_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// advisor 调用失败后的全局冷却截止（epoch ms）：60s 内不再白打调用
+/// （consult 吞掉 HTTP 状态细节，抓取/解析失败等同计失败）
+static ADVISOR_FAIL_UNTIL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -31,37 +32,78 @@ pub struct DecisionModelBackend {
     pub model: String,
     pub endpoint: String,
     pub redact: bool,
+    /// w1 双协议：SystemOne = 原生 {state, questions}→{answers} 契约；
+    /// OpenAIChat = 任意 chat/completions 兼容端点（vLLM/ollama/OpenRouter/各家云）——
+    /// 契约问题内置为 prompt，回复内容解析出 {answers}
+    pub protocol: DecisionProtocol,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecisionProtocol {
+    SystemOne,
+    OpenAIChat,
+}
+
+/// w2 槽位失败分类：fatal → ChainJudge 拉黑槽位（进程内，重启复位）；
+/// 其余仅当次跳过。
+/// - Auth：401/403 鉴权失败（key 错/失效）
+/// - NotFound：404（端点不存在 / 模型不存在）
+/// - Unreachable：无法建立连接（服务未起 / DNS / 拒绝连接）
+/// - Timeout/Server/Parse：暂时性——限流、5xx、双端时序、模型输出不合预期
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotFail {
+    Auth,
+    NotFound,
+    Unreachable,
+    Timeout,
+    Server,
+    Parse,
+}
+
+impl SlotFail {
+    pub fn fatal(&self) -> bool {
+        matches!(self, SlotFail::Auth | SlotFail::NotFound | SlotFail::Unreachable)
+    }
 }
 
 #[async_trait]
 impl Judge for DecisionModelBackend {
     fn judge(&self, features: &RequestFeatures, digest: &DigestSignals, candidates_hint: &str) -> JudgmentSet {
         let payload = self.build_payload(features, digest, candidates_hint);
-        let client = self.client.clone();
-        let endpoint = self.endpoint.clone();
-        let api_key = self.api_key.clone();
-        let _model = self.model.clone();
-        let call = async move {
-            client
-                .post(&endpoint)
-                .bearer_auth(&api_key)
-                .timeout(Duration::from_millis(3000))
-                .json(&payload)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await
-        };
+        let state = payload["state"].clone();
+        let questions = payload["questions"].clone();
+        let consult = ConsultOnce { backend: self.clone(), state, questions, timeout: Duration::from_millis(3000) };
         // Engine is sync; we are always called from the multi-thread runtime.
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::try_current().ok().and_then(|h| h.block_on(async { call.await.ok() }))
+            tokio::runtime::Handle::try_current().ok().map(|h| h.block_on(async { consult.run("decision model judgment failed").await }))
         });
-        match result.as_ref().and_then(parse_judgment) {
+        match result.flatten().as_ref().and_then(parse_judgment_answers) {
             Some(j) => j,
             None => {
-                tracing::warn!("typesafe judgment failed, falling back to heuristic");
                 evolve_core::heuristic::HeuristicJudge.judge(features, digest, candidates_hint)
+            }
+        }
+    }
+}
+
+/// w1 统一薄封装：state+questions → answers，失败自动记 warn 并返回 None。
+/// judge/recommend/distill/judge_quality 各自行点均由此发出网络调用，
+/// protocol 差异（SystemOne vs OpenAIChat）被封在 consult 内部。
+#[derive(Clone)]
+struct ConsultOnce {
+    backend: DecisionModelBackend,
+    state: serde_json::Value,
+    questions: serde_json::Value,
+    timeout: Duration,
+}
+
+impl ConsultOnce {
+    async fn run(self, warn: &str) -> Option<serde_json::Value> {
+        match self.backend.consult(self.state, self.questions, self.timeout).await {
+            Ok(a) => Some(a),
+            Err(f) => {
+                tracing::warn!("{warn}: {f:?}");
+                None
             }
         }
     }
@@ -77,7 +119,7 @@ impl DecisionModelBackend {
         policy: &str,
     ) -> Option<(String, f32)> {
         // 冷却期内直接跳过（静默，不刷日志）
-        if now_millis() < ADVISOR_COOLDOWN_UNTIL.load(std::sync::atomic::Ordering::Relaxed) {
+        if now_millis() < ADVISOR_FAIL_UNTIL.load(std::sync::atomic::Ordering::Relaxed) {
             return None;
         }
         // choice 问题的 criteria 是必填的选项映射（缺失 → 422）：
@@ -98,99 +140,67 @@ impl DecisionModelBackend {
                 json!("candidate profile listed in state.candidates at this position"),
             );
         }
-        let payload = serde_json::json!({
-            "model": &self.model,
-            "state": {
-                "task": task_summary.chars().take(600).collect::<String>(),
-                "candidates": candidates_json.chars().take(6_000).collect::<String>(),
-                "policy": policy,
-            },
-            "questions": {
-                "route_recommendation": {
-                    "type": "choice",
-                    "instructions": "Given this task and the candidate model profiles in state.candidates, which single model should handle this request? Consider capability match, cost efficiency, reliability track record, context window fit, and quota availability. Reply with exactly one candidate id from the criteria list.",
-                    "criteria": criteria,
-                }
+        let state = json!({
+            "task": task_summary.chars().take(600).collect::<String>(),
+            "candidates": candidates_json.chars().take(6_000).collect::<String>(),
+            "policy": policy,
+        });
+        let questions = json!({
+            "route_recommendation": {
+                "type": "choice",
+                "instructions": "Given this task and the candidate model profiles in state.candidates, which single model should handle this request? Consider capability match, cost efficiency, reliability track record, context window fit, and quota availability. Reply with exactly one candidate id from the criteria list.",
+                "criteria": criteria,
             }
         });
-        let client = self.client.clone();
-        let endpoint = self.endpoint.clone();
-        let api_key = self.api_key.clone();
-        let _model = self.model.clone();
-        let call_once = |payload: serde_json::Value| {
-            let client = client.clone();
-            let endpoint = endpoint.clone();
-            let api_key = api_key.clone();
-            async move {
-                let resp = client
-                    .post(&endpoint)
-                    .bearer_auth(&api_key)
-                    .timeout(Duration::from_secs(5))
-                    .json(&payload)
-                    .send()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let status = resp.status();
-                if !status.is_success() {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(format!("HTTP {status}: {body}"));
-                }
-                resp.json::<serde_json::Value>()
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+        let consult = ConsultOnce {
+            backend: self.clone(),
+            state: state.clone(),
+            questions: questions.clone(),
+            timeout: Duration::from_secs(5),
         };
         // 451/5xx 间歇性（边缘风控），退避后重试一次
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::try_current().map(|h| {
+            tokio::runtime::Handle::try_current().ok().and_then(|h| {
                 h.block_on(async {
-                    let first = call_once(payload.clone()).await;
-                    let retriable = |e: &str| {
-                        [" 451", " 500", " 502", " 503", " 504", " 429"]
-                            .iter()
-                            .any(|c| e.contains(c))
-                    };
-                    if first.as_ref().err().map_or(false, |e| retriable(e)) {
+                    let first = consult.clone().run("route_advisor: recommend call failed").await;
+                    if first.is_none() {
+                        // 可重试错误（连接/5xx/429）退避 500ms 再试一次；consult 已吞掉
+                        // 具体错误类型——重试仅对失败一次的情况做，成本低
                         tokio::time::sleep(Duration::from_millis(500)).await;
-                        call_once(payload).await
+                        consult.run("route_advisor: recommend retry failed").await
                     } else {
                         first
                     }
                 })
             })
         });
-        match result {
-            Err(_) => {
-                tracing::warn!("route_advisor: no tokio runtime handle for recommend call");
-                None
-            }
-            Ok(Err(e)) => {
-                if e.contains(" 451") || e.contains(" 429") || e.contains(" 5") {
-                    ADVISOR_COOLDOWN_UNTIL.store(
-                        now_millis() + 60_000,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
-                }
-                tracing::warn!(error = %e, "route_advisor: recommend call failed");
-                None
-            }
-            Ok(Ok(v)) => {
-                let parsed = (|| {
-                    let choice = v.pointer("/answers/route_recommendation/choice")?.as_str()?.to_string();
-                    let conf = v.pointer("/answers/route_recommendation/confidence")
-                        .and_then(|c| c.as_f64()).unwrap_or(0.5) as f32;
-                    Some((choice, conf))
-                })();
-                if parsed.is_none() {
-                    tracing::warn!(resp = %v, "route_advisor: recommend response missing choice");
-                }
-                parsed
-            }
+        let Some(a) = result else {
+            ADVISOR_FAIL_UNTIL.store(now_millis() + 60_000, std::sync::atomic::Ordering::Relaxed);
+            return None;
+        };
+        let parsed = (|| {
+            let choice = a.pointer("/route_recommendation/choice")?.as_str()?.to_string();
+            let conf = a.pointer("/route_recommendation/confidence")
+                .and_then(|c| c.as_f64()).unwrap_or(0.5) as f32;
+            Some((choice, conf))
+        })();
+        if parsed.is_none() {
+            ADVISOR_FAIL_UNTIL.store(now_millis() + 60_000, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(answers = %a, "route_advisor: recommend response missing choice");
         }
+        parsed
     }
 
-    /// env 读取：DECISION_MODEL_* 为标准名，TYPESAFE_* 为历史名（回退兼容，
-    /// 已部署环境无需改动）。
+    /// env 读取：DECISION_* 为标准名（DECISION_API_KEY / DECISION_BASE_URL /
+    /// DECISION_MODEL / DECISION_PROTOCOL / DECISION_REDACT）；DECISION_MODEL_* /
+    /// TYPESAFE_* 为历史名（回退兼容，已部署环境无需改动）。
+    /// w2 两大协议族统一接入 = baseURL + apiKey + modelId(可选) +
+    /// protocol（自动判别）：
+    /// - 原生 System One（TypeSafe Jev 云 / Laya sidecar / 未来新端点）：
+    ///   请求 {state, questions} → {answers}，API key 可选（仅默认 Jev 云必填）；
+    ///   BASE_URL 以 /judge 结尾识别为 Laya 型判定端点
+    /// - OpenAI 兼容（chat/completions）：判定契约编译为 prompt（模板内置），
+    ///   约定输出 {answers} JSON，此时 DECISION_MODEL 必填
     fn env_var(names: &[&str]) -> Option<String> {
         for n in names {
             if let Ok(v) = std::env::var(n) {
@@ -201,23 +211,114 @@ impl DecisionModelBackend {
     }
 
     pub fn from_env() -> Option<Self> {
-        let api_key = Self::env_var(&["DECISION_MODEL_API_KEY", "TYPESAFE_API_KEY"])
-            .filter(|k| !k.is_empty())?;
-        Some(Self {
-            client: reqwest::Client::new(),
-            api_key,
-            model: Self::env_var(&["DECISION_MODEL_MODEL", "TYPESAFE_MODEL"])
-                .unwrap_or_else(|| "jev-latest".into()),
-            // A1：endpoint 可指向本地开源决策模型（System One 协议兼容——
-            // Intern-Decision / StartLux-Decision 等，vLLM/ollama 服务化后
-            // 改 DECISION_MODEL_ENDPOINT 即切换；默认仍为 TypeSafe 云端）
-            endpoint: Self::env_var(&["DECISION_MODEL_ENDPOINT", "TYPESAFE_ENDPOINT"])
-                .unwrap_or_else(|| "https://api.typesafe.ai/v1/systemone".into()),
-            // privacy default: only bucketed features cross the wire
-            redact: Self::env_var(&["DECISION_MODEL_REDACT", "TYPESAFE_REDACT"])
-                .map(|v| v != "0")
-                .unwrap_or(true),
-        })
+        let api_key = Self::env_var(&["DECISION_API_KEY", "DECISION_MODEL_API_KEY", "TYPESAFE_API_KEY"])
+            .filter(|k| !k.is_empty());
+        let base = Self::env_var(&["DECISION_BASE_URL", "DECISION_MODEL_ENDPOINT", "TYPESAFE_ENDPOINT"]);
+        let model = Self::env_var(&["DECISION_MODEL", "DECISION_MODEL_MODEL", "TYPESAFE_MODEL"]);
+        let protocol_hint = Self::env_var(&["DECISION_PROTOCOL"]);
+        let redact = Self::env_var(&["DECISION_REDACT", "DECISION_MODEL_REDACT", "TYPESAFE_REDACT"])
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let mut b = match base {
+            Some(ref b) if Self::is_judge_style(b) => {
+                // Laya 型判定端点：key 可选、model 无关
+                Self::from_parts(api_key.as_deref(), Some(b), None, protocol_hint.as_deref()).ok()?
+            }
+            Some(ref b) => {
+                Self::from_parts(api_key.as_deref(), Some(b), model.as_deref(), protocol_hint.as_deref()).ok()?
+            }
+            None => {
+                // 默认 TypeSafe Jev 云：不设 BASE_URL 时 key 必填
+                Self::from_parts(api_key.as_deref(), None, model.as_deref(), protocol_hint.as_deref()).ok()?
+            }
+        };
+        b.redact = redact;
+        Some(b)
+    }
+
+    /// Laya 型判定端点识别（/judge 结尾）——决策选型与蒸馏器门槛共用
+    pub fn is_judge_style(base: &str) -> bool {
+        let b = base.trim_end_matches('/');
+        b.ends_with("/judge")
+    }
+
+    /// Jev 型端点识别：systemone / system-one / system_one（去分隔符归一化，大小写无关）
+    /// ——本地原生契约服务端点的常用路径命名都不落判别盲区。
+    /// 兜底：判错协议的调用失败一律自动降级 heuristic，用户也可用
+    /// DECISION_PROTOCOL 强制指定，因此误判只会表现为回退启发式而非阻塞。
+    pub fn is_systemone_style(base: &str) -> bool {
+        let folded: String = base
+            .to_lowercase()
+            .chars()
+            .filter(|c| *c != '-' && *c != '_')
+            .collect();
+        folded.contains("systemone")
+    }
+
+    /// w1 双协议统一咨询 → Result<Value, SlotFail>（w2 槽位链路需要失败分类）
+    pub async fn consult(
+        &self,
+        state: serde_json::Value,
+        questions: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, SlotFail> {
+        let payload = match self.protocol {
+            DecisionProtocol::SystemOne => {
+                json!({ "model": &self.model, "state": state, "questions": questions })
+            }
+            DecisionProtocol::OpenAIChat => {
+                let system = "You are the decision model of an LLM router. You receive a `state` object describing the current request/session (and possibly candidate models) and a `questions` object of typed questions: type \"choice\" = answer with exactly one criterion id in `choice`; type \"noul\" = probability 0-1 in `noul`; type \"score\" = rating 0-3 in `score`. Every answer should include `confidence` (0-1). Reply with ONLY one JSON object, no prose and no markdown fences, shaped exactly as: {\"answers\": { \"<question_key>\": { ...typed fields shown above... } }}. For a `choice` question whose key is route_recommendation, the choice must be a candidate id listed in state.candidates.".to_string();
+                let user = format!(
+                    "state:\n{}\n\nquestions:\n{}",
+                    serde_json::to_string_pretty(&state).map_err(|_| SlotFail::Parse)?,
+                    serde_json::to_string_pretty(&questions).map_err(|_| SlotFail::Parse)?
+                );
+                json!({
+                    "model": &self.model,
+                    "messages": [
+                        { "role": "system", "content": system },
+                        { "role": "user", "content": user },
+                    ],
+                })
+            }
+        };
+        let mut req = self.client.post(&self.endpoint);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let v = req
+            .timeout(timeout)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    SlotFail::Timeout
+                } else if e.is_connect() {
+                    SlotFail::Unreachable
+                } else {
+                    SlotFail::Server
+                }
+            })?;
+        let status = v.status();
+        if !status.is_success() {
+            return Err(match status.as_u16() {
+                401 | 403 => SlotFail::Auth,
+                404 => SlotFail::NotFound,
+                429 => SlotFail::Server,
+                _ if status.is_server_error() => SlotFail::Server,
+                _ => SlotFail::Server,
+            });
+        }
+        let v = v.json::<serde_json::Value>().await.map_err(|_| SlotFail::Parse)?;
+        match self.protocol {
+            DecisionProtocol::SystemOne => Ok(v.get("answers").cloned().ok_or(SlotFail::Parse)?),
+            DecisionProtocol::OpenAIChat => {
+                let content = v.pointer("/choices/0/message/content").and_then(|c| c.as_str()).ok_or(SlotFail::Parse)?;
+                let parsed = extract_json(content).ok_or(SlotFail::Parse)?;
+                Ok(parsed.get("answers").cloned().unwrap_or(parsed))
+            }
+        }
     }
 
     /// ⑧ 能力卡蒸馏（FlyRoute）：观测统计达标后由 Jev 重估模型 tiers。
@@ -239,39 +340,38 @@ impl DecisionModelBackend {
                 "criteria": criteria,
             })
         };
-        let payload = json!({
-            "model": &self.model,
-            "state": {
-                "task": format!(
-                    "Re-estimate the capability tiers of model '{}' from its observed production statistics. Statistics reflect real traffic outcomes.",
-                    model_id
-                ),
-                "observations": stats_summary,
-            },
-            "questions": {
-                "reasoning_tier": tier_q("reasoning"),
-                "coding_tier": tier_q("coding"),
-                "vision_tier": tier_q("vision"),
-                "agentic_tier": tier_q("agentic tool use"),
-            }
+        let state = json!({
+            "task": format!(
+                "Re-estimate the capability tiers of model '{}' from its observed production statistics. Statistics reflect real traffic outcomes.",
+                model_id
+            ),
+            "observations": stats_summary,
         });
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .timeout(Duration::from_secs(20))
-            .json(&payload)
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json::<serde_json::Value>()
-            .await
-            .ok()?;
-        // score 类型 answer 形状：answers.<key>.score，0-3 刻度（同 session_depth）
+        let questions = json!({
+            "reasoning_tier": tier_q("reasoning"),
+            "coding_tier": tier_q("coding"),
+            "vision_tier": tier_q("vision"),
+            "agentic_tier": tier_q("agentic tool use"),
+        });
+        let consult = ConsultOnce {
+            backend: self.clone(),
+            state,
+            questions,
+            timeout: Duration::from_secs(20),
+        };
+        let answers = match tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::try_current().ok().and_then(|h| {
+                h.block_on(async { consult.run("decision model distill_tiers failed").await })
+            })
+        }) {
+            Some(a) => a,
+            None => return None, // 无 tokio runtime（CLI 路径），静默跳过下个周期再试
+        };
+        // score 类型 answer 形状：answers.<key>.score，0-3 刻度（同 session_depth）—
+        // consult 返回的即为 answers 对象
         let tier = |k: &str| -> f32 {
-            resp.pointer(&format!("/answers/{k}/score"))
+            answers
+                .pointer(&format!("/{k}/score"))
                 .and_then(|s| s.as_f64())
                 .map(|s| (s as f32 / 3.0).clamp(0.0, 1.0))
                 .unwrap_or(0.5)
@@ -288,39 +388,31 @@ impl DecisionModelBackend {
     /// 单一维度（是否充分且正确回答）——防风格偏见；judge 与被评模型异构
     /// ——防自我偏好。失败返回 None。
     pub async fn judge_response_quality(&self, query: &str, response: &str) -> Option<f32> {
-        let payload = json!({
-            "model": &self.model,
-            "state": {
-                "task": query.chars().take(600).collect::<String>(),
-                "response": response.chars().take(1200).collect::<String>(),
-            },
-            "questions": {
-                "sufficiency": {
-                    "type": "noul",
-                    "instructions": "Does this response adequately and correctly answer the query? Judge only sufficiency and correctness — ignore style, tone, and wording.",
-                }
+        let state = json!({
+            "task": query.chars().take(600).collect::<String>(),
+            "response": response.chars().take(1200).collect::<String>(),
+        });
+        let questions = json!({
+            "sufficiency": {
+                "type": "noul",
+                "instructions": "Does this response adequately and correctly answer the query? Judge only sufficiency and correctness — ignore style, tone, and wording.",
             }
         });
-        let resp = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.api_key)
-            .timeout(Duration::from_secs(15))
-            .json(&payload)
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json::<serde_json::Value>()
-            .await
-            .ok()?;
-        resp.pointer("/answers/sufficiency/noul")
+        let consult = ConsultOnce {
+            backend: self.clone(),
+            state,
+            questions,
+            timeout: Duration::from_secs(15),
+        };
+        let answers = consult.run("decision model judge_response_quality failed").await?;
+        answers
+            .pointer("/sufficiency/noul")
             .and_then(|v| v.as_f64())
             .map(|v| v as f32)
     }
 
-    fn build_payload(&self, features: &RequestFeatures, digest: &DigestSignals, candidates_hint: &str) -> serde_json::Value {
+    /// w2 槽位链要用：公开 payload 组装（state+questions 一次成型）
+    pub fn build_payload(&self, features: &RequestFeatures, digest: &DigestSignals, candidates_hint: &str) -> serde_json::Value {
         let (first_head, current_head) = if self.redact {
             // bucketed placeholder: no user text leaves the machine
             ("[text]".to_string(), "[text]".to_string())
@@ -422,8 +514,16 @@ fn head(s: &str, chars: usize) -> String {
     s.chars().take(chars).collect()
 }
 
-pub(crate) fn parse_judgment(v: &serde_json::Value) -> Option<JudgmentSet> {
-    let a = v.get("answers")?;
+/// w1 OpenAIChat 协议：模型回复内容 → JSON（容忍 prose/代码围栏包裹）
+fn extract_json(content: &str) -> Option<serde_json::Value> {
+    let s = content.trim();
+    match (s.find('{'), s.rfind('}')) {
+        (Some(a), Some(b)) if a < b => serde_json::from_str(&s[a..=b]).ok(),
+        _ => serde_json::from_str(s).ok(),
+    }
+}
+
+pub(crate) fn parse_judgment_answers(a: &serde_json::Value) -> Option<JudgmentSet> {
     let domain = match a.get("task_domain")?.get("choice")?.as_str()? {
         "code" => Domain::Code,
         "math_logic" => Domain::MathLogic,
@@ -485,54 +585,39 @@ impl RouteAdvisor {
         session_summary: &str,
         policy: &str,
     ) -> Option<(String, String, f32)> {
-        let payload = serde_json::json!({
-            "model": &self.backend.model,
-            "state": {
-                "task": task_text.chars().take(600).collect::<String>(),
-                "candidates": candidates_json.chars().take(6000).collect::<String>(),
-                "session": session_summary.chars().take(300).collect::<String>(),
-                "policy": policy,
-            },
-            "questions": {
-                "route_recommendation": {
-                    "type": "choice",
-                    "instructions": {
-                        "question": "Given this task and the candidate model profiles, which single model should handle this request?",
-                        "note": "Consider capability match, cost efficiency, reliability track record, context window fit, and quota availability. Recommend exactly one candidate id.",
-                    },
-                }
+        let state = json!({
+            "task": task_text.chars().take(600).collect::<String>(),
+            "candidates": candidates_json.chars().take(6000).collect::<String>(),
+            "session": session_summary.chars().take(300).collect::<String>(),
+            "policy": policy,
+        });
+        let questions = json!({
+            "route_recommendation": {
+                "type": "choice",
+                "instructions": {
+                    "question": "Given this task and the candidate model profiles, which single model should handle this request?",
+                    "note": "Consider capability match, cost efficiency, reliability track record, context window fit, and quota availability. Recommend exactly one candidate id.",
+                },
             }
         });
-        let resp = tokio::task::block_in_place(|| {
+        let consult = ConsultOnce {
+            backend: self.backend.clone(),
+            state,
+            questions,
+            timeout: Duration::from_secs(5),
+        };
+        let a = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::try_current().ok().and_then(|h| {
-                h.block_on(async {
-                    self.backend
-                        .client
-                        .post(&self.backend.endpoint)
-                        .bearer_auth(&self.backend.api_key)
-                        .timeout(Duration::from_secs(5))
-                        .json(&payload)
-                        .send()
-                        .await
-                        .ok()?
-                        .error_for_status()
-                        .ok()?
-                        .json::<serde_json::Value>()
-                        .await
-                        .ok()
-                })
+                h.block_on(consult.run("route advisor consult failed"))
             })
         })?;
-        let choice = resp
-            .pointer("/answers/route_recommendation/choice")
-            .and_then(|c| c.as_str())?
-            .to_string();
-        let confidence = resp
-            .pointer("/answers/route_recommendation/confidence")
+        let choice = a.pointer("/route_recommendation/choice").and_then(|c| c.as_str())?.to_string();
+        let confidence = a
+            .pointer("/route_recommendation/confidence")
             .and_then(|c| c.as_f64())
             .unwrap_or(0.5) as f32;
-        let reasoning = resp
-            .pointer("/answers/route_recommendation/reasoning")
+        let reasoning = a
+            .pointer("/route_recommendation/reasoning")
             .and_then(|r| r.as_str())
             .unwrap_or("")
             .to_string();
@@ -548,5 +633,126 @@ impl evolve_core::types::RouteAdvisor for DecisionModelBackend {
         policy: &str,
     ) -> Option<(String, f32)> {
         self.recommend_route(task_summary, candidates_json, policy)
+    }
+}
+
+/// 测试与部署共用的构造路径：from_env 读 env 后委托 from_parts，
+/// 接入规则单点定义：protocol 判定 + endpoint 归一化 + model 必填约束
+impl DecisionModelBackend {
+    /// base 缺省 = TypeSafe Jev 云默认端点（此时 key 必填——云鉴权）；
+    /// 显式 BASE_URL 时 key 一律可选（systemone → 原生契约，/judge → Laya 型，
+    /// 其余 → OpenAI chat 兼容——此时 model 必填，判别规则与 endpoint 归一化
+    /// 单点定义在此，from_env 与测试共用）
+    pub(crate) fn from_parts(
+        api_key: Option<&str>,
+        base: Option<&str>,
+        model: Option<&str>,
+        protocol_hint: Option<&str>,
+    ) -> Result<Self, ()> {
+        let base = base
+            .map(String::from)
+            .unwrap_or_else(|| "https://api.typesafe.ai/v1/systemone".into());
+        let model_set = model.map(String::from);
+        let model = model_set.clone().unwrap_or_else(|| "jev-latest".into());
+        let protocol = match protocol_hint.map(|p| p.to_lowercase()) {
+            Some(ref p) if p.contains("openai") || p.contains("chat") => DecisionProtocol::OpenAIChat,
+            Some(ref p) if p.contains("system") => DecisionProtocol::SystemOne,
+            // URL 形态：systemone/system-one/system_one（去分隔符归一化）→ 原生契约；
+            // /judge 结尾 → Laya 型；其余 → OpenAI chat 兼容
+            _ if Self::is_systemone_style(&base) || Self::is_judge_style(&base) => DecisionProtocol::SystemOne,
+            _ => DecisionProtocol::OpenAIChat,
+        };
+        let endpoint = if protocol == DecisionProtocol::SystemOne {
+            base
+        } else if base.ends_with("/chat/completions") {
+            base
+        } else {
+            format!("{}/chat/completions", base.trim_end_matches('/'))
+        };
+        if endpoint.is_empty() {
+            return Err(());
+        }
+        match protocol {
+            DecisionProtocol::OpenAIChat if model_set.is_none() => return Err(()),
+            DecisionProtocol::SystemOne if api_key.is_none()
+                && Self::is_default_jev(&endpoint) =>
+            {
+                return Err(());
+            }
+            _ => {}
+        }
+        Ok(Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.unwrap_or("").into(),
+            model,
+            endpoint,
+            redact: true,
+            protocol,
+        })
+    }
+
+    fn is_default_jev(endpoint: &str) -> bool {
+        endpoint == "https://api.typesafe.ai/v1/systemone"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_json_tolerates_fences_and_prose() {
+        let fenced = "```json\n{\"answers\":{\"task_domain\":{\"choice\":\"code\"}}}\n```";
+        assert_eq!(extract_json(fenced).unwrap()["answers"]["task_domain"]["choice"], "code");
+        let prose = "Sure! {\"answers\":{\"difficulty\":{\"choice\":\"l2\"}}} hope that helps";
+        assert_eq!(extract_json(prose).unwrap()["answers"]["difficulty"]["choice"], "l2");
+        // 裸 answers（模型直接回 answers 对象）：consult 兜底 unwrap_or
+        let bare = "{\"task_domain\":{\"choice\":\"code\"}}";
+        assert_eq!(extract_json(bare).unwrap()["task_domain"]["choice"], "code");
+    }
+
+    #[test]
+    fn protocol_auto_detection() {
+        // TypeSafe 云默认（base 缺省 + key）→ 原生契约
+        let b = DecisionModelBackend::from_parts(Some("key"), None, None, None).unwrap();
+        assert_eq!(b.protocol, DecisionProtocol::SystemOne);
+        assert!(b.endpoint.contains("systemone"));
+        // 默认 Jev 云缺 key → 视为未配置
+        assert!(DecisionModelBackend::from_parts(None, None, None, None).is_err());
+        // 第三方 OpenAI 端点 → OpenAIChat，sign without key（ollama/vLLM 无鉴权）
+        assert!(DecisionModelBackend::from_parts(None, Some("https://api.openai.com/v1"), None, None).is_err());
+        let ok = DecisionModelBackend::from_parts(None, Some("https://api.openai.com/v1"), Some("gpt-6-mini"), None).unwrap();
+        assert_eq!(ok.protocol, DecisionProtocol::OpenAIChat);
+        assert_eq!(ok.endpoint, "https://api.openai.com/v1/chat/completions");
+        assert!(ok.api_key.is_empty());
+        let keyed = DecisionModelBackend::from_parts(Some("k"), Some("https://api.openai.com/v1"), Some("m"), None).unwrap();
+        assert_eq!(keyed.api_key, "k");
+        // 已带 /chat/completions 的 base 不重复追加
+        let done = DecisionModelBackend::from_parts(None, Some("https://api.openai.com/v1/chat/completions"), Some("m"), None).unwrap();
+        assert_eq!(done.endpoint, "https://api.openai.com/v1/chat/completions");
+        // Laya 型判定端点（/judge 结尾）→ 原生契约、免 key、model 无关
+        let native = DecisionModelBackend::from_parts(None, Some("http://127.0.0.1:8321/v1/judge"), None, None).unwrap();
+        assert_eq!(native.protocol, DecisionProtocol::SystemOne);
+        assert_eq!(native.endpoint, "http://127.0.0.1:8321/v1/judge");
+        // is_judge_style 判别
+        assert!(DecisionModelBackend::is_judge_style("http://x:1/v1/judge/"));
+        assert!(!DecisionModelBackend::is_judge_style("http://x:1/v1/chat/completions"));
+        // systemone 归一化判别（本地原生契约常见命名变体）
+        assert!(DecisionModelBackend::is_systemone_style("http://127.0.0.1:8000/system_one"));
+        assert!(DecisionModelBackend::is_systemone_style("http://127.0.0.1:8000/system-one/judge"));
+        assert!(DecisionModelBackend::is_systemone_style("https://api.typesafe.ai/v1/systemone"));
+        assert!(!DecisionModelBackend::is_systemone_style("http://127.0.0.1:8000/api/v1"));
+        let sysone = DecisionModelBackend::from_parts(None, Some("http://127.0.0.1:8000/system_one"), None, None).unwrap();
+        assert_eq!(sysone.protocol, DecisionProtocol::SystemOne);
+        assert_eq!(sysone.endpoint, "http://127.0.0.1:8000/system_one");
+    }
+
+    #[test]
+    fn answers_parse_both_shapes() {
+        let full = serde_json::json!({"answers": {"task_domain": {"choice": "code", "confidence": 0.8}}});
+        assert_eq!(parse_judgment_answers(full.get("answers").unwrap()).unwrap().domain, Domain::Code);
+        let answers = serde_json::json!({"task_domain": {"choice": "code", "confidence": 0.8}});
+        assert_eq!(parse_judgment_answers(&answers).unwrap().domain, Domain::Code);
+        assert_eq!(parse_judgment_answers(&answers).unwrap().domain, Domain::Code);
     }
 }

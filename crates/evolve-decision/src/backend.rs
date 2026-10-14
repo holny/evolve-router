@@ -1,4 +1,6 @@
+use crate::slots::{build_slots, ChainSlot, SlotChainJudge, SlotKind};
 use evolve_core::types::{DigestSignals, Judge, JudgmentSet, RequestFeatures};
+use std::sync::Arc;
 
 /// M2 will add typesafe/laya HTTP backends behind this same constructor.
 pub enum DecisionBackend {
@@ -14,8 +16,7 @@ impl Judge for HeuristicBackend {
 }
 
 /// 双判官取严融合（决策记录 #24 扩展）：Jev 语义判定为主，heuristic 为
-/// 独立第二意见；冲突时取更保守值。专治 Jev 的 CJK 弱点——中文任务被
-/// 误判为 Other/简单时，heuristic 关键词（中英词表）把域和难度救回来。
+/// 独立第二意见；冲突时取更保守值。
 pub struct HybridBackend {
     primary: Box<dyn Judge>,
     secondary: evolve_core::heuristic::HeuristicJudge,
@@ -29,40 +30,46 @@ impl Judge for HybridBackend {
     }
 }
 
+/// w2 槽位链裁剪（强制后端名时只留对应族槽位）
+fn pick_slots(kind: &str) -> Vec<ChainSlot> {
+    let all = build_slots();
+    match kind {
+        "decision_model" | "typesafe" => all.into_iter().filter(|s| s.kind == SlotKind::Jev).collect(),
+        "laya" => all.into_iter().filter(|s| s.kind == SlotKind::Laya).collect(),
+        _ => all,
+    }
+}
+
 impl DecisionBackend {
-    /// `auto`: upgrade to TypeSafe Jev when TYPESAFE_API_KEY is present,
-    /// otherwise heuristic. Explicit "heuristic"/"decision_model" force a choice;
-    /// any backend failure degrades to heuristic inside the judge itself.
+    /// w2 三槽位架构（用户裁决）：JEV > LAYA > OPENAI 优先级，配一即用；
+    /// [decision].backend 仅作强制指定（默认 auto = 全槽位链）。
+    /// 硬错（鉴权失败/404/无法连接）进程内拉黑该槽位，重启复位；
+    /// 全链失败 → heuristic 兜底，永不阻塞。
     pub fn build(kind: &str) -> Box<dyn Judge> {
+        let (judge, _) = Self::build_with_chain(kind);
+        judge
+    }
+
+    /// 供 state.rs 同时拿 judge 与槽位链（advisor / distiller 取材）
+    pub fn build_with_chain(kind: &str) -> (Box<dyn Judge>, Option<Arc<SlotChainJudge>>) {
         match kind {
-            "heuristic" => Box::new(HeuristicBackend),
-            "decision_model" | "typesafe" => match crate::decision_backend::DecisionModelBackend::from_env() {
-                Some(b) => {
-                    tracing::info!("decision backend: decision model (hybrid + heuristic rescue)");
-                    Box::new(b)
-                }
-                None => {
-                    tracing::warn!("TYPESAFE_API_KEY missing, decision backend falls back to heuristic");
-                    Box::new(HeuristicBackend)
-                }
-            },
-            "laya" => match crate::laya::LayaBackend::from_env() {
-                Some(b) => {
-                    tracing::info!("decision backend: laya sidecar");
-                    Box::new(b)
-                }
-                None => Box::new(HeuristicBackend),
-            },
-            "auto" => match crate::decision_backend::DecisionModelBackend::from_env() {
-                Some(b) => {
-                    tracing::info!("decision backend: hybrid (decision model primary + heuristic rescue)");
-                    Box::new(HybridBackend { primary: Box::new(b), secondary: evolve_core::heuristic::HeuristicJudge })
-                }
-                None => Box::new(HeuristicBackend),
-            },
+            "heuristic" => (Box::new(HeuristicBackend), None),
             other => {
-                tracing::warn!(backend = other, "unknown decision backend, falling back to heuristic");
-                Box::new(HeuristicBackend)
+                let slots = pick_slots(other);
+                if slots.is_empty() {
+                    tracing::warn!("decision kind={other}: no slot configured → heuristic fallback");
+                    return (Box::new(HeuristicBackend), None);
+                }
+                let chain = Arc::new(SlotChainJudge::new(slots));
+                let judge: Box<dyn Judge> = match other {
+                    // decision_model/typesafe 保持 #24 双判官融合语义
+                    "decision_model" | "typesafe" => Box::new(HybridBackend {
+                        primary: Box::new((*chain).clone()),
+                        secondary: evolve_core::heuristic::HeuristicJudge,
+                    }),
+                    _ => Box::new((*chain).clone()),
+                };
+                (judge, Some(chain))
             }
         }
     }

@@ -69,7 +69,13 @@
 | `crates/ev-core/src/plans.rs` | 套餐注册表 + 全局模型能力表 |
 | `crates/ev-memory/src/flywheel.rs` | 四层反馈学习 + ReqSample 窗口环 |
 | `crates/ev-memory/src/sessions.rs` | 粘性 + L3 反馈匹配 |
-| `crates/ev-memory/src/quota.rs` | 限额头 + 套餐用量双账本 |
+| `crates/ev-memory/src/quota.rs` | 限额头 + 套餐用量双账本 + **provider 配额闸门**（关闸/探活 5-10min） |
+| `crates/ev-core/src/calibration.rs` | **难度分位校准**（滚动窗口 → 目标 70/20/10） |
+| `crates/ev-core/src/tags.rs` | **模型能力/价位标签**（枚举 + 默认推导；用户覆盖在 overrides） |
+| `crates/ev-core/src/recency.rs` | **活跃集 50**（发布日期解析 + 最近使用 + 新发布保底 20 + 顶替语义） |
+| `crates/ev-core/src/ratio.rs` | **比例控制器**（实际档位占比 → 成本软乘子，拉回 7:2:1） |
+| `crates/ev-core/src/provider_info.rs` | **Provider 官方信息注册表**（hostname → 配额端点/峰谷/价目/文档/复核日期） |
+| `crates/ev-discovery/src/modelsdev.rs` | models.dev 参考数据（context/cost/**release_date**，canon 模糊匹配 + 最早发布日仲裁） |
 | `crates/ev-memory/src/health.rs` | 健康冷却账本（含重置时间） |
 | `crates/ev-decision/src/backend.rs` | HybridBackend（双判官融合） |
 | `crates/evolve-decision/src/decision_backend.rs` | 决策模型判定（System One 协议，可指向云端或本地服务） |

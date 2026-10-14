@@ -1,3 +1,4 @@
+pub mod calibration;
 pub mod catalog;
 pub mod decision_model;
 pub mod config;
@@ -6,7 +7,11 @@ pub mod engine;
 pub mod features;
 pub mod heuristic;
 pub mod plans;
+pub mod provider_info;
+pub mod ratio;
+pub mod recency;
 pub mod scoring;
+pub mod tags;
 pub mod tokens;
 pub mod types;
 

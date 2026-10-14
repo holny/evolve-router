@@ -12,32 +12,23 @@ use std::time::Duration;
 
 pub const LAYA_STATE_HEAD_CHARS: usize = 160;
 
+#[derive(Clone)]
 pub struct LayaBackend {
     client: reqwest::Client,
     endpoint: String,
+    api_key: String,
 }
 
 #[async_trait]
 impl Judge for LayaBackend {
     fn judge(&self, features: &RequestFeatures, digest: &DigestSignals, _candidates_hint: &str) -> JudgmentSet {
-        let payload = self.build_payload(features, digest);
-        let client = self.client.clone();
-        let endpoint = self.endpoint.clone();
-        let call = async move {
-            client
-                .post(&endpoint)
-                .timeout(Duration::from_millis(1500))
-                .json(&payload)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<serde_json::Value>()
-                .await
-        };
         let result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::try_current().ok().and_then(|h| h.block_on(async { call.await.ok() }))
+            tokio::runtime::Handle::try_current().ok().map(|h| {
+                h.block_on(async { self.consult_raw(features, digest, Duration::from_millis(1500)).await })
+            })
         });
-        match result.as_ref().and_then(crate::decision_backend::parse_judgment) {
+        let parsed = result.as_ref().and_then(|r| r.as_ref().ok()).and_then(crate::decision_backend::parse_judgment_answers);
+        match parsed {
             Some(j) => j,
             None => {
                 tracing::warn!("laya judgment failed, falling back to heuristic");
@@ -49,10 +40,61 @@ impl Judge for LayaBackend {
 
 impl LayaBackend {
     pub fn from_env() -> Option<Self> {
-        Some(Self {
-            client: reqwest::Client::new(),
-            endpoint: std::env::var("LAYA_URL").unwrap_or_else(|_| "http://127.0.0.1:8321/v1/judge".into()),
-        })
+        // w2：LAYA_URL 显式优先；DECISION_BASE_URL 的 /judge 型判定端点同样
+        // 可作为 sidecar 入口（两类协议族统一 = 环境变量）；最后回退默认本地端点
+        let endpoint = std::env::var("LAYA_URL")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .or_else(|| {
+                let b = ["DECISION_BASE_URL", "DECISION_MODEL_ENDPOINT"].iter().find_map(|n| std::env::var(n).ok())?;
+                if crate::decision_backend::DecisionModelBackend::is_judge_style(&b) { Some(b) } else { None }
+            })
+            .unwrap_or_else(|| "http://127.0.0.1:8321/v1/judge".into());
+        Some(Self::with_endpoint(&endpoint, None))
+    }
+
+    pub fn with_endpoint(endpoint: &str, api_key: Option<&str>) -> Self {
+        Self { client: reqwest::Client::new(), endpoint: endpoint.to_string(), api_key: api_key.unwrap_or("").to_string() }
+    }
+
+    /// w2 槽位链入口：返回 answers 对象（或全部响应形状兜底），失败带分类。
+    /// 与 DecisionModelBackend::consult 同构——ChainJudge 用失败分类决定拉黑。
+    pub async fn consult_raw(
+        &self,
+        features: &RequestFeatures,
+        digest: &DigestSignals,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, crate::decision_backend::SlotFail> {
+        use crate::decision_backend::SlotFail;
+        let payload = self.build_payload(features, digest);
+        let mut req = self.client.post(&self.endpoint);
+        if !self.api_key.is_empty() {
+            req = req.bearer_auth(&self.api_key);
+        }
+        let v = req
+            .timeout(timeout)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    SlotFail::Timeout
+                } else if e.is_connect() {
+                    SlotFail::Unreachable
+                } else {
+                    SlotFail::Server
+                }
+            })?;
+        if !v.status().is_success() {
+            let s = v.status();
+            return Err(match s.as_u16() {
+                401 | 403 => SlotFail::Auth,
+                404 => SlotFail::NotFound,
+                _ => SlotFail::Server,
+            });
+        }
+        let body = v.json::<serde_json::Value>().await.map_err(|_| SlotFail::Parse)?;
+        Ok(body.get("answers").cloned().unwrap_or(body))
     }
 
     fn build_payload(&self, features: &RequestFeatures, digest: &DigestSignals) -> serde_json::Value {

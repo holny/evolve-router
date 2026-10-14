@@ -8,6 +8,9 @@
 <meta name="color-scheme" content="dark light">
 <script>
 (function(){ try {
+  // 主题：URL ?theme=light|dark 覆盖（便于分享/截图固定主题）→ localStorage → 系统
+  var qp = new URLSearchParams(location.search).get('theme');
+  if (qp === 'light' || qp === 'dark') { localStorage.setItem('ev-theme', qp); }
   var t = localStorage.getItem('ev-theme') || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
   document.documentElement.dataset.theme = t;
 } catch(e){} })();
@@ -70,6 +73,15 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
 
 .grid { display:grid; grid-template-columns: 1.2fr 1fr; gap:14px; align-items:start; }
 @media (max-width:1100px){ .grid { grid-template-columns:1fr; } }
+
+/* 决策模型配置横幅（missing/stale 状态提示 + 配置方式） */
+.dm-banner { display:none; flex-direction:column; align-items:flex-start; gap:5px; margin-bottom:14px; padding:10px 14px;
+             border:1px solid var(--red); border-radius:10px; background:color-mix(in srgb, var(--red) 8%, var(--card));
+             font-size:12.5px; line-height:1.55; }
+.dm-banner b { color:var(--red); }
+.dm-banner code { padding:2px 7px; border-radius:5px; background:var(--input-bg); border:1px solid var(--border);
+                  font-size:11.5px; user-select:all; }
+.dm-banner .dm-sub { color:var(--dim); }
 
 /* A-decision：决策流 + 解剖面板主从布局 */
 .duo { display:grid; grid-template-columns: 1.25fr 1fr; gap:14px; align-items:start; margin-bottom:14px; }
@@ -236,6 +248,7 @@ table.mx tr.win td { color:var(--green); }
   </button>
   <select class="lang-sel" id="lang-sel"></select>
 </header>
+<div id="dm-banner" class="dm-banner" style="display:none"></div>
 <main>
   <div class="duo">
     <section class="card">
@@ -274,6 +287,12 @@ table.mx tr.win td { color:var(--green); }
     <div class="trend-grid" id="trend-grid"><div class="dim2" data-i18n="t_nodata">窗口内暂无样本</div></div>
   </section>
   <section class="card">
+    <h2><span data-i18n="tags_card">模型标签与近 100 请求分布</span></h2>
+    <div class="sub" style="margin-bottom:8px" data-i18n="tags_hint">capability/price tags are auto-derived; override to taste</div>
+    <div id="tags-dist" style="display:flex;gap:26px;flex-wrap:wrap;margin-bottom:10px"></div>
+    <div id="tags-list" style="max-height:300px;overflow:auto"></div>
+  </section>
+  <section class="card">
     <h2 style="display:flex;justify-content:space-between;align-items:center;gap:10px">
       <span data-i18n="provider_card">Provider 管理</span>
       <span style="display:flex;gap:6px">
@@ -308,6 +327,47 @@ const LOCALE = {zh:'zh-CN', en:'en-US', ko:'ko-KR', ja:'ja-JP', es:'es-ES', fr:'
 
 const T = {
   title:     {zh:'EvolveRouter Dashboard', en:'EvolveRouter Dashboard', ko:'EvolveRouter 대시보드', ja:'EvolveRouter ダッシュボード', es:'Panel de EvolveRouter', fr:'Tableau de bord EvolveRouter'},
+  dm_missing:{zh:'未配置决策模型 — 路由使用启发式兜底（仍然可用，但少了语义判断与直接推荐）', en:'Decision model not configured — routing falls back to the heuristic judge (usable, but no semantic judgment or direct recommendation)',
+             ko:'결정 모델 미설정 — 라우팅이 휴리스틱으로 폴백(동작하나 시맨틱 판단·직접 추천 없음)', ja:'決定モデル未設定 — ルーティングはヒューリスティックにフォールバック（動作するが意味判断・直接推奨なし）',
+             es:'Modelo de decisión no configurado — el enrutamiento usa el juez heurístico (funciona, sin juicio semántico ni recomendación directa)',
+             fr:'Modèle de décision non configuré — routage en repli heuristique (utilisable, sans jugement sémantique ni recommandation directe)'},
+  dm_stale:  {zh:'决策模型已配置 — 重启网关后生效', en:'Decision model configured — restart the gateway to apply',
+             ko:'결정 모델 설정됨 — 게이트웨이 재시작 필요', ja:'決定モデル設定済み — ゲートウェイ再起動で反映',
+             es:'Modelo de decisión configurado — reinicie la puerta para aplicarlo',
+             fr:'Modèle de décision configuré — redémarrez la passerelle pour appliquer'},
+  dm_envline:{zh:'统一接入 = 同一组进程环境变量（macOS / Windows / Linux 通用），配置后重启网关生效：',
+             en:'One integration form: the same process env vars everywhere (macOS / Windows / Linux); restart the gateway to apply:',
+             ko:'통합 접속 = 동일한 프로세스 환경변수(macOS / Windows / Linux 공통), 설정 후 게이트웨이 재시작:',
+             ja:'統一接続形式：共通のプロセス環境変数（macOS / Windows / Linux）。設定後、ゲートウェイ再起動で反映：',
+             es:'Integración única: las mismas variables de proceso (macOS / Windows / Linux); reinicie la puerta para aplicar:',
+             fr:'Intégration unique : les mêmes variables de processus (macOS / Windows / Linux) ; redémarrez la passerelle pour appliquer :'},
+  dm_row_jev:{zh:'① JEV（TypeSafe 原生契约，云/本地均可）：DECISION_JEV_API_KEY=&lt;key&gt;, 无 URL 即 TypeSafe 云；或 + DECISION_JEV_BASE_URL=&lt;url&gt;（本地部署，key 免）',
+             en:'① JEV (TypeSafe native contract, cloud/local): DECISION_JEV_API_KEY=&lt;key&gt; (no URL = TypeSafe cloud); or + DECISION_JEV_BASE_URL=&lt;url&gt; (local deploy, key optional)',
+             ko:'① JEV(TypeSense 네이티브 계약, 클라우드/로컬): DECISION_JEV_API_KEY=&lt;key&gt;(URL 없음=TypeSafe 클라우드); 또는 + DECISION_JEV_BASE_URL=&lt;url&gt;(로컬 배포, key 선택)',
+             ja:'① JEV（TypeGuide ネイティブ契約、クラウド/ローカル）：DECISION_JEV_API_KEY=&lt;key&gt;（URL なし=TypeSafe クラウド）；または + DECISION_JEV_BASE_URL=&lt;url&gt;（ローカル配置、key 任意）',
+             es:'① JEV (contrato nativo TypeSafe, nube/local): DECISION_JEV_API_KEY=&lt;key&gt; (sin URL = nube TypeSafe); o + DECISION_JEV_BASE_URL=&lt;url&gt; (despliegue local, key opcional)',
+             fr:'① JEV (contrat natif TypeSafe, cloud/local) : DECISION_JEV_API_KEY=&lt;key&gt; (sans URL = cloud TypeSafe) ; ou + DECISION_JEV_BASE_URL=&lt;url&gt; (déploiement local, key facultative)'},
+  dm_row_laya:{zh:'② LAYA（本地 sidecar 判定服务，免 key）：DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge',
+             en:'② LAYA (local sidecar judge service, no key): DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge',
+             ko:'② LAYA(로컬 사이드카 판정 서비스, key 불필요): DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge',
+             ja:'② LAYA（ローカル sidecar 判定サービス、key 不要）：DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge',
+             es:'② LAYA (servicio local de juicio sidecar, sin key): DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge',
+             fr:'② LAYA (service de jugement sidecar local, sans key) : DECISION_LAYA_BASE_URL=http://127.0.0.1:8321/v1/judge'},
+  dm_row_openai:{zh:'③ OPENAI（OpenAI 兼容 chat/completions，判定 prompt 模板内置）：DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY（部分端点免）',
+             en:'③ OPENAI (OpenAI-compatible chat/completions, judging prompt template built in): DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY (optional on some endpoints)',
+             ko:'③ OPENAI(OpenAI 호환 chat/completions, 판정 프롬프트 템플릿 내장): DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY(일부 불필요)',
+             ja:'③ OPENAI（OpenAI互換 chat/completions、判定プロンプトテンプレート内蔵）：DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY（一部不要）',
+             es:'③ OPENAI (chat/completions compatible OpenAI, plantilla de prompt integrada): DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY (opcional en algunos)',
+             fr:'③ OPENAI (chat/completions compatible OpenAI, template de prompt intégré) : DECISION_OPENAI_BASE_URL=&lt;base-url&gt; + DECISION_OPENAI_MODEL=&lt;model-id&gt; + DECISION_OPENAI_API_KEY (facultative selon endpoints)'},
+  dm_chain:  {zh:'优先级 JEV &gt; LAYA &gt; OPENAI，配置任一即可；硬错（401/403、404、无法连接）会让该槽位在本进程内被跳过，重启复位；全链失败自动降级启发式，永不阻塞路由。', en:'Priority JEV &gt; LAYA &gt; OPENAI — configure any one; hard errors (401/403, 404, connection refused) blacklist that slot for this process, reset on restart; full-chain failure degrades to heuristics and never blocks routing.',
+             ko:'우선순위 JEV &gt; LAYA &gt; OPENAI, 하나만 설정; 하드 오류(401/403·404·연결 거부) 시 해당 슬롯 프로세스 내 스킵, 재시작 초기화; 전체 실패 시 휴리스틱 폴백, 라우팅 차단 없음.',
+             ja:'優先度 JEV &gt; LAYA &gt; OPENAI、どれか一つ設定；ハードエラー（401/403・404・接続不可）でそのスロットはプロセス内スキップ、再起動でリセット；全失敗時はヒューリスティックへフォールバックしルーティングはブロックしない。',
+             es:'prioridad JEV &gt; LAYA &gt; OPENAI, configure cualquiera; errores duros (401/403, 404, conexión rechazada) deshabilitan ese slot en el proceso, se restablece al reiniciar; fallo total degrada a heurística y nunca bloquea.',
+             fr:'priorité JEV &gt; LAYA &gt; OPENAI, configurez-en un seul ; erreurs dures (401/403, 404, connexion refusée) mettent ce slot sur liste noire pour le processus, réinitialisé au redémarrage ; échec complet bascule en heuristique et ne bloque jamais.'},
+  dm_restart:{zh:'环境变量属于进程环境：配置后需重启网关生效（菜单栏 App：Quit → 重新打开）', en:'Env vars bind to the process: restart the gateway to apply (menu-bar app: Quit → reopen)',
+             ko:'환경변수는 프로세스에 고정: 게이트웨이 재시작 필요(메뉴바 앱: Quit → 재실행)', ja:'環境変数はプロセス単位：ゲートウェイ再起動で反映（メニューバーApp：Quit → 再起動）',
+             es:'Las variables ligan al proceso: reinicie la puerta (App de barra: Quit → reabrir)',
+             fr:'Les variables l\'environnement au processus : redémarrez la passerelle (App de barre : Quit → rouvrir)'},
   sse_conn:  {zh:'SSE 连接中…', en:'SSE connecting…', ko:'SSE 연결 중…', ja:'SSE 接続中…', es:'Conectando SSE…', fr:'Connexion SSE…'},
   sse_ok:    {zh:'SSE 已连接', en:'SSE connected', ko:'SSE 연결됨', ja:'SSE 接続済み', es:'SSE conectado', fr:'SSE connecté'},
   sse_retry: {zh:'SSE 重连中…', en:'SSE reconnecting…', ko:'SSE 재연결 중…', ja:'SSE 再接続中…', es:'Reconectando SSE…', fr:'Reconnexion SSE…'},
@@ -478,6 +538,34 @@ const T = {
   pv_scan: {zh:'全局扫描', en:'Scan all', ko:'전체 스캔', ja:'全スキャン', es:'Escanear todo', fr:'Tout scanner'},
   pv_prov_obs: {zh:'Provider 测', en:'Provider live', ko:'Provider 실측', ja:'Provider 実測', es:'Proveedor en vivo', fr:'Provider direct'},
   pv_reconcile: {zh:'对账', en:'Sync', ko:'동기화', ja:'同期', es:'Sincronizar', fr:'Synchroniser'},
+  pv_restore_models:{zh:'恢复模型', en:'Restore models', ko:'모델 복구', ja:'モデル復元', es:'Restaurar modelos', fr:'Restaurer modèles'},
+  tags_card:{zh:'模型标签与近 100 请求分布', en:'Model tags & last-100 distribution', ko:'모델 태그 및 최근 100건 분포', ja:'モデルタグと直近100件の分布', es:'Etiquetas y distribución de las últimas 100', fr:'Étiquettes et distribution des 100 dernières'},
+  tags_hint:{zh:'能力/价位标签默认自动推导，可手动改（改后立即用于分布统计与价格层闸门）', en:'capability/price tags are auto-derived; override to taste (used by the distributions & price-tier gate)', ko:'능력/가격 태그는 자동 추론, 수동 변경 가능', ja:'能力/価格タグは自動推定、手動変更可', es:'etiquetas auto; se pueden sobrescribir', fr:'étiquettes auto, modifiables'},
+  dist_diff:{zh:'难度分布', en:'Difficulty', ko:'난이도 분포', ja:'難易度分布', es:'Dificultad', fr:'Difficulté'},
+  dist_cap:{zh:'能力分布', en:'Capability', ko:'능력 분포', ja:'能力分布', es:'Capacidad', fr:'Capacité'},
+  dist_price:{zh:'价位分布', en:'Price tier', ko:'가격대 분포', ja:'価格帯分布', es:'Nivel de precio', fr:'Niveau de prix'},
+  tags_edit:{zh:'标签编辑', en:'Edit tags', ko:'태그 편집', ja:'タグ編集', es:'Editar etiquetas', fr:'Modifier'},
+  tags_auto:{zh:'自动', en:'auto', ko:'자동', ja:'自動', es:'auto', fr:'auto'},
+  tags_reset:{zh:'恢复自动', en:'Reset', ko:'초기화', ja:'自動に戻す', es:'Restablecer', fr:'Réinitialiser'},
+  tags_basis:{zh:'分位基准：可用 {u} / 全部 {n}（冷却/闸门/无凭据的模型动态排除）', en:'quantile basis: usable {u} / {n} (cooling, gated or keyless models excluded dynamically)', ko:'분위 기준: 사용 가능 {u}/{n}', ja:'分位基準：利用可能 {u}/{n}', es:'base de cuantiles: usables {u}/{n}', fr:'base des quantiles : utilisables {u}/{n}'},
+  ur_no_key:{zh:'无凭据', en:'no key', ko:'키 없음', ja:'キーなし', es:'sin clave', fr:'sans clé'},
+  ur_deleted:{zh:'已删除', en:'deleted', ko:'삭제됨', ja:'削除済み', es:'eliminado', fr:'supprimé'},
+  ur_gated:{zh:'配额闸门', en:'quota gated', ko:'쿼터 차단', ja:'クォータ遮断', es:'cuota bloqueada', fr:'quota bloqué'},
+  ur_cooling:{zh:'冷却中', en:'cooling', ko:'쿨링', ja:'クーリング', es:'enfriando', fr:'en refroidissement'},
+  act_basis:{zh:'活跃集（可路由）：{a} / {n} · 50 = 新发布保底 20 + 最近使用(14天内) 30，两侧不足互借；开启新模型自动顶掉最低分者', en:'active (routable): {a} / {n} · 50 = newest-release quota 20 + recently-used (14d) 30, borrowed across when short; enabling swaps out the lowest-ranked', ko:'활성(라우팅 가능): {a}/{n} · 50 = 신규 20 + 최근 사용 30', ja:'アクティブ：{a}/{n} · 50 = 新着枠 20 + 直近使用 30', es:'activos: {a}/{n} · 50 = nuevos 20 + usados 30', fr:'actifs : {a}/{n} · 50 = nouveaux 20 + récents 30'},
+  act_on:{zh:'已启用', en:'active', ko:'활성', ja:'有効', es:'activo', fr:'actif'},
+  act_off:{zh:'启用', en:'enable', ko:'활성화', ja:'有効化', es:'activar', fr:'activer'},
+  act_disable:{zh:'停用', en:'disable', ko:'비활성', ja:'無効化', es:'desactivar', fr:'désactiver'},
+  act_replaced:{zh:'已启用，顶掉 {x}', en:'enabled, replaced {x}', ko:'활성화, {x} 교체', ja:'有効化、{x} を置換', es:'activado, reemplazó a {x}', fr:'activé, a remplacé {x}'},
+  au_filtered_all:{zh:'被剔除候选（全量）', en:'Filtered candidates (all)', ko:'제외 후보(전체)', ja:'除外候補（全件）', es:'Candidatos filtrados (todos)', fr:'Candidats filtrés (tous)'},
+  ratio_title:{zh:'比例控制器（目标 7:2:1，实际 vs 目标 + 当前惩罚乘子）', en:'Ratio controller (target 7:2:1 — observed vs target + penalty multipliers)', ko:'비율 컨트롤러(목표 7:2:1)', ja:'比率コントローラ（目標 7:2:1）', es:'Controlador de proporción (objetivo 7:2:1)', fr:'Contrôleur de ratio (cible 7:2:1)'},
+  ratio_warm:{zh:'样本不足，冷启动中立', en:'warming up (neutral)', ko:'예열 중', ja:'ウォームアップ中', es:'calentando', fr:'en chauffe'},
+  tag_cap_basic:{zh:'简单', en:'basic', ko:'단순', ja:'簡単', es:'básico', fr:'simple'},
+  tag_cap_standard:{zh:'一般', en:'standard', ko:'보통', ja:'ふつう', es:'estándar', fr:'standard'},
+  tag_cap_powerful:{zh:'强大', en:'powerful', ko:'강력', ja:'強力', es:'potente', fr:'puissant'},
+  tag_price_cheap:{zh:'便宜', en:'cheap', ko:'저렴', ja:'安価', es:'barato', fr:'bon marché'},
+  tag_price_medium:{zh:'中等', en:'medium', ko:'중간', ja:'中価格', es:'medio', fr:'moyen'},
+  tag_price_premium:{zh:'贵', en:'premium', ko:'비쌈', ja:'高価', es:'caro', fr:'cher'},
   pv_confirm_delete_disc: {zh:'删除该扫描发现的 Provider？其全部模型将移出目录（重启/扫描不会自动加回，可重新扫描恢复）。', en:"Delete this scanned provider? All its models leave the catalog (won't come back on restart/scan; re-add via scan after restore).", ko:'이 스캔된 Provider를 삭제하시겠습니까? 모든 모델이 목록에서 제거됩니다(재스캔으로 복원 가능).', ja:'このスキャン検出 Provider を削除しますか？全モデルがカタログから削除されます（再スキャンで復元可能）。', es:'¿Eliminar este provider escaneado? Todos sus modelos salen del catálogo (restaurable re-escaneando).', fr:'Supprimer ce provider scanné ? Tous ses modèles quittent le catalogue (restaurable en re-scan).'},
   pv_5h: {zh:'5小时', en:'5 hours', ko:'5시간', ja:'5時間', es:'5 horas', fr:'5 heures'},
   pv_week: {zh:'一周', en:'weekly', ko:'주간', ja:'週', es:'semana', fr:'semaine'},
@@ -947,6 +1035,24 @@ function renderAutopsy(e){
         '<span class="fu-n">'+st.n+'</span></div><span class="fu-lb">'+esc(st.lb)+'</span></div>');
     });
     L.push('</div>');
+  }
+
+  // ③.5 被剔除候选（全量，按原因分组）——reason 字符串只展示前 3 条，这里给全量
+  const flAll = e.filtered || [];
+  if (flAll.length) {
+    const groups = {};
+    flAll.forEach(x => {
+      const c = x.cause || '';
+      const key = c.split(' (')[0];
+      (groups[key] = groups[key] || []).push(x.model);
+    });
+    let rows = Object.entries(groups)
+      .sort((a, b) => b[1].length - a[1].length)
+      .map(([k, ms]) =>
+        '<details style="margin:2px 0"><summary class="dim2" style="cursor:pointer">'+esc(k)+' ×'+ms.length+'</summary>'+
+        '<div class="dim2" style="font-size:10px;padding-left:12px;max-height:160px;overflow:auto">'+
+        ms.map(esc).join('<br>')+'</div></details>').join('');
+    L.push('<div class="au-sec au-sec-t">'+esc(t('au_filtered_all'))+' ('+flAll.length+')</div>'+rows);
   }
 
   // ④ 动态权重（横条 + 完整计算过程：基准 → 难度联动实代 → 配额感知 → 归一化）
@@ -1444,9 +1550,22 @@ function renderProviders(){
     // 实时状态（providersStatus 轮询数据，按 key 匹配）
     const stat = ((state.providersStatus||{}).providers||[]).find(s => s.key === p.key) || {};
     const onCool = stat.cooldown_remaining_ms && stat.cooldown_remaining_ms > 0;
+    // 倒计时档位（用户裁决）：≥24h → xxdxxhxxm；≥1h → xxhxxm；<1h → xxmxxs
+    const fmtCd = (ms) => {
+      let s = Math.max(0, Math.floor(ms/1000));
+      if (s >= 86400) return Math.floor(s/86400)+'d'+Math.floor(s%86400/3600)+'h'+Math.floor(s%3600/60)+'m';
+      if (s >= 3600) return Math.floor(s/3600)+'h'+Math.floor(s%3600/60)+'m';
+      if (s >= 60) return Math.floor(s/60)+'m'+(s%60)+'s';
+      return s+'s';
+    };
     const statusBadge = onCool
-      ? '<span class="la f">⏳ '+Math.ceil(stat.cooldown_remaining_ms/1000)+'s</span>'
+      ? '<span class="la f">⏳ '+fmtCd(stat.cooldown_remaining_ms)+'</span>'
       : '<span class="la c">✓</span>';
+    // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口
+    const blocked = stat.blocked_models || [];
+    const unblockBtn = blocked.length
+      ? '<button class="lang-btn" data-pv-unblock="'+esc(p.key)+'" style="border-color:var(--red);color:var(--red)" title="'+esc(blocked.join(', '))+'">⛔ '+blocked.length+' · '+esc(t('pv_restore_models'))+'</button>'
+      : '';
     // 周月窗口展示
     const wk = p.windows && p.windows['weekly'];
     const mo = p.windows && p.windows['monthly'];
@@ -1466,7 +1585,7 @@ function renderProviders(){
       : '';
     return '<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px'+(p.disabled?';opacity:.5':'')+'">'
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
-      +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge
+      +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge+unblockBtn
       +   ' <span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(kindBadge)+'</span>'
       +   summary + disabled + docs + winInfo + paygBal
       +   '<span style="margin-left:auto"></span>'
@@ -1488,6 +1607,10 @@ function renderProviders(){
   cont.querySelectorAll('[data-pv-del-disc]').forEach(b => b.addEventListener('click', () => confirmDeleteDiscovered(b.dataset.pvDelDisc, b.dataset.pvUrl)));
   cont.querySelectorAll('[data-pv-reconcile]').forEach(b => b.addEventListener('click', () => reconcileProvider(b.dataset.pvReconcile)));
   cont.querySelectorAll('[data-pv-restore]').forEach(b => b.addEventListener('click', () => restoreProvider(b.dataset.pvRestore)));
+  cont.querySelectorAll('[data-pv-unblock]').forEach(b => b.addEventListener('click', () => {
+    fetch('/api/health/clear', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({provider: b.dataset.pvUnblock})}).then(() => refresh());
+  }));
 }
 function confirmDeleteProvider(key){
   if (!confirm(t('pv_confirm_delete'))) return;
@@ -1646,7 +1769,95 @@ document.getElementById('pv-scan-btn').addEventListener('click', () => {
     pollScanProgress();
   }).catch(() => { btn.textContent = t('pv_scan'); btn.disabled = false; });
 });
-function renderPlans(){ renderProviders(); }
+function renderPlans(){ renderProviders(); renderTags(); }
+async function loadTags(){ try { const j = await (await fetch('/api/model-tags')).json(); state.modelTags = j.models || []; renderTags(); } catch(_){} }
+function renderTags(){
+  const box = document.getElementById('tags-dist');
+  const list = document.getElementById('tags-list');
+  if (!box || !list) return;
+  const d = (state.statsRoot && state.statsRoot.last100) || {};
+  const bar = (label, obj, keys, colors) => {
+    const total = keys.reduce((a,k)=>a+(obj[k]||0),0) || 1;
+    const rows = keys.map((k,i)=>{
+      const v = obj[k]||0, pct = Math.round(100*v/total);
+      return '<div style="display:flex;align-items:center;gap:6px;margin:2px 0;font-size:11px">'
+        + '<span style="min-width:64px;color:var(--dim)">'+esc(k)+'</span>'
+        + '<div style="width:120px;height:6px;background:var(--row-line);border-radius:3px">'
+        + '<div style="width:'+pct+'%;height:6px;background:'+colors[i]+';border-radius:3px"></div></div>'
+        + '<span style="min-width:52px;text-align:right">'+v+' · '+pct+'%</span></div>';
+    }).join('');
+    return '<div><div style="font-size:11px;color:var(--dim);margin-bottom:2px">'+esc(label)+' (n='+total+')</div>'+rows+'</div>';
+  };
+  box.innerHTML =
+    bar(t('dist_diff'), d.difficulty||{}, ['l1','l2','l3'], ['var(--green)','var(--amber)','var(--red)']) +
+    bar(t('dist_cap'), d.capability||{}, ['basic','standard','powerful'], ['var(--green)','var(--blue)','var(--amber)']) +
+    bar(t('dist_price'), d.price_tier||{}, ['cheap','medium','premium'], ['var(--green)','var(--blue)','var(--red)']);
+  // S5 比例控制器观测（目标 7:2:1：实际占比 + 当前惩罚乘子）
+  const r = (state.statsRoot && state.statsRoot.ratio) || null;
+  if (r) {
+    const tg = r.target || {}, ob = r.observed || {}, pn = r.penalties || {};
+    const row = (k, col) => {
+      const o = Math.round(100 * (ob[k] || 0));
+      const tt = Math.round(100 * (tg[k] || 0));
+      const p = +(pn[k] || 1);
+      return '<div style="display:flex;align-items:center;gap:6px;margin:2px 0;font-size:11px">'
+        + '<span style="min-width:56px;color:var(--dim)">'+esc(k)+'</span>'
+        + '<div style="width:110px;height:6px;background:var(--row-line);border-radius:3px">'
+        + '<div style="width:'+o+'%;height:6px;background:'+col+';border-radius:3px"></div></div>'
+        + '<span style="min-width:96px">'+o+'% / '+tt+'%</span>'
+        + '<span style="min-width:52px;color:'+(p>1.02?'var(--red)':p<0.98?'var(--green)':'var(--dim)')+'">×'+p.toFixed(2)+'</span></div>';
+    };
+    box.innerHTML += '<div><div style="font-size:11px;color:var(--dim);margin-bottom:2px">'+esc(t('ratio_title'))+' (n='+(r.samples||0)+')</div>'
+      + row('cheap', 'var(--green)') + row('medium', 'var(--blue)') + row('premium', 'var(--red)')
+      + (r.samples < 40 ? '<div class="dim2" style="font-size:10px">'+esc(t('ratio_warm'))+'</div>' : '')
+      + '</div>';
+  }
+  const models = state.modelTags || [];
+  const usableN = models.filter(m => m.usable !== false).length;
+  const activeN = models.filter(m => m.active).length;
+  list.innerHTML = '<div class="dim2" style="font-size:10px;margin:2px 0 4px">'
+    + esc(t('tags_basis').replace('{u}', usableN).replace('{n}', models.length)) + '</div>'
+    + '<div class="dim2" style="font-size:10px;margin:0 0 6px">'
+    + esc(t('act_basis').replace('{a}', activeN).replace('{n}', models.length)) + '</div>'
+    + models.map(m => {
+    // 显示本地化标签（值保持枚举）；能力与价位分属不同词表，避免同形混淆
+    const label = (kind, v) => t('tag_' + (kind === 'capability' ? 'cap_' : 'price_') + v);
+    const sel = (cur, opts) => '<select data-tag-model="'+esc(m.model)+'" data-tag-kind="'+ (opts.kind) +'" style="font-size:11px">'
+      + opts.vals.map(v => '<option value="'+v+'"'+(v===cur?' selected':'')+'>'+esc(label(opts.kind, v))+'</option>').join('')
+      + '</select>';
+    const ur = m.unusable_reason;
+    const urTxt = ur ? t('ur_' + (ur === 'no-key' ? 'no_key' : ur === 'quota-gated' ? 'gated' : ur === 'cooldown' ? 'cooling' : 'deleted')) : '';
+    const dim = !!ur;
+    return '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:11px'+(dim?';opacity:.45':'')+'"'
+      + (dim ? ' title="' + esc(urTxt) + '"' : '') + '>'
+      + '<span style="flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.model)+'</span>'
+      + (dim ? '<span class="pbadge" style="color:var(--red);border-color:var(--red)">'+esc(urTxt)+'</span>' : '')
+      + (m.active
+          ? '<span class="pbadge" style="color:var(--green);border-color:var(--green)" title="'+esc(t('act_on'))+'">'+esc(t('act_on'))+'</span>'
+          : '<button class="lang-btn" data-act="'+esc(m.model)+'" data-act-on="1" style="font-size:10px;padding:0 6px">'+esc(t('act_off'))+'</button>')
+      + sel(m.capability, {kind:'capability', vals:['basic','standard','powerful']})
+      + sel(m.price_tier, {kind:'price_tier', vals:['cheap','medium','premium']})
+      + '<span style="color:var(--dim);min-width:34px">'+esc(t('tags_auto'))+':'+esc(m.capability_auto.slice(0,4))+'</span>'
+      + '<button class="lang-btn" data-tag-reset="'+esc(m.model)+'" style="font-size:10px;padding:0 6px">'+esc(t('tags_reset'))+'</button>'
+      + (m.active ? '<button class="lang-btn" data-act="'+esc(m.model)+'" data-act-on="0" style="font-size:10px;padding:0 6px">'+esc(t('act_disable'))+'</button>' : '')
+      + '</div>';
+  }).join('');
+  list.querySelectorAll('select[data-tag-model]').forEach(sel => sel.addEventListener('change', () => {
+    const body = { model: sel.dataset.tagModel };
+    body[sel.dataset.tagKind] = sel.value;
+    fetch('/api/model-tags', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)})
+      .then(() => { loadTags(); refresh(); });
+  }));
+  list.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
+    fetch('/api/models/active', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({model: b.dataset.act, action: b.dataset.actOn === '1' ? 'enable' : 'disable'})})
+      .then(r => r.json()).then(j => { if (j.replaced) console.info(t('act_replaced').replace('{x}', j.replaced)); loadTags(); refresh(); });
+  }));
+  list.querySelectorAll('[data-tag-reset]').forEach(b => b.addEventListener('click', () => {
+    fetch('/api/model-tags', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({model: b.dataset.tagReset, reset: true})})
+      .then(() => { loadTags(); refresh(); });
+  }));
+}
 const TREND_COLORS = ['#58a6ff','#3fb950','#d29922','#f85149','#8957e5','#39d2c0'];
 function trendSvg(series, pick, fmt, y0forced) {
   const W = 260, H = 78, PAD = 4;
@@ -1722,12 +1933,14 @@ document.getElementById('pw-btn').addEventListener('click', () => {
 
 async function refresh(){
   try {
-    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, statR] = await Promise.all([
+    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, statR, liveR] = await Promise.all([
       fetch('/api/stats?window='+encodeURIComponent(state.win)), fetch('/api/health'), fetch('/api/quota'), fetch('/api/benchmarks'),
       fetch('/api/policy-weights'), fetch('/api/plans'),
       fetch('/api/trends?window='+encodeURIComponent(state.twin)),
-      fetch('/api/providers'), fetch('/api/providers/status')]);
-    state.stats  = (await statsR.json()).models  || {};
+      fetch('/api/providers'), fetch('/api/providers/status'), fetch('/api/live')]);
+    const statsRoot = await statsR.json();
+    state.statsRoot = statsRoot;
+    state.stats  = statsRoot.models  || {};
     state.health = (await healthR.json()).models || {};
     state.quota  = (await quotaR.json()).windows || {};
     state.bench  = (await benchR.json()) || {};
@@ -1736,6 +1949,7 @@ async function refresh(){
     state.trends = (await trendsR.json()).series || [];
     state.providers = (await provR.json()).providers || [];
     state.providersStatus = (await statR.json());
+    state.decision = (await liveR.json()).decision || null;
     renderPlans();
     renderTrends();
     renderChips();
@@ -1744,7 +1958,27 @@ async function refresh(){
     renderDyn();
     renderHealthQuota();
     renderWheel();
+    renderDecisionBanner();
+    renderTags();
   } catch(_){}
+}
+
+function renderDecisionBanner(){
+  const b = document.getElementById('dm-banner');
+  const d = (typeof state !== 'undefined' && state.decision) || null;
+  if (!d || d.status === 'ok') { b.style.display = 'none'; return; }
+  const parts = [`<b>${t(d.status === 'stale' ? 'dm_stale' : 'dm_missing')}</b>`];
+  if (d.status === 'stale') {
+    parts.push(`<span class="dm-row">${t('dm_restart')}</span>`);
+  } else {
+    parts.push(`<span class="dm-row">${t('dm_envline')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_row_jev')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_row_laya')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_row_openai')}</span>`);
+    parts.push(`<span class="dim2">${t('dm_chain')}</span>`);
+  }
+  b.innerHTML = parts.join('');
+  b.style.display = 'flex';
 }
 
 const es = new EventSource('/api/stream');
@@ -1799,6 +2033,7 @@ function applyLang(){
   sel.value = lang;
   updateSse();
   renderChips(); renderDyn(); renderHealthQuota(); renderWheel();
+  renderDecisionBanner();
   // review：feed 与解剖面板内容含 t() 文案——语言切换需重建/重渲染
   loadFeed();
   if (selectedEvent) renderAutopsy(selectedEvent);
@@ -1818,7 +2053,7 @@ async function loadFeed(){
     if (Array.isArray(evs)) evs.forEach(addRow);
   } catch(_){}
 }
-(async () => { await loadFeed(); })();
+(async () => { await loadFeed(); await loadTags(); })();
 applyLang();
 refresh();
 setInterval(refresh, 3000);

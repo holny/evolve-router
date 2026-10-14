@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-111%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)](#development)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -20,6 +20,27 @@
 
 ![EvolveRouter architecture](docs/assets/architecture.svg)
 
+
+## Price-aware routing: spend where it matters, by construction
+
+Difficulty is judged, then **calibrated to a target distribution (70% easy / 20% medium / 10% hard)",
+and mapped onto **capability and price tiers** so the expensive models only serve the hard tail:
+
+| Layer | What it does |
+|---|---|
+| **Difficulty calibration** | Rolling-quantile calibration reshapes the judge's raw difficulty to the 7:2:1 target (a biased judge can't flood the router with "hard" tasks) |
+| **Model tags (capability / price)** | Auto-derived by quantile (70/20/10 in both dimensions, computed over the **currently usable pool** only — cooling / quota-gated / keyless models are excluded dynamically), user-editable in the dashboard |
+| **Price-tier gate** | L1 tasks may only use `cheap`; L2 up to `medium`; L3 opens everything — with an **inversion exception** (a pricier model whose effective cost ≤ the allowed pool's median passes) and **quality-first fallback** (if the gate would starve a hard task, it relaxes before degrading quality) |
+| **Effective cost** | Official price sheets (per-plan credit multipliers, per-token CNY/USD, cache-hit vs miss, **peak/off-peak windows**) — cache-hit input can be ~1/50 of a miss, so warm sessions are never needlessly switched (**cache-economy sticky**) |
+| **Ratio controller** | Watches the *actual* chosen-tier mix and nudges it back toward 7:2:1 (soft cost multipliers on the over-used tier) |
+| **Active set (50)** | Only the *newest released* (20-slot floor by release date) plus *recently used* (within 14 days) models are routable; the rest stay visible in the dashboard and can be enabled with one click — enabling swaps out the lowest-ranked slot |
+| **Supply awareness** | Subscription quota (expires!) ranks above pay-as-you-go spend; API-queryable providers are refreshed by a 90s quota watchdog, non-API providers are probed with real requests every 5-10 min |
+
+`evo-router report` replays your event log and prints the end-to-end KPIs (difficulty / capability / price distribution vs the 7:2:1 target, premium-on-easy count, cache-hit rate, average cost).
+
+## Decision-model slots: JEV > LAYA > OPENAI
+
+The judge is pluggable and configurable per slot (`DECISION_MODEL_*` env vars); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
 
 ## Why not another proxy
 
@@ -214,15 +235,17 @@ Open `http://127.0.0.1:8787/`:
 ## How routing decisions work
 
 ```
-request → digest signals → session stickiness check
-        → dual judge (decision model + multilingual heuristic, take-conservative fusion)
+request → digest signals → session stickiness check (+ cache-economy keep)
+        → judge slot chain (JEV > LAYA > OPENAI, + multilingual heuristic)
+        → difficulty calibration (rolling quantiles → 70/20/10)
         → route advisor (top-8 candidates, anonymized, decision model picks one directly)
-        → hard filters (context window / vision / circuit breaking / quota)
-        → dynamic weights (difficulty-linked × quota-aware)
-        → five-factor score × flywheel bias
+        → hard filters (context window / vision / circuit breaking / quota gate /
+                        active set of 50 / price-tier gate)
+        → dynamic weights (difficulty-linked × quota-aware) × ratio-controller tier multipliers
+        → five-factor score (effective cost = official prices × cache-hit × peak windows) × flywheel bias
         → Thompson exploration (Beta posterior sampling — uncertainty-driven)
         → route → fallback chain (3) → quality cascade
-        → observe outcome → feed the flywheel
+        → observe outcome → feed the flywheel (+ ratio observation)
 ```
 
 Self-evolution is grounded in recent routing research, adopted critically:

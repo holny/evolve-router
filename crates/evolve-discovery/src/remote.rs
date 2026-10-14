@@ -99,6 +99,11 @@ pub async fn fetch_provider_models(
             speed_tier: 0.6,
             source: Source::Remote,
             source_note: Some("remote /models".into()),
+            // 发布时间：OpenAI 风格 /models 的 `created`（epoch 秒）优先
+            release_ts: m.get("created")
+                .and_then(|v| v.as_u64())
+                .filter(|v| *v > 0)
+                .map(|s| s * 1000),
             ..Default::default()
         });
     }

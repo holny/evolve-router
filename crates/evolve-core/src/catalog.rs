@@ -58,6 +58,19 @@ impl Catalog {
                     if u.upstream_model.is_empty() {
                         u.upstream_model = d.upstream_model.clone();
                     }
+                    // 发布时间同源继承（2026-10 修）：用户 [[models]] 条目（如
+                    // zhipuai-coding-plan/glm-5.3-flash）此前只继承连接事实，
+                    // 拿不到 discovered 已 enrich 的 release_ts → 活跃集排序失准
+                    if u.release_ts.is_none() {
+                        u.release_ts = d.release_ts;
+                    }
+                }
+                // user 条目同样享受全局模型能力表覆盖（用户裁决：能力按模型名）
+                if !u.tiers_explicit
+                    && let Some(t) = crate::plans::tier_for_model(&u.upstream_model)
+                        .or_else(|| crate::plans::tier_for_model(&u.id))
+                {
+                    u.tiers = t;
                 }
                 u
             })

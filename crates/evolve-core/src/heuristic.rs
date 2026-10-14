@@ -31,6 +31,29 @@ const STAKES_KW: &[&str] = &[
     "支付", "付款", "生产环境", "生产库", "删除", "删库", "法律", "合同", "医疗", "安全漏洞", "密钥", "密码",
     "本番", "결제", "삭제",
 ];
+/// 深水代码信号：架构级改动/并发/性能/迁移——真正的难度来源（区别于普通改代码）
+const DEEP_CODE_KW: &[&str] = &[
+    "architect", "architecture", "refactor", "redesign", "migrate", "migration", "concurrency",
+    "race condition", "deadlock", "distributed", "consistency", "idempotent", "throughput",
+    "latency optimization", "benchmark", "profil", "optimi", "scal", "sharding", "replication",
+    "cache invalidation", "backpressure", "transaction", "lock free", "memory leak",
+    "架构", "重构", "设计模式", "迁移", "并发", "竞态", "死锁", "分布式", "一致性", "幂等",
+    "优化", "性能", "调优", "压测", "扩容", "分片", "事务", "内存泄漏",
+    "아키텍처", "리팩터", "アーキテクチャ", "設計",
+];
+/// 深水推理信号：证明/推导/权衡取舍
+const DEEP_REASON_KW: &[&str] = &[
+    "prove", "proof", "derive", "theorem", "complexity analysis", "trade-off", "tradeoff",
+    "root cause", "why does it fail", "correctness", "formal",
+    "证明", "推导", "定理", "复杂度", "权衡", "取舍", "根因", "为什么失败", "正确性",
+    "증명", "証明",
+];
+/// 排查类信号：调试未知问题（比常规编辑难，但弱于架构级）
+const INVESTIGATE_KW: &[&str] = &[
+    "debug", "investigate", "troubleshoot", "diagnose", "reproduce", "flaky", "intermittent",
+    "排查", "定位", "调试", "复现", "偶发", "时好时坏",
+    "デバッグ", "디버그",
+];
 /// Minimal everyday-chat markers per script: chat/lookup domains only.
 /// Domain work is detected by L0 signals (code density) + ASCII tech terms.
 const CHAT_KW: &[&str] = &[
@@ -79,19 +102,33 @@ impl HeuristicJudge {
         let margin = (ranked[0].1 - ranked[1].1).max(0.0);
         let domain_confidence = (0.4 + margin.min(3.0) / 3.0 * 0.4).min(0.8);
 
-        let mut difficulty = 0.0f32;
-        if len > 60 { difficulty += 0.4; }
-        if len > 300 { difficulty += 0.4; }
-        if len > 1500 { difficulty += 0.4; }
-        difficulty += features.code_density * 1.2;
-        if features.tool_count > 3 { difficulty += 0.4; }
-        if features.tool_count > 12 { difficulty += 0.4; }
-        difficulty += kw_score(text, STEP_KW) * 0.2;
-        if kw_score(first, CODE_KW) >= 2.0 { difficulty += 0.3; }
-        if features.est_input_tokens > 30_000 { difficulty += 0.5; }
-        if features.est_input_tokens > 80_000 { difficulty += 0.8; }
+        // ── 难度评估（2026-10 重构）──────────────────────────────────────────
+        // 旧公式把"长度/工具数/上下文 token/代码密度"当难度累加，agent 流量
+        // 必中多项 → 实测 96% 顶格 L3（618/642 事件），贵模型被滥用。
+        // 新原则：结构量（长度、工具、上下文、代码密度）不是难度信号——它们是
+        // agent 工作流的常态（L2）；难度只由任务本身的复杂度信号决定，
+        // 且以 L2 为默认锚做分档，而不是从 0 无界累加。
+        let deep_code = kw_score(text, DEEP_CODE_KW);            // 架构/重构/并发/性能
+        let steps = kw_score(text, STEP_KW);                     // 多步流程
+        let stakes = kw_score(text, STAKES_KW);                  // 高风险（钱/生产/法务）
+        let reasoning = kw_score(text, DEEP_REASON_KW);          // 证明/推导/权衡
+        let investigate = kw_score(text, INVESTIGATE_KW);        // 调试/排查未知
 
-        let session_depth = if digest.session_tools_seen > 8 || first.chars().count() > 200 { 1.6 } else { 0.7 };
+        // 分档锚定（用户裁决：真实分布 7:2:1——多数 agent 迭代是简单任务）：
+        // L1 基线 0.5 → 有实际代码工作升 L2 低段 1.1 → 深水信号逐级升到 L3/L4
+        let code_work = kw_score(text, CODE_KW) >= 2.0 || features.code_density > 0.15 || deep_code >= 1.0;
+        let mut difficulty: f32 = 0.5; // L1 基线
+        if code_work { difficulty = 1.1; }
+        if deep_code >= 1.0 { difficulty += 0.6; }
+        if deep_code >= 3.0 { difficulty += 0.4; }
+        if steps >= 2.0 { difficulty += 0.2; }
+        if steps >= 4.0 { difficulty += 0.2; }
+        if reasoning >= 1.0 { difficulty += 0.4; }
+        if investigate >= 2.0 { difficulty += 0.2; }
+        if stakes >= 1.0 { difficulty += 0.6; }
+        // 会话延续的复杂度加成：封顶 +0.4（原先无界 ×0.5 会二次放大；
+        // engine 侧不再叠加同项，见 engine.rs difficulty_eff）
+        let session_depth: f32 = if digest.session_tools_seen > 8 || first.chars().count() > 200 { 1.6 } else { 0.7 };
         let overlap = digest.overlap_ratio;
         let local_rel = if digest.topic_shift_marker {
             0.1
@@ -104,7 +141,7 @@ impl HeuristicJudge {
         };
         let session_relevance = local_rel;
         let relevance = session_relevance;
-        difficulty += relevance * (session_depth * 0.5);
+        difficulty += (relevance * session_depth * 0.25).min(0.4);
         let difficulty = difficulty.clamp(0.0, 3.0);
 
         let is_trivial = if len < 30 && features.code_density < 0.05 && features.tool_count <= 1 {
@@ -135,3 +172,4 @@ impl HeuristicJudge {
         }
     }
 }
+

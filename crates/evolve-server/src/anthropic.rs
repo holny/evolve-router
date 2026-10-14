@@ -81,6 +81,8 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 quota: &quota_view,
                 plan_pressure: &plan_pressure,
                 redact: st.config.decision.redact,
+                price_tier_of: &crate::meta::price_tier_map(&st),
+                active: &crate::meta::active_id_set(&st),
             };
             let d = st.engine.decide(input);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
@@ -314,9 +316,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             {
                 if !failure_windows.is_empty() {
                     st.quota.observe(&format!("{cand}\u{1f}{key_idx}"), failure_windows.clone());
-                    if let Some(pk) = evolve_core::plans::plan_key_for(&record.base_url) {
-                        st.quota.observe_provider(pk, &failure_windows);
-                    }
+                    st.quota.observe_provider(&record.provider, &failure_windows);
                 }
             }
             st.health.mark_failure(&health_id, failure);
@@ -340,9 +340,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         let windows = evolve_memory::QuotaLedger::parse_headers(resp.headers());
         st.quota.observe(&success_health_id, windows.clone());
         // provider 实时配额（panel 配额展示以此为准）
-        if let Some(pk) = evolve_core::plans::plan_key_for(&record.base_url) {
-            st.quota.observe_provider(pk, &windows);
-        }
+        st.quota.observe_provider(&record.provider, &windows);
         decision.chosen = cand.clone();
         decision.upstream_model = record.upstream_model.clone();
         decision.id = format!("{}-{}", decision.id, skipped.len());

@@ -66,7 +66,18 @@ fn test_config(upstream_port: u16) -> FileConfig {
         decision: DecisionCfg { backend: "heuristic".into(), redact: true },
         catalog: CatalogCfg::default(),
         quota: QuotaCfg::default(),
-        data: DataCfg { dir: std::env::temp_dir().join(format!("mr-test-{}", std::process::id())) .to_string_lossy().into_owned() },
+        // 每测试独立 data 目录（活跃集/事件/覆盖读同一目录会跨测试污染：
+        // 并行测试共享 events → 活跃集把 mock 模型过滤掉，曾导致路由断言失败）
+        data: DataCfg {
+            dir: {
+                static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::env::temp_dir()
+                    .join(format!("mr-test-{}-{}", std::process::id(), n))
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        },
         discovery: DiscoveryCfg { agents: vec![] },
         benchmarks: BenchmarksCfg { enabled: false, interval_hours: 24, sources: vec![] },
         telemetry: Default::default(),
@@ -113,7 +124,7 @@ async fn trivial_message_routes_to_cheapest() {
     let app = build_router(build_state(test_config(port)));
     let (status, headers, raw) = send(app, chat_request("auto", json!("你好"), json!({}))).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers["x-ev-model"], "mini");
+    assert_eq!(headers["x-ev-model"], "mini", "reason: {}", headers["x-ev-reason"].to_str().unwrap_or(""));
     assert_eq!(json_body(&raw)["model"], "mock-mini", "upstream must receive the routed model id");
 }
 

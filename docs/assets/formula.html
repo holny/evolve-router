@@ -27,6 +27,14 @@
 <div class="sub">Every term traces back to a named quantity. Flywheel and exploration can only fine-tune — the decision model's judgment is the ceiling.</div>
 
 <div class="card">
+<h2>0 · Price-aware stack <span class="tag">difficulty → tiers → gate → cache/economics (2026-10)</span></h2>
+$$d_{\mathrm{eff}} = \mathrm{calib}(d_{\mathrm{raw}})\;\xrightarrow{\;\text{quantile reshape (70/20/10)}\,}\;\text{L1}|\text{L2}|\text{L3}$$
+$$\text{tier}_{\mathrm{max}} = \begin{cases} \text{cheap} & d_{\mathrm{eff}} \le 0.8\\ \text{cheap}|\text{medium} & d_{\mathrm{eff}} \le 2.0\\ \text{all} & \text{otherwise}\end{cases}\qquad \text{gate: } \text{tier}(m) \le \text{tier}_{\mathrm{max}} \ \lor\ \text{cost}(m) \le \operatorname{median}_{\text{allowed family}} \text{cost}$$
+$$\text{cost}(m) = \big[\,p^{\mathrm{miss}}_{\mathrm{in}}(1-h) + p^{\mathrm{hit}}_{\mathrm{in}} h\,\big]\cdot T_{\mathrm{in}} + p_{\mathrm{out}} T_{\mathrm{out}} \times \text{peak}(t) \qquad \text{sticky keeps a warm-cache model unless a rival is } &gt;15\% \text{ cheaper}$$
+<div class="note">$d_{\mathrm{eff}}$ is reshaped by a rolling-quantile calibrator (target 70% easy / 20% medium / 10% hard). Capability and price tags are assigned by quantiles <em>over the currently usable pool only</em> (cooling / quota-gated / keyless models are excluded dynamically). Ratio controller then nudges the <em>observed</em> tier mix back to 7:2:1. Off-peak windows and cache-hit prices come from the provider registry; a 50-slot active set keeps only the newest-released (20-slot floor) + recently-used (14d) models routable.</div>
+</div>
+
+<div class="card">
 <h2>1 · Composite score</h2>
 $$\text{score}(m) = \underbrace{\Big[\textstyle\sum_k W_k \cdot f_k(m)\Big]}_{\text{five factors}} \times \underbrace{B(m)}_{\text{flywheel bias}} \times \underbrace{P(m)}_{\text{budget damp}} \times \underbrace{\big(1 + 0.15\,c_r\big)}_{\text{advisor bonus}}$$
 <div class="flow">
@@ -41,7 +49,7 @@ $$\text{score}(m) = \underbrace{\Big[\textstyle\sum_k W_k \cdot f_k(m)\Big]}_{\t
 <div class="card">
 <h2>2 · Dynamic weights <span class="tag">difficulty-linked × quota-aware (BaRP Eq.1)</span></h2>
 $$\mathbf{W} = \operatorname{norm}\Big(\underbrace{\mathbf{w}^{\,\mathrm{diff}}(d_{\mathrm{eff}})}_{\text{hard tasks}\,\Rightarrow\,\text{quality}\uparrow} \odot \underbrace{\mathbf{w}^{\,\mathrm{quota}}(t)}_{\text{tight quota}\,\Rightarrow\,W_c(1+1.5t),\,W_q(1-0.25t)}\Big), \quad t \in [0,1]$$
-<div class="note">t = fraction of candidates whose remaining quota &lt; 8× estimated tokens. No quota data → no adjustment.</div>
+<div class="note">t = fraction of candidates whose remaining quota &lt; 8× estimated tokens. No quota data → no adjustment. Quality floor is difficulty-monotone upward: <em>0.50 at d≈0 → 0.85 at d=3</em> — easy tasks are decided by cost, hard tasks require strength.</div>
 </div>
 
 <div class="card">
@@ -62,15 +70,16 @@ $$B(m) = \operatorname{clamp}\Big(1 + \big(\mathrm{reward}(m) - \operatorname*{m
 <h2>5 · Decision pipeline</h2>
 <div class="flow">
   <span class="step">digest signals</span><span class="arrow">→</span>
-  <span class="step">sticky check</span><span class="arrow">→</span>
-  <span class="step">dual judge (Jev + heuristic, take-conservative)</span><span class="arrow">→</span>
+  <span class="step">sticky check (+ cache-economy keep)</span><span class="arrow">→</span>
+  <span class="step">dual judge (slot chain: JEV &gt; LAYA &gt; OPENAI, + heuristic)</span><span class="arrow">→</span>
+  <span class="step">difficulty calibration (7:2:1)</span><span class="arrow">→</span>
   <span class="step">advisor top-8 (anonymized)</span><span class="arrow">→</span>
-  <span class="step">hard filters</span><span class="arrow">→</span>
-  <span class="step">dynamic weights</span><span class="arrow">→</span>
-  <span class="step">score</span><span class="arrow">→</span>
+  <span class="step">hard filters (context / vision / health / quota gate / <b>active 50</b> / <b>price tier</b>)</span><span class="arrow">→</span>
+  <span class="step">dynamic weights × <b>ratio-controller tier multipliers</b></span><span class="arrow">→</span>
+  <span class="step">score (effective cost: cache-hit × peak/off-peak)</span><span class="arrow">→</span>
   <span class="step">Thompson explore</span><span class="arrow">→</span>
   <span class="step">route + chain(3) + quality cascade</span><span class="arrow">→</span>
-  <span class="step">outcome → flywheel</span>
+  <span class="step">outcome → flywheel (+ ratio observation)</span>
 </div>
 <div class="note">Failure anywhere in judge / advisor / distill / cascade never blocks routing. Learning only from bandit feedback on chosen models.</div>
 </div>

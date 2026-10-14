@@ -45,8 +45,7 @@ impl HealthRegistry {
         }
     }
 
-    pub fn mark_failure(&self, model_id: &str, f: Failure) {
-        let Ok(mut m) = self.inner.lock() else { return };
+    pub fn mark_failure(&self, model_id: &str, f: Failure) {        let Ok(mut m) = self.inner.lock() else { return };
         let entry = m.entry(model_id.to_string()).or_insert_with(|| HealthEntry {
             kind: HealthKind::Ok,
             until_epoch_ms: None,
@@ -63,15 +62,50 @@ impl HealthRegistry {
         } else {
             entry.hits.min(4) as u64
         };
-        // 上游明确给出重置时间（retry-after/限额头）时优先采用，封顶 24h
+        // 上游明确给出重置时间（retry-after/限额头）时优先采用（用户裁决：
+        // 无 API 可查的 provider 只能信任上游给的窗口期，如月窗 9d9h 就如实
+        // 展示）；仅保留 30 天理智上限防脏数据。永久哨兵（模型不存在）不封顶。
         let cooldown = match f.until_epoch_ms {
-            Some(until) => until.saturating_sub(now()).min(24 * 3600 * 1000),
+            Some(Self::PERMANENT_UNTIL) => Self::PERMANENT_UNTIL,
+            Some(until) => until.saturating_sub(now()).min(30 * 24 * 3600 * 1000),
             None => f.kind.default_cooldown_ms().saturating_mul(mult),
         };
         entry.kind = f.kind;
         entry.message = f.message;
-        entry.until_epoch_ms = Some(now() + cooldown);
+        entry.until_epoch_ms = if cooldown == Self::PERMANENT_UNTIL {
+            Some(Self::PERMANENT_UNTIL)
+        } else {
+            Some(now() + cooldown)
+        };
         entry.updated_at = now();
+    }
+
+    /// 清指定模型的健康条目（永久黑名单手动恢复 / API 确认后解除）
+    pub fn clear(&self, model_ids: &[String]) {
+        let Ok(mut m) = self.inner.lock() else { return };
+        for id in model_ids {
+            m.remove(id);
+        }
+    }
+
+    /// 仅清指定 kind 的冷却（如 API 型 provider 的 QuotaExhausted 被官方
+    /// 数据反证解除；不动其它健康记录）
+    pub fn clear_kind(&self, model_ids: &[String], kind: HealthKind) {
+        let Ok(mut m) = self.inner.lock() else { return };
+        for id in model_ids {
+            if let Some(e) = m.get(id)
+                && e.kind == kind
+            {
+                m.remove(id);
+            }
+        }
+    }
+
+    /// 永久黑名单（上游确认不存在的模型，需手动恢复；until=u64::MAX 哨兵）
+    pub const PERMANENT_UNTIL: u64 = u64::MAX;
+
+    pub fn is_permanent(until: u64) -> bool {
+        until == Self::PERMANENT_UNTIL
     }
 }
 
@@ -173,13 +207,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-fn days_since_epoch_ms(days: i64) -> u64 {
-    (days.max(0) as u64).saturating_mul(86_400_000)
-}
 
-fn local_ms_placeholder<T>(_: i64, _: ()) -> (i64, ()) {
-    (0, ())
-}
 
 
 pub fn now() -> u64 {

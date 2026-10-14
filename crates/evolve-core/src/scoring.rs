@@ -29,11 +29,13 @@ pub fn quality(m: &ModelRecord, j: &JudgmentSet, difficulty_eff: f32) -> f32 {
     }
 }
 
-/// Quality floor below which a model is considered not good enough for the
-/// task difficulty; difficulty 0 → 1.0 (everyone qualifies, cost decides),
-/// difficulty 3 → 0.55 (only strong models qualify).
+/// 质量门槛（2026-10 修正方向）：**难度越低门槛越松**——简单任务谁都能干，
+/// 让成本主导（便宜模型可用）；难度越高门槛越高，只留给强模型。
+/// 旧公式（1.0 - 0.45·d/3）方向相反：L1 门槛 0.925 会把便宜弱模型全挡掉，
+/// 违背"简单任务用便宜模型"（实证：trivial → 被挡 → 选了 medium 层）。
+/// d=0 → 0.50（形同不设限，成本主导）；d=3 → 0.85（仅强模型可过）。
 pub fn quality_floor(difficulty_eff: f32) -> f32 {
-    1.0 - 0.45 * (difficulty_eff / 3.0).clamp(0.0, 1.0)
+    0.50 + 0.35 * (difficulty_eff / 3.0).clamp(0.0, 1.0)
 }
 
 /// 难度-费用联动（用户裁决：简单任务用便宜模型，复杂任务可以用贵的模型）。
@@ -76,6 +78,81 @@ pub fn blended_price(m: &ModelRecord, est_input: u64, est_output: u64) -> f32 {
     }
 }
 
+/// 该模型近期实测缓存命中率（无样本 None）——S4 缓存经济决策依据
+pub fn cache_hit_rate(tel: Option<&ModelTelemetry>) -> Option<f32> {
+    let samples = tel.and_then(|x| x.recent.as_ref())?;
+    let (mut in_s, mut hit) = (0f64, 0f64);
+    for s in samples.iter().rev().take(20) {
+        in_s += s.in_tok as f64;
+        hit += s.cached_tok as f64;
+    }
+    if in_s <= 0.0 { return None; }
+    Some(((hit / in_s) as f32).clamp(0.0, 1.0))
+}
+
+/// 近期实测比例：(缓存命中率, 输出/输入比)。无样本用保守默认（50% 命中、30% 输出）
+fn recent_ratios(tel: Option<&ModelTelemetry>) -> (f32, f32) {
+    if let Some(samples) = tel.and_then(|x| x.recent.as_ref()) {
+        let (mut in_s, mut hit, mut out_s, mut n) = (0f64, 0f64, 0f64, 0f64);
+        for s in samples.iter().rev().take(20) {
+            in_s += s.in_tok as f64;
+            hit += s.cached_tok as f64;
+            out_s += s.out_tok as f64;
+            n += 1.0;
+        }
+        if in_s > 0.0 && n > 0.0 {
+            return (((hit / in_s) as f32).clamp(0.0, 0.99), (out_s / in_s) as f32);
+        }
+    }
+    (0.5, 0.3)
+}
+
+/// S1 有效成本（估算，provider 币种金额）：官方价目优先——含**缓存命中价**与
+/// **峰谷折扣**（DeepSeek 命中价约为未命中 1/50，非高峰半价，影响远超选型直觉）；
+/// 无官方价目回退目录单价。返回 None = 无任何成本信息（评分按成本中性处理）
+pub fn est_cost(
+    m: &ModelRecord,
+    est_input: u64,
+    est_output: u64,
+    tel: Option<&ModelTelemetry>,
+) -> Option<f32> {
+    if let Some(s) = crate::provider_info::price_for(&m.base_url, &m.id) {
+        let (hit_rate, _) = recent_ratios(tel);
+        let in_eff = s.in_miss * (1.0 - hit_rate) + s.in_hit * hit_rate;
+        let peak = crate::provider_info::peak_factor_now(&m.base_url);
+        return Some(((est_input as f32 / 1e6) * in_eff + (est_output as f32 / 1e6) * s.out) * peak);
+    }
+    m.cost.map(|c| (est_input as f32 / 1e6) * c.input + (est_output as f32 / 1e6) * c.output)
+}
+
+#[test]
+fn official_price_sheet_effective_cost() {
+    use crate::types::{Cost, ModelRecord, Source};
+    let mk = |id: &str, base: &str| ModelRecord {
+        id: id.into(),
+        provider: "p".into(),
+        base_url: base.into(),
+        upstream_model: id.into(),
+        source: Source::Remote,
+        ..Default::default()
+    };
+    // 官方价目覆盖目录单价：deepseek flash 命中价极低 → 有效成本远低于线性价
+    let mut flash = mk("deepseek-flash", "https://api.deepseek.com");
+    flash.cost = Some(Cost { input: 99.0, output: 99.0 }); // 故意给错的目录价
+    let no_tel = None;
+    let c = est_cost(&flash, 100_000, 30_000, no_tel).unwrap();
+    // 50% 命中默认：in_eff = 1*0.5 + 0.02*0.5 = 0.51 → 0.1M*0.51 + 0.03M*4 = 0.171 元（空闲档）
+    assert!(c < 0.5, "official sheet should dominate: {c}");
+    // pro 显著更贵
+    let mut pro = mk("deepseek-v4-pro", "https://api.deepseek.com");
+    pro.cost = None;
+    let cp = est_cost(&pro, 100_000, 30_000, no_tel).unwrap();
+    assert!(cp > c * 2.0, "pro should cost several times flash: {cp} vs {c}");
+    // 无价目且无目录价 → None（成本中性，不冒充便宜）
+    let unknown = mk("x-9b", "http://127.0.0.1:9999/v1");
+    assert!(est_cost(&unknown, 1000, 100, no_tel).is_none());
+}
+
 #[test]
 fn quota_aware_weights_shift_cost_when_tight() {
     let base = [0.35f32, 0.15, 0.25, 0.15, 0.10];
@@ -97,12 +174,36 @@ pub fn score_all(
     weights: &PolicyWeights,
     telemetry: &TelemetrySnapshot,
 ) -> Vec<CandidateScore> {
+    // 兼容旧签名：不带层级乘子（引擎侧用 score_all_tiered 传比例控制器乘子）
+    score_all_tiered(
+        candidates, j, difficulty_eff, est_input, est_output, weights, telemetry,
+        &std::collections::HashMap::new(), &[1.0; 3],
+    )
+}
+
+/// 带层级乘子的评分（S5 比例控制器）：`tier_penalty[i]` 作用于第 i 层（0 cheap/1 medium/2 premium）
+/// 的成本因子——超标层乘子 >1（抑制），不足层 <1（偏好）。
+#[allow(clippy::too_many_arguments)]
+pub fn score_all_tiered(
+    candidates: &[&ModelRecord],
+    j: &JudgmentSet,
+    difficulty_eff: f32,
+    est_input: u64,
+    est_output: u64,
+    weights: &PolicyWeights,
+    telemetry: &TelemetrySnapshot,
+    price_tier_of: &std::collections::HashMap<String, u8>,
+    tier_penalty: &[f32; 3],
+) -> Vec<CandidateScore> {
     let [wq, ws, wc, wr, wh] = weights.normalized();
     // Known-cost models only anchor the price floor; unknown-cost models
     // are cost-neutral (0.5) — never rewarded as if they were cheapest.
+    // 成本锚点：payg 模型用官方价目有效成本（缓存命中率 + 峰谷），
+    // 无价目回退目录单价；订阅模型走配额口径（下方 hints）
     let min_price = candidates
         .iter()
-        .filter_map(|m| m.cost.map(|_| blended_price(m, est_input, est_output)))
+        .filter(|m| !m.plan)
+        .filter_map(|m| est_cost(m, est_input, est_output, telemetry.get(&m.id)))
         .fold(f32::MAX, f32::min);
     // 订阅模型配额消耗强度（官方系数折算）：**按方案分组取最小**——
     // 不同方案的系数不可比（智谱积分 vs Go 美元），全局取最小会稀释基准
@@ -110,6 +211,8 @@ pub fn score_all(
     let mut scheme_min: HashMap<String, f32> = HashMap::new();
     for m in candidates.iter().filter(|m| m.plan) {
         if let Some(h) = crate::plans::model_price_hint(&m.base_url, &m.id) {
+            // 峰谷折扣（provider_info）：非高峰半价 → 有效成本更低（错峰优先）
+            let h = h * crate::provider_info::peak_factor_now(&m.base_url);
             hints.insert(m.id.as_str(), h);
             let key = crate::plans::plan_key_for(&m.base_url)
                 .unwrap_or(m.base_url.as_str())
@@ -135,17 +238,20 @@ pub fn score_all(
                         let key = crate::plans::plan_key_for(&m.base_url)
                             .unwrap_or(m.base_url.as_str());
                         let min = scheme_min.get(key).copied().unwrap_or(*hint);
+                        let tier = price_tier_of.get(&m.id).copied().unwrap_or(1) as usize;
+                        let hint = hint * tier_penalty[tier.min(2)];
                         (min / hint.max(1e-6)).clamp(0.05, 1.0)
                     }
                     None => 1.0,
                 }
             } else {
-                match m.cost {
-                    Some(_) => {
-                        let price = blended_price(m, est_input, est_output).max(1e-6);
+                match est_cost(m, est_input, est_output, telemetry.get(&m.id)) {
+                    Some(p) => {
+                        let tier = price_tier_of.get(&m.id).copied().unwrap_or(1) as usize;
+                        let price = (p * tier_penalty[tier.min(2)]).max(1e-6);
                         (min_price / price).clamp(0.0, 1.0)
                     }
-                    None => 0.5,
+                    None => 0.5, // 无成本信息：成本中性，不冒充最便宜
                 }
             };
             // 可靠性分层融合（用户裁决：近30/10 比较重要但非主参考）：

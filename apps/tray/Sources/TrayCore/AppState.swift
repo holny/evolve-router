@@ -42,7 +42,7 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, observedRaw: [String: Any]? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, observedRaw: [String: Any]? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
@@ -51,12 +51,21 @@ public struct ProviderRow: Identifiable {
         self.observedRaw = observedRaw
         self.quotaUsed = quotaUsed; self.quotaScope = quotaScope
         self.quotaExhausted = quotaExhausted; self.quotaReset = quotaReset
+        self.cooldownModel = cooldownModel
+        self.quotaSource = quotaSource
+        self.blockedModels = blockedModels
     }
     public let key: String
     public let enabled: Bool
     public let available: Bool
     public let cooldownUntil: Date?
     public let cooldownCause: String?
+    /// 冷却中剩余最久的模型 id（provider 级聚合来源，展示用）
+    public let cooldownModel: String?
+    /// w2 配额信息源：official（官方 API/响应头）/ official_headers / estimated（网关推算）/ ""
+    public let quotaSource: String
+    /// w3 永久黑名单模型（上游 404 且不在模型列表）——仅 Web 手动恢复
+    public let blockedModels: [String]
     public let pct: Int?
     public let tokens24h: Int
     public let planKind: String
@@ -90,6 +99,8 @@ public final class AppState: ObservableObject {
     @Published public var external = false
     @Published public var starting = false
     @Published public var inflight = 0
+    /// 决策模型可用性：ok / stale（已配置待重启）/ missing（未配置）——/api/live 每次 1s 轮询现读 env
+    @Published public var decisionStatus = "ok"
     @Published public var pulse = false
     @Published public var requests = 0
     @Published public var successRate = 0
@@ -125,6 +136,7 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/live"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             inflight = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
+            decisionStatus = ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok"
         } else {
             inflight = 0
         }
@@ -156,7 +168,7 @@ public final class AppState: ObservableObject {
             tokensK = Self.fmtTok(toks)
         }
         var rows: [ProviderRow] = []
-        var coolByKey: [String: (Bool, Date?, String)] = [:]
+        var coolByKey: [String: (Bool, Date?, String, String?, [String])] = [:]
         if case (200, let sdata)? = try? await get("/api/providers/status"),
            let sw = try? JSONSerialization.jsonObject(with: sdata) as? [String: Any],
            let sarr = sw["providers"] as? [[String: Any]] {
@@ -165,8 +177,10 @@ public final class AppState: ObservableObject {
                 let cd = (s["cooldown_remaining_ms"] as? Int)
                     ?? (s["cooldown_remaining_ms"] as? Double).map(Int.init)
                 let cause = (s["message"] as? String) ?? ((s["kind"] as? String) ?? "")
+                let model = s["cooldown_model"] as? String
                 let until = cd.map { Date().addingTimeInterval(Double($0)/1000.0) }
-                coolByKey[k] = (((s["available"] as? Bool) ?? true), until, cause)
+                let blocked = (s["blocked_models"] as? [String]) ?? []
+                coolByKey[k] = (((s["available"] as? Bool) ?? true), until, cause, model, blocked)
             }
         }
         if case (200, let data)? = try? await get("/api/providers"),
@@ -175,10 +189,10 @@ public final class AppState: ObservableObject {
             for p in arr {
                 let key = (p["key"] as? String) ?? "-"
                 let mergedKeys = (p["merged_from"] as? [Any])?.compactMap { $0 as? String } ?? [key]
-                let kind = (p["plan_kind"] as? String) ?? "-"
+                let kind = (p["planKind"] as? String) ?? "-"
                 let windows = p["windows"] as? [String: Any]
                 let w5 = (windows?["5h"] as? Double) ?? (windows?["5h"] as? Int).map(Double.init)
-                let used5 = (p["used_5h"] as? Double) ?? 0
+                let used5 = (p["used5h"] as? Double) ?? 0
                 var pct: Int? = nil
                 if let obs = p["observed"] as? [String: Any],
                    let o5 = obs["5h"] as? [String: Any],
@@ -193,12 +207,21 @@ public final class AppState: ObservableObject {
                 var available = true
                 var cooldownUntil: Date? = nil
                 var cooldownCause: String? = nil
+                var cooldownModel: String? = nil
+                var blockedModels: [String] = []
                 for k in mergedKeys {
-                    if let (av, until, cause) = coolByKey[k] {
+                    if let (av, until, cause, model, blocked) = coolByKey[k] {
                         available = available && av
+                        if !blocked.isEmpty {
+                            blockedModels.append(contentsOf: blocked)
+                        }
+                        // cause 独立收集（永久黑名单条目没有 cooldown 时长但带 message）
+                        if cooldownCause == nil || cooldownCause!.isEmpty, !cause.isEmpty { cooldownCause = cause }
                         if let until, until > Date() {
-                            if cooldownUntil == nil || until > cooldownUntil! { cooldownUntil = until }
-                            if cooldownCause == nil || cooldownCause!.isEmpty { cooldownCause = cause }
+                            if cooldownUntil == nil || until > cooldownUntil! {
+                                cooldownUntil = until
+                                cooldownModel = model
+                            }
                         }
                     }
                 }
@@ -207,7 +230,10 @@ public final class AppState: ObservableObject {
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: pct,
                                         tokens24h: tok24, planKind: kind,
-                                        paygBalance: AppState.payg(from: p), observedRaw: (p["observed"] as? [String: Any]) ?? nil))
+                                        paygBalance: AppState.payg(from: p), observedRaw: (p["observed"] as? [String: Any]) ?? nil,
+                                        cooldownModel: cooldownModel.flatMap { AppState.shortModel($0, key: key) },
+                                        quotaSource: (p["quotaSource"] as? String) ?? ((p["quota_source"] as? String) ?? ""),
+                                        blockedModels: blockedModels.map { AppState.shortModel($0, key: "") }))
             }
         }
         rows.sort {
@@ -260,6 +286,11 @@ public final class AppState: ObservableObject {
                     }
                 }
             }
+            if qUsed == nil, r.planKind != "api", let pct = r.pct {
+                // credits 兜底：无 observed 官方端点时用 used5/窗口限额（AFP/credit 计划）
+                // tokens 历史累计可超预算（watchdog 90s 内官方数据接管）——bar 封顶 100%
+                qUsed = min(pct, 100); qScope = "5h"
+            }
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
                                pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
@@ -269,7 +300,10 @@ public final class AppState: ObservableObject {
                                cachePct5h: cachePct,
                                paygBalance: r.paygBalance,
                                quotaUsed: qUsed, quotaScope: qScope,
-                               quotaExhausted: qExhausted, quotaReset: qReset)
+                               quotaExhausted: qExhausted, quotaReset: qReset,
+                               cooldownModel: r.cooldownModel,
+                               quotaSource: r.quotaSource,
+                               blockedModels: r.blockedModels)
         }
         providers = Array(rows.prefix(8))
         if case (200, let data)? = try? await get("/api/events?limit=30"),
@@ -328,11 +362,23 @@ public final class AppState: ObservableObject {
         lastSync = Date()
     }
 
-    // Recent Requests：时分秒（24h 进制，零时区本地）
+    /// 冷却模型 id → 短名（去 provider 前缀；provider/ 路径形如 opencode-go-github/kimi-k3）
+    static func shortModel(_ id: String, key: String) -> String {
+        let s = id.hasPrefix("\(key)/") ? String(id.dropFirst(key.count + 1)) : id
+        return s
+    }
+
+    // Recent Requests：本地时区时分秒
+    private static let tsFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "HH:mm:ss"
+        f.timeZone = .current
+        return f
+    }()
     private func tsString(_ ts: Any?) -> String {
-        let ms = Int(((ts as? Double) ?? 0))
-        let s = max(0, (ms / 1000) % 86400)
-        return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+        let ms = ((ts as? Double) ?? 0) / 1000
+        guard ms > 0 else { return "--:--:--" }
+        return Self.tsFmt.string(from: Date(timeIntervalSince1970: ms))
     }
 
     public static func fmtTok(_ n: Int) -> String {

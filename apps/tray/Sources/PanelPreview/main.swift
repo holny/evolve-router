@@ -39,6 +39,16 @@ enum PanelPreview {
         win.contentView = host
         win.center()
         win.makeKeyAndOrderFront(nil)
+        // 预览 harness 轮询循环：等真实网关就绪即覆盖种子数据（app 的循环在
+        // AppDelegate 里，harness 只跑一次会错过就绪窗口）
+        Task { [weak state] in
+            guard let state else { return }
+            while !Task.isCancelled {
+                await state.pollLive()
+                if state.healthy { await state.pollData() }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 
     static let darkMode = UserDefaults.standard.string(forKey: "AppleInterfaceStyle")?

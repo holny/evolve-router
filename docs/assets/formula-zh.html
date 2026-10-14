@@ -27,6 +27,14 @@
 <div class="sub">每一项都对应具名量。飞轮与探索只能微调——决策模型的判定是不可逾越的天花板。</div>
 
 <div class="card">
+<h2>0 · 价格感知四层 <span class="tag">难度 → 档位 → 硬闸 → 缓存/经济学（2026-10）</span></h2>
+$$d_{\mathrm{eff}} = \mathrm{calib}(d_{\mathrm{raw}})\;\xrightarrow{\;\text{滚动分位重塑（70/20/10）}\,}\;\text{L1}|\text{L2}|\text{L3}$$
+$$\text{档位上限} = \begin{cases} \text{cheap} & d_{\mathrm{eff}} \le 0.8\\ \text{cheap}|\text{medium} & d_{\mathrm{eff}} \le 2.0\\ \text{全开} & \text{其他}\end{cases}\qquad \text{硬闸：}\ \text{档位}(m) \le \text{上限} \ \lor\ \text{成本}(m) \le \operatorname{中位}_{\text{同家族允许层}} \text{成本}$$
+$$\text{有效成本}(m) = \big[\,p^{\mathrm{未命中}}_{\mathrm{入}}(1-h) + p^{\mathrm{命中}}_{\mathrm{入}} h\,\big]\cdot T_{\mathrm{入}} + p_{\mathrm{出}} T_{\mathrm{出}} \times \text{峰谷}(t) \qquad \text{暖缓存不被替换，除非对手便宜 } &gt;15\%$$
+<div class="note">$d_{\mathrm{eff}}$ 经滚动分位校准（目标 70% 简单 / 20% 一般 / 10% 困难）。能力档与价位档按分位分配，且**只在当前可用池上统计**（冷却 / 配额闸门 / 无凭据的模型动态排除）。比例控制器再把**实际选用**的档位占比拉回 7:2:1。峰谷与缓存命中价来自 provider 注册表；活跃集 50 席只保留最近发布（保底 20 席）+ 最近使用（14 天内）的模型。</div>
+</div>
+
+<div class="card">
 <h2>1 · 综合评分</h2>
 $$\text{score}(m) = \underbrace{\Big[\textstyle\sum_k W_k \cdot f_k(m)\Big]}_{\text{five factors}} \times \underbrace{B(m)}_{\text{flywheel bias}} \times \underbrace{P(m)}_{\text{budget damp}} \times \underbrace{\big(1 + 0.15\,c_r\big)}_{\text{advisor bonus}}$$
 <div class="flow">
@@ -61,16 +69,17 @@ $$B(m) = \operatorname{clamp}\Big(1 + \big(\mathrm{reward}(m) - \operatorname*{m
 <div class="card">
 <h2>5 · 决策管线</h2>
 <div class="flow">
-  <span class="step">信号提取</span><span class="arrow">→</span>
-  <span class="step">粘性检查</span><span class="arrow">→</span>
-  <span class="step">双判官（Jev+规则，取严融合）</span><span class="arrow">→</span>
-  <span class="step">advisor top-8（匿名化）</span><span class="arrow">→</span>
-  <span class="step">硬过滤</span><span class="arrow">→</span>
-  <span class="step">动态权重</span><span class="arrow">→</span>
-  <span class="step">score</span><span class="arrow">→</span>
+  <span class="step">摘要信号</span><span class="arrow">→</span>
+  <span class="step">粘性检查（+ 暖缓存保留）</span><span class="arrow">→</span>
+  <span class="step">双判官（槽位链 JEV &gt; LAYA &gt; OPENAI + 启发式）</span><span class="arrow">→</span>
+  <span class="step">难度校准（7:2:1）</span><span class="arrow">→</span>
+  <span class="step">直推 advisor top-8（匿名画像）</span><span class="arrow">→</span>
+  <span class="step">硬过滤（上下文/视觉/健康/配额闸门/<b>活跃集 50</b>/<b>价位层</b>）</span><span class="arrow">→</span>
+  <span class="step">动态权重 × <b>比例控制器档位乘子</b></span><span class="arrow">→</span>
+  <span class="step">评分（有效成本：缓存命中 × 峰谷）</span><span class="arrow">→</span>
   <span class="step">Thompson 探索</span><span class="arrow">→</span>
-  <span class="step">路由+降级链(3)+质量级联</span><span class="arrow">→</span>
-  <span class="step">结果 → 飞轮</span>
+  <span class="step">路由 + 降级链(3) + 质量级联</span><span class="arrow">→</span>
+  <span class="step">结果 → 飞轮（+ 比例观测）</span>
 </div>
 <div class="note">判定器/advisor/蒸馏/级联任何一处失败都不阻塞路由。学习只来自被选模型的 bandit 反馈。</div>
 </div>

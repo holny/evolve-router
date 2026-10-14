@@ -125,7 +125,7 @@ pub fn outcome_reward(
     let rewards: Vec<f32> = recent
         .iter()
         .enumerate()
-        .map(|(i, s)| {
+        .map(|(i, _s)| {
             // 成功率信号：原始 0/1（逐条贡献即窗口 ok 率）；延迟信号保留 IQR 归一化
             let s_lat = normalize_signal(&lat_hist, lat_hist[i]);
             params.ok_weight * ok_hist[i] + params.lat_weight() * (1.0 - s_lat)

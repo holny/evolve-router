@@ -85,6 +85,10 @@ pub struct ModelRecord {
     pub weight: Option<f32>,
     pub source: Source,
     pub source_note: Option<String>,
+    /// 模型发布时间（epoch ms）——三级来源：provider /models 的 `created`
+    /// → models.dev `release_date` → 模型 id 内嵌日期解析（见 recency.rs）
+    #[serde(default)]
+    pub release_ts: Option<u64>,
 }
 
 impl Default for ModelRecord {
@@ -109,6 +113,7 @@ impl Default for ModelRecord {
             weight: None,
             source: Source::User,
             source_note: None,
+            release_ts: None,
         }
     }
 }
@@ -499,9 +504,16 @@ pub fn fuse_judgments(jev: &JudgmentSet, heur: &JudgmentSet) -> JudgmentSet {
     };
     JudgmentSet {
         domain,
-        // 难度融合改均值：take_max 会把难度钉死在上限（双峰根因之一），
-        // 双判官各给独立估计，均值更接近真实分布
-        difficulty: (jev.difficulty + heur.difficulty) * 0.5,
+        // 难度融合（2026-10 修正）：纯均值会让"中文被决策模型低估"拖低难度
+        // （实证：heuristic 判 2.54、Jev 判 ~0 → 均值 1.21，难任务被降级）；
+        // 纯取严又会钉死上限（双峰根因）。改为**均值与取高的折中**：
+        // 0.25a + 0.25b + 0.5·max — 两官一致时=原值，分歧时向高侧靠但不顶格。
+        difficulty: {
+            let (a, b) = (jev.difficulty, heur.difficulty);
+            let avg = (a + b) * 0.5;
+            let hi = a.max(b);
+            (avg + hi) * 0.5
+        },
         domain_confidence: jev.domain_confidence.min(heur.domain_confidence),
         difficulty_confidence: jev.difficulty_confidence.min(heur.difficulty_confidence),
         needs_vision: take_max(jev.needs_vision, heur.needs_vision),

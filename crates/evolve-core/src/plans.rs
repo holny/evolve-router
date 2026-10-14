@@ -247,6 +247,16 @@ pub fn model_price_hint(base_url: &str, model_id: &str) -> Option<f32> {
                 0.30 + 3.0 * 1.20 // minimax / longcat 等
             }
         }
+        // MiniMax M Plan：模型系数（入/cached/出）——家族内相对位置与倒挂判定依据
+        "minimax-coding" => {
+            if m.contains("m3") {
+                6.9 + 3.0 * 24.0
+            } else if m.contains("m2.7") || m.contains("m2.5") {
+                2.3 + 3.0 * 8.0
+            } else {
+                2.3 + 3.0 * 8.0
+            }
+        }
         "volces-coding" | "volces-agent" => {
             if m.contains("kimi-k3") {
                 20.0
@@ -320,6 +330,66 @@ pub fn credit_multipliers(base_url: &str, model_id: &str) -> Option<(f64, f64, f
 
 pub fn plan_key_for(base_url: &str) -> Option<&'static str> {
     plan_for(base_url).map(|p| p.key)
+}
+
+/// w3 配额管理方式注册表（用户裁决：按 baseURL hostname 归类并记录）——
+/// 决定该 provider 的配额从哪来、怎么刷新。新增同 hostname 的账号（不同 key）
+/// 自动命中同一族：watchdog 会按账号逐个拉官方端点，无需人工声明。
+/// - MinimaxRemains : GET {host}/v1/token_plan/remains（5h/周 百分比，Bearer）
+/// - ZhipuMonitor   : GET {host}/api/monitor/usage/quota/limit?type=1（5h/周 额度）
+/// - ZaiMonitor     : 同 Zhipu（z.ai 域名）
+/// - OpencodeZen    : GET {host}/zen/go/v1/usage（rolling/weekly/monthly 百分比）
+/// - DeepseekBalance: GET {host}/user/balance（按量余额，非窗口）
+/// - None           : 无官方配额端点 → 响应头学习 / 网关推算
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaApi {
+    MinimaxRemains,
+    ZhipuMonitor,
+    ZaiMonitor,
+    OpencodeZen,
+    DeepseekBalance,
+}
+
+impl QuotaApi {
+    /// 是否窗口制（5h/周/月）——gate 状态机与"API 型免冷却"逻辑只适用于窗口制
+    pub fn window_based(&self) -> bool {
+        matches!(
+            self,
+            QuotaApi::MinimaxRemains | QuotaApi::ZhipuMonitor | QuotaApi::ZaiMonitor | QuotaApi::OpencodeZen
+        )
+    }
+}
+
+/// hostname → 配额管理方式（唯一判定入口；新增账号/自定义 provider 同样适用）
+pub fn quota_api_for(base_url: &str) -> Option<QuotaApi> {
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    // 端点区分（同 host 多服务端口形态由 path 兜底）
+    let lower = base_url.to_lowercase();
+    if host.ends_with("api.minimax.cn") || host.ends_with("api.minimaxi.com") {
+        Some(QuotaApi::MinimaxRemains)
+    } else if host.ends_with("open.bigmodel.cn") || host.ends_with("bigmodel.cn") {
+        Some(QuotaApi::ZhipuMonitor)
+    } else if host.ends_with("api.z.ai") || host.ends_with("z.ai") {
+        Some(QuotaApi::ZaiMonitor)
+    } else if host.ends_with("opencode.ai") {
+        Some(QuotaApi::OpencodeZen)
+    } else if host.ends_with("api.deepseek.com") {
+        Some(QuotaApi::DeepseekBalance)
+    } else if lower.contains("minimax") {
+        Some(QuotaApi::MinimaxRemains)
+    } else {
+        None
+    }
 }
 
 /// 档位对应额度（积分）；未登记返回 None
@@ -402,6 +472,26 @@ mod tests {
         // Go 官方月限 flash $60 vs 5.3 $15 → 4 倍差距
         assert!((go_big / go_flash) > 3.0 && (go_big / go_flash) < 12.0, "ratio={}", go_big / go_flash);
         assert!(model_price_hint("http://127.0.0.1:9101/v1", "x").is_none());
+    }
+
+    #[test]
+    fn quota_api_hostname_registry() {
+        use super::{quota_api_for, QuotaApi};
+        // 官方配额端点族（hostname 判定）——新账号同 host 自动命中
+        assert_eq!(quota_api_for("https://api.minimax.cn/v1"), Some(QuotaApi::MinimaxRemains));
+        assert_eq!(quota_api_for("https://open.bigmodel.cn/api/coding/paas/v4"), Some(QuotaApi::ZhipuMonitor));
+        assert_eq!(quota_api_for("https://api.z.ai/api/coding/paas/v4"), Some(QuotaApi::ZaiMonitor));
+        assert_eq!(quota_api_for("https://opencode.ai/zen/go/v1"), Some(QuotaApi::OpencodeZen));
+        assert_eq!(quota_api_for("https://api.deepseek.com"), Some(QuotaApi::DeepseekBalance));
+        // 用户新增同 host 不同 key 的账号：同一族（关键用例）
+        assert_eq!(quota_api_for("https://opencode.ai/zen/go/v1/"), Some(QuotaApi::OpencodeZen));
+        // 自定义本地端点：无官方配额
+        assert_eq!(quota_api_for("http://127.0.0.1:8321/v1"), None);
+        assert_eq!(quota_api_for("https://api.openai.com/v1"), None);
+        // 窗口制标记：deepseek 余额不算窗口制（不参与 gate/免冷却逻辑）
+        assert!(QuotaApi::OpencodeZen.window_based());
+        assert!(QuotaApi::MinimaxRemains.window_based());
+        assert!(!QuotaApi::DeepseekBalance.window_based());
     }
 }
 

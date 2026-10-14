@@ -32,6 +32,43 @@ pub struct QuotaLedger {
     /// 面板配额展示以此为权威源——本地按 token 累加的估算容易与 provider 真实值漂移
     /// （错误响应消耗配额但不返回 usage / 计费精度差异 / 并发令牌预留等）
     observed_provider: Mutex<HashMap<String, ObservedProviderQuota>>,
+    /// w2 provider 配额闸门（QUOTA_LIMITED 状态机）：任一窗满 → 关闸不参与路由；
+    /// API 型由官方端点定时刷新发现恢复（兜底重试 1h）；无 API 型 5~10min 探测
+    provider_gate: Mutex<HashMap<String, ProviderGateState>>,
+}
+
+/// provider 配额闸门状态（plan_key 粒度；进程内寿命）
+#[derive(Debug, Clone)]
+pub struct ProviderGateState {
+    /// 官方端点可查询配额（minimax/zhipu/zai/opencode-go）——决定恢复路径
+    pub api_backed: bool,
+    /// 耗尽窗口列表（"5h"/"weekly"/"monthly"）
+    pub windows_full: Vec<String>,
+    /// 最长窗口的官方重置时刻（无则未知）
+    pub reset_epoch_ms: Option<u64>,
+    pub since_ms: u64,
+    /// 下次探测允许时刻（epoch ms）
+    pub probe_at_ms: u64,
+    pub probe_failures: u32,
+    /// 探测进行中（探测单在飞时闸门暂开）
+    pub probing: bool,
+}
+
+impl ProviderGateState {
+    pub const PROBE_BASE_MS: u64 = 5 * 60 * 1000;
+    pub const PROBE_CAP_MS: u64 = 10 * 60 * 1000;
+    /// API 型官方查询失败的兜底重试间隔（用户裁决：1h——官方窗口期短查询无意义）
+    pub const API_RETRY_MS: u64 = 60 * 60 * 1000;
+
+    pub fn backoff_ms(&self, now: u64) -> u64 {
+        if self.api_backed {
+            Self::API_RETRY_MS
+        } else {
+            (Self::PROBE_BASE_MS + self.probe_failures as u64 * 60_000).min(Self::PROBE_CAP_MS)
+        }
+        .saturating_sub(now.saturating_sub(self.probe_at_ms))
+        .max(0)
+    }
 }
 
 /// provider 响应头里的实时配额快照（每个 plan_key 一份；面板展示窗口维度）
@@ -57,20 +94,129 @@ pub fn now_ms() -> u64 {
 }
 
 impl QuotaLedger {
+    /// w2 观察到的官方窗口 → gate 判定（API 型恢复路径）。
+    /// 任一窗 remaining==0 → 关闸（windows_full 记录）；全部有余量 → 开闸（清状态）。
+    pub fn gate_observe_windows(&self, provider: &str, windows: &[WindowState], now: u64) {
+        if provider.is_empty() { return; }
+        let Ok(mut m) = self.provider_gate.lock() else { return };
+        let full: Vec<String> = windows.iter()
+            .filter(|w| !matches!(w.scope.as_str(), "5h" | "weekly" | "monthly"))
+            .filter(|w| w.remaining == Some(0))
+            .map(|w| w.scope.clone())
+            .collect();
+        if full.is_empty() {
+            if m.contains_key(provider) {
+                tracing::info!(provider = %provider, "provider quota gate opened (official windows show remaining)");
+                m.remove(provider);
+            }
+            return;
+        }
+        let reset = windows.iter().filter(|w| full.contains(&w.scope))
+            .filter_map(|w| w.reset_epoch_ms).max();
+        let e = m.entry(provider.to_string()).or_insert_with(|| ProviderGateState {
+            api_backed: true,
+            windows_full: full.clone(),
+            reset_epoch_ms: reset,
+            since_ms: now,
+            probe_at_ms: 0,
+            probe_failures: 0,
+            probing: false,
+        });
+        e.api_backed = true;
+        e.windows_full = full;
+        if e.reset_epoch_ms.is_none() { e.reset_epoch_ms = reset; }
+    }
+
+    /// 上游 429/402 失败 → 关闸（API 型与无 API 型共用；probe 时间表随之重排）
+    pub fn gate_mark_limited(&self, provider: &str, api_backed: bool, reset_epoch_ms: Option<u64>, now: u64) {
+        if provider.is_empty() { return; }
+        let Ok(mut m) = self.provider_gate.lock() else { return };
+        let newly = !m.contains_key(provider);
+        let e = m.entry(provider.to_string()).or_insert_with(|| ProviderGateState {
+            api_backed,
+            windows_full: vec![],
+            reset_epoch_ms,
+            since_ms: now,
+            probe_at_ms: now + ProviderGateState::API_RETRY_MS,
+            probe_failures: 0,
+            probing: false,
+        });
+        if newly {
+            tracing::warn!(provider = %provider, api = api_backed, "provider quota gate closed (upstream quota signal)");
+        }
+        e.api_backed = api_backed;
+        if e.reset_epoch_ms.is_none() { e.reset_epoch_ms = reset_epoch_ms; }
+        // 重排下次探测/重试：API 型 1h 兜底；本地无 API 型 5~10min 退避
+        e.probe_at_ms = now + if api_backed { ProviderGateState::API_RETRY_MS } else { ProviderGateState::PROBE_BASE_MS };
+        e.probing = false;
+    }
+
+    /// 闸门关闭的 provider 名列表（账号级）——relay 据此在 quota 视图里
+    /// 把该账号的全部模型余量清零（引擎按模型硬滤，替换早前 plan_pressure=1.5
+    /// 的粗粒度方案：同 plan_key 多账号不再同伴受罚）
+    pub fn gate_blocked(&self) -> Vec<String> {
+        let Ok(m) = self.provider_gate.lock() else { return Vec::new() };
+        m.keys().cloned().collect()
+    }
+
+    pub fn gate_get(&self, provider: &str) -> Option<ProviderGateState> {
+        self.provider_gate.lock().ok()?.get(provider).cloned()
+    }
+
+    /// 选一个进入探测的 provider（无 API 型）：探测窗口到 + 未在探测中
+    pub fn gate_pick_probe(&self, now: u64) -> Option<String> {
+        let mut m = self.provider_gate.lock().ok()?;
+        let mut best: Option<(u64, String)> = None;
+        for (k, e) in m.iter() {
+            if e.api_backed || e.probing || now < e.probe_at_ms { continue; }
+            if best.as_ref().map(|(t, _)| e.probe_at_ms < *t).unwrap_or(true) {
+                best = Some((e.probe_at_ms, k.clone()));
+            }
+        }
+        let (t, k) = best?;
+        if let Some(e) = m.get_mut(&k) { e.probing = true; e.probe_at_ms = t; }
+        tracing::info!(provider = %k, "quota gate: probe request allowed (real-state redetection)");
+        Some(k)
+    }
+
+    /// 探测/路由成功：开闸（真实可用是权威反证）；API 型状态由下轮 watchdog 校准
+    pub fn gate_probe_success(&self, provider: &str, now: u64) {
+        let Ok(mut m) = self.provider_gate.lock() else { return };
+        if m.remove(provider).is_some() {
+            tracing::info!(provider = %provider, "provider quota gate opened (routed request succeeded)");
+        }
+        let _ = now;
+    }
+
+    /// 探测失败：回闸 + 退避重排（5min 起步，+1min/次，封顶 10min）
+    pub fn gate_probe_fail(&self, provider: &str, now: u64) {
+        let Ok(mut m) = self.provider_gate.lock() else { return };
+        if let Some(e) = m.get_mut(provider) {
+            e.probing = false;
+            e.probe_failures = e.probe_failures.saturating_add(1);
+            let backoff = if e.api_backed { ProviderGateState::API_RETRY_MS }
+                else { (ProviderGateState::PROBE_BASE_MS + e.probe_failures as u64 * 60_000).min(ProviderGateState::PROBE_CAP_MS) };
+            e.probe_at_ms = now + backoff;
+            tracing::warn!(provider = %provider, backoff_ms = backoff, "quota probe failed, gate re-closed with backoff");
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             plan_usage: Mutex::new(HashMap::new()),
             observed_provider: Mutex::new(HashMap::new()),
+            provider_gate: Mutex::new(HashMap::new()),
         }
     }
 
-    /// 记录 provider 实时配额（每次响应 parse_headers 后调用）。plan_key 由
-    /// 调用方根据当前路由的 plan_key_for(base_url) 解析——本结构不做归属。
-    pub fn observe_provider(&self, plan_key: &str, windows: &[WindowState]) {
-        if windows.is_empty() || plan_key.is_empty() { return; }
+    /// 记录 provider 实时配额（每次响应 parse_headers 后调用）。
+    /// w2 键控 = provider 名（账号级：同 plan_key 多账号不互串，opencode 双账号
+    /// 同槽互相覆盖的实证缺陷由此修复）；调用方传 record.provider。
+    pub fn observe_provider(&self, provider: &str, windows: &[WindowState]) {
+        if windows.is_empty() || provider.is_empty() { return; }
         let Ok(mut m) = self.observed_provider.lock() else { return };
-        let slot = m.entry(plan_key.to_string()).or_default();
+        let slot = m.entry(provider.to_string()).or_default();
         for w in windows {
             if w.remaining.is_none() && w.limit.is_none() { continue; }
             slot.windows.insert(w.scope.clone(), ObservedWindow {
@@ -82,11 +228,11 @@ impl QuotaLedger {
         }
     }
 
-    /// 取某 plan_key 某窗口的最新观察值与年龄。max_age_ms 默认 10 分钟（Provider
+    /// 取某 provider 某窗口的最新观察值与年龄。max_age_ms 默认 10 分钟（Provider
     /// 测的时效性窗口——超过则退化到本地估算）
-    pub fn observed_window(&self, plan_key: &str, scope: &str, now_ms: u64, max_age_ms: u64) -> Option<ObservedWindow> {
+    pub fn observed_window(&self, provider: &str, scope: &str, now_ms: u64, max_age_ms: u64) -> Option<ObservedWindow> {
         let m = self.observed_provider.lock().ok()?;
-        let slot = m.get(plan_key)?;
+        let slot = m.get(provider)?;
         let w = slot.windows.get(scope)?.clone();
         if now_ms.saturating_sub(w.updated_epoch_ms) > max_age_ms { return None; }
         Some(w)

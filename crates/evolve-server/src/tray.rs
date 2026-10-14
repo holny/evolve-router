@@ -18,7 +18,7 @@ use objc2_app_kit::{
     NSView, NSWindowStyleMask, NSWorkspace, NSWindow,
 };
 use objc2_foundation::{
-    NSArray, NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString,
+    NSData, NSObject, NSUserDefaults, NSPoint, NSRect, NSSize, NSString,
 };
 use serde_json::Value;
 
@@ -81,7 +81,6 @@ struct RecentRow {
 #[derive(Clone)]
 struct ProvRow {
     key: String,
-    kind: String,
     disabled: bool,
     pct: Option<i64>,
     tok24: u64,
@@ -207,7 +206,7 @@ async fn poll_data(tx: mpsc::Sender<Snapshot>) {
                     let short = short_kind(&kind);
                     plans.entry(short).and_modify(|v| *v = (*v).max(pct)).or_insert(pct);
                 }
-                provs.push(ProvRow { key, kind, disabled, pct, tok24 });
+                provs.push(ProvRow { key, disabled, pct, tok24 });
             }
             provs.sort_by(|a, b| b.disabled.cmp(&a.disabled).then(b.tok24.cmp(&a.tok24)));
             provs.truncate(8);
@@ -306,13 +305,13 @@ define_class!(
 );
 
 impl ActionSink {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(_mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![Self::class(), new] }
     }
 }
 
 impl PanelDelegate {
-    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    fn new(_mtm: MainThreadMarker) -> Retained<Self> {
         unsafe { msg_send![Self::class(), new] }
     }
 }
@@ -359,7 +358,7 @@ unsafe fn apply_icon(s: &Snapshot, pulse: bool) {
 fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
     let bytes = include_bytes!("../assets/tray-icon@2x.png");
     let data = NSData::with_bytes(bytes);
-    let img = unsafe { NSImage::initWithData(mtm.alloc(), &data) }.expect("tray icon");
+    let img = NSImage::initWithData(mtm.alloc(), &data).expect("tray icon");
     img.setSize(NSSize::new(22.0, 22.0));
     img.setTemplate(true);
     img
@@ -368,21 +367,10 @@ fn load_icon(mtm: MainThreadMarker) -> Retained<NSImage> {
 // ── 动作 ──
 
 
-fn now_hhmmss() -> String {
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64;
-    unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        let t = (ms / 1000) as libc::time_t;
-        if libc::localtime_r(&t, &mut tm).is_null() {
-            return "--:--:--".into();
-        }
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    }
-}
 
 fn open_url(url: &str) {
-    unsafe {
-        let Some(mtm) = MainThreadMarker::new() else { return };
+    {
+        let Some(_mtm) = MainThreadMarker::new() else { return };
         let ns = NSString::from_str(url);
         if let Some(u) = objc2_foundation::NSURL::URLWithString(&ns) {
             NSWorkspace::sharedWorkspace().openURL(&u);
@@ -514,7 +502,8 @@ unsafe fn install_outside_click_monitor() {
             let _: () = msg_send![objc2::class!(NSEvent), removeMonitor: m.0];
         }
     });
-    let mask = objc2_app_kit::NSLeftMouseUpMask; // LeftMouseUp bit mask (static)
+    // NSEventMask::LeftMouseUp（旧的 NSLeftMouseUpMask 已废弃）
+    let mask = objc2_app_kit::NSEventMask::LeftMouseUp;
     if let Some(m) = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block) {
         std::mem::forget(block); // 监听器随面板生命周期
         *MONITOR.lock().unwrap() = Some(UnsafeRef(Retained::into_raw(m) as *mut AnyObject));
@@ -719,11 +708,11 @@ unsafe fn build_ui(mtm: MainThreadMarker, app: &NSApplication) {
 
     register_actions();
 
-    let pr = build_panel(mtm);
+    let pr = unsafe { build_panel(mtm) };
     *PANEL_REFS.lock().unwrap() = Some(pr);
 
-    if let Some(s) = SNAP.lock().ok().and_then(|g| g.clone()) {
-        update_panel(&s);
+    if let Some(snap) = SNAP.lock().ok().and_then(|g| g.clone()) {
+        unsafe { update_panel(&snap) };
     }
 
     let (tx, rx) = mpsc::channel::<Snapshot>();

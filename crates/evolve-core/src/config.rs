@@ -25,6 +25,9 @@ pub struct PolicyCfg {
     pub explore_ratio: f32,
     /// 订阅方案预算软阈值（消耗占额度百分比，超过后模型渐进降权、粘性断开）
     pub plan_soft_pct: f32,
+    /// S5 层级比例控制器容忍带（默认 0.05 = ±5pp）
+    #[serde(default = "ratio_band_default")]
+    pub ratio_band: f32,
 }
 
 impl Default for PolicyCfg {
@@ -40,6 +43,7 @@ impl Default for PolicyCfg {
             confidence_gate: 0.35,
             explore_ratio: 0.05,
             plan_soft_pct: 60.0,
+            ratio_band: ratio_band_default(),
         }
     }
 }
@@ -304,6 +308,7 @@ impl FileConfig {
             weight: entry.weight,
             source: Source::User,
             source_note: entry.source_note.clone(),
+            release_ts: None,
         }
     }
 
@@ -323,3 +328,5 @@ pub fn default_config_paths() -> Vec<std::path::PathBuf> {
     }
     paths
 }
+
+fn ratio_band_default() -> f32 { 0.05 }

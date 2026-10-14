@@ -36,6 +36,9 @@ let T: [String: String] = [
     "quit_hint": "Reopen: Applications → EvolveRouter, or `open -a EvolveRouter`",
     "gateway_err": "gateway error",
     "l_edit_weight": "Edit model weight",
+    "dm_missing": "Decision model missing — heuristic only",
+    "dm_missing_hint": "Set DECISION_JEV_* / LAYA_* / OPENAI_* env, then restart",
+    "dm_stale": "Decision model set — restart to apply",
 ]
 
 public func t(_ key: String) -> String {

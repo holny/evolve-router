@@ -31,6 +31,8 @@ pub struct Inner {
     pub ccache: Mutex<crate::relay::CompletionCache>,
     /// 按量 provider 余额缓存（provider key → /user/balance 响应节选；60s 节流刷新）
     pub payg_balance: Mutex<HashMap<String, Value>>,
+    /// models.dev 参考刷新待执行（build_state 同步上下文不能 spawn，交给 start_background）
+    pub modelsdev_refresh_due: bool,
 }
 
 /// 全局扫描进度快照（/api/providers/scan-progress 响应体）
@@ -44,6 +46,7 @@ pub struct ScanProgress {
 pub type AppState = Arc<Inner>;
 
 pub fn build_state(config: FileConfig) -> AppState {
+    let mut modelsdev_refresh_due = false;
     // overrides 提前加载：removed_base_urls 过滤初始发现（重启不复活已删 provider）
     let ov = load_overrides(&config.data.dir);
     let removed: std::collections::HashSet<String> =
@@ -69,7 +72,8 @@ pub fn build_state(config: FileConfig) -> AppState {
         if let Some(api) = evolve_discovery::modelsdev::load_fresh(&config.data.dir) {
             evolve_discovery::modelsdev::enrich(&mut discovered, &api);
         }
-        evolve_discovery::modelsdev::spawn_refresh(config.data.dir.clone());
+        // 刷新放到 start_background（runtime 内）——同步 build_state 里 spawn 会 panic
+        modelsdev_refresh_due = true;
     }
 
     // remote entries without a usable window are dead weight — drop them
@@ -78,8 +82,24 @@ pub fn build_state(config: FileConfig) -> AppState {
 
     let catalog = Catalog::build_with_discovered(&config, discovered);
     let policy = config.policy.clone();
-    let backend = DecisionBackend::build(&config.decision.backend);
+    // w2 槽位链（JEV > LAYA > OPENAI，配一即用；硬错进程内拉黑，重启复位）
+    let (backend, chain) = DecisionBackend::build_with_chain(&config.decision.backend);
     let mut engine = Engine::new(catalog, policy, backend);
+    // S5 层级比例控制器：目标 7:2:1（cheap/medium/premium），容忍带来自 [policy]
+    engine.set_ratio_control(true, [0.7, 0.2, 0.1], engine.policy.ratio_band);
+
+    // Provider 官方信息复核提醒（provider_info）：价格/折扣/额度会变——
+    // 超过 30 天未核对官方文档则提示（附 docs_url，便于快速复核）
+    {
+        let now_ms = evolve_memory::quota::now_ms();
+        let due = evolve_core::provider_info::review_due(now_ms);
+        if !due.is_empty() {
+            let list: Vec<String> = due.iter()
+                .map(|p| format!("{} ({}, {})", p.host, p.reviewed_at, p.docs_url))
+                .collect();
+            tracing::warn!(count = due.len(), providers = ?list, "provider info review due (>30d) — re-verify official docs");
+        }
+    }
 
     // ⑧ 蒸馏卡叠加：上次蒸馏的 tiers 修正回放进 catalog（重启不丢失）。
     // 用户显式声明（tiers_explicit）不被覆盖；回滚 = 删 distilled.json
@@ -93,23 +113,13 @@ pub fn build_state(config: FileConfig) -> AppState {
         }
     }
 
-    // decision-model intent-routing：decision_model/auto 后端时接通 route_advisor——
-    // heuristic 后端无需 advisor（测试环境设 backend=heuristic 即可跳过）
-    let distiller = if config.decision.backend == "decision_model" || config.decision.backend == "typesafe" || config.decision.backend == "auto" {
-        evolve_decision::decision_backend::DecisionModelBackend::from_env()
-    } else {
-        None
-    };
-    if let Some(backend) = &distiller {
-        let advisor = evolve_decision::decision_backend::DecisionModelBackend {
-            client: backend.client.clone(),
-            api_key: backend.api_key.clone(),
-            model: backend.model.clone(),
-            endpoint: backend.endpoint.clone(),
-            redact: backend.redact,
-        };
-        engine.set_route_advisor(std::sync::Arc::new(advisor));
-        tracing::info!("route_advisor: decision model (intent-routing pipeline connected)");
+    // decision-model intent-routing：chain 里有 Model 型槽位即接通槽位链
+    // advisor（fatal 拉黑与 judge 共享同一 health）；laya-only 部署无 advisor。
+    // 蒸馏器复用优先级最高的 Model 槽位（Jev > OpenAI）。
+    let distiller = chain.as_ref().and_then(|c| c.first_model());
+    if let Some(c) = &chain {
+        engine.set_route_advisor(std::sync::Arc::new(evolve_decision::slots::SlotAdvisor(c.clone())));
+        tracing::info!("route_advisor: slot chain advisor connected");
     }
 
     // 面板调控覆盖（overrides.json，重启重放）：模型权重 + 公式权重
@@ -168,6 +178,7 @@ pub fn build_state(config: FileConfig) -> AppState {
         distiller,
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
+        modelsdev_refresh_due,
     })
 }
 
@@ -224,6 +235,9 @@ impl Inner {
 
     /// Must be called inside the tokio runtime.
     pub fn start_background(self: &AppState) {
+        if self.modelsdev_refresh_due {
+            evolve_discovery::modelsdev::spawn_refresh(self.config.data.dir.clone());
+        }
         let flywheel = self.flywheel.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(30));
@@ -428,6 +442,10 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/providers/scan-progress", axum::routing::get(crate::meta::api_providers_scan_progress))
         .route("/api/providers/restore", axum::routing::post(crate::meta::api_providers_restore))
         .route("/api/providers/reconcile", axum::routing::post(crate::meta::api_providers_reconcile))
+        .route("/api/health/clear", axum::routing::post(crate::meta::api_health_clear))
+        .route("/api/model-tags", axum::routing::get(crate::meta::api_model_tags_get).post(crate::meta::api_model_tags_post))
+        .route("/api/report", axum::routing::get(crate::meta::api_report))
+        .route("/api/models/active", axum::routing::post(crate::meta::api_models_active))
         .route(
             "/api/plans",
             axum::routing::get(crate::meta::api_plans).post(crate::meta::api_plans_set),
@@ -470,6 +488,32 @@ pub struct Overrides {
     /// 用户在面板删除的发现 provider（按 base_url 记忆，重扫不加回；恢复即移出此表）
     #[serde(default)]
     pub removed_base_urls: Vec<String>,
+    /// 活跃集手动覆盖（2026-10 用户裁决：默认活跃=最近发布/最近的 50 个）：
+    /// include = 手动开启（顶掉最低分），exclude = 手动停用
+    #[serde(default)]
+    pub active_models: ActiveOverride,
+    /// 模型标签用户覆盖（2026-10）：model_id → {capability, price_tier}
+    /// ——默认自动推导（tags::default_tags），此处仅存用户显式修改
+    #[serde(default)]
+    pub model_tags: HashMap<String, TagOverride>,
+}
+
+/// 活跃集覆盖
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ActiveOverride {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+/// 标签覆盖（可只改一项）
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TagOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_tier: Option<String>,
 }
 
 /// 手动 provider 定义——用户在面板新增/修改，与扫描发现并存

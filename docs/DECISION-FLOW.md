@@ -35,8 +35,8 @@ Agent ──► 网关入口 ──► 身份提取 ──► 预处理 ──�
 阶段 1：判定                                       阶段 2：评分
 8 量化特征 → 任务画像                              5 因子 → 排序
        │                                                  │
-       ▼ HybridBackend 双判官                          ▼ score_all
-  Jev(LLM,1-3s) + Heuristic(0ms)               q  s  c  r  h
+       ▼ 判官槽位链（JEV > LAYA > OPENAI）+ 启发式      ▼ score_all
+  decision model(1-3s) ⊕ Heuristic(0ms)        q  s  c  r  h
        │ 融合（红/严/均值/分歧取 heuristic）              │
        ▼ JudgmentSet(8 维)                          ▼
   domain difficulty visual 决策                cost × √(权重×偏置) × 预算压制
@@ -52,7 +52,7 @@ Agent ──► 网关入口 ──► 身份提取 ──► 预处理 ──�
 ## 2. 完整决策管线
 
 ```
-目录 195 个模型
+目录 244 个模型（本机实测；随发现/远程拉取变化）
   │
   ▼ 硬检查（8 类，任一失败则淘汰）
   ├── 健康冷却（model×key，model_available() 走 model_available
@@ -62,22 +62,36 @@ Agent ──► 网关入口 ──► 身份提取 ──► 预处理 ──�
   ├── 窗口（context_fits：est×1.1+max_output ≤ context_window；
   │   或 proven-bound：max_accepted_tokens ≥ est）
   ├── 配额（quota_best_remaining_by_models ≥ est）
+  ├── **活跃集（2026-10）**：只路由"最近发布（保底 20 席）+ 最近使用（14 天内）"的前 50
+  │   （其余在面板可见、一键启用，启用自动顶掉最低分者）
   └── 预算压力（>0.95 → 硬过滤，剩 1.5%-5% 余量给硬任务）
   │
 候选（约 18）
   │
-  ▼ 质量底线 quality_floor(difficulty_eff)
-  d=0 → floor=1.0（谁都行）│d=3 → floor=0.55（仅强模型）
+  ▼ 难度校准（2026-10）calibration(d_raw) → d_eff
+  滚动分位重塑到目标 70% 简单 / 20% 中等 / 10% 困难（判定器偏松也不会淹没在"难任务"）
   │
-合格（约 9-15）
+  ▼ 价位层硬闸（2026-10，用户裁决：不轻易使用贵模型）
+  L1 仅 cheap │ L2 到 medium │ L3 全开
+  倒挂例外：同家族有效成本 ≤ 允许层中位 → 放行（订阅 mp≈0 / 活动价 / 官方倒挂）
+  质量优先回退：闸门会把唯一达标模型挡掉时，先松闸门、再降质量门槛
   │
-  ▼ 综合评分 score_all
+  ▼ 质量底线 quality_floor(d_eff)（2026-10 方向修正）
+  d≈0 → 0.50（几乎不设限，成本主导）│ d=3 → 0.85（仅强模型）
   │
-  ▼ ε 探索（10% 默认）
+  ▼ 比例控制器（2026-10）档位乘子
+  观测**实际选用**的 cheap/medium/premium 占比，超标层成本乘子 1.0→1.5
+  │
+  ▼ 综合评分 score_all（成本 = 官方价目有效成本：缓存命中价 + 峰谷时段）
+  │
+  ▼ ε 探索（默认 5%）
   欠采样模型优先（samples<10），打破"老牌模型富者愈富"
   │
+  ▼ 缓存经济粘性（2026-10）
+  该模型近期缓存命中率 > 0.6 且对手不便宜 >15% → 保持原模型（重打前缀是全 miss）
+  │
   ▼ 置信门控
-  jev+heuristic 都低置信 → 沿用上一会话模型
+  两判官都低置信 → 沿用上一会话模型
   │
 selected = chosen + chain
 ```

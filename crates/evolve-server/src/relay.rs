@@ -8,6 +8,7 @@ use evolve_core::engine::RoutingInput;
 use evolve_core::features as feat;
 use evolve_core::tokens as tok;
 use evolve_core::types::*;
+use evolve_core::types::HealthKind;
 use evolve_memory::health::{classify_failure, Failure};
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -108,8 +109,29 @@ pub async fn chat_completions(
             let sticky = st.sessions.get(&sticky_key);
             let health = st.health.snapshot();
             let telemetry = st.flywheel.telemetry_snapshot();
-            let quota_view = st.quota.best_remaining_by_models();
+            let mut quota_view = st.quota.best_remaining_by_models();
             let plan_pressure = st.plan_pressure_map();
+            // S2 价格层标签表（自动推导 + 用户覆盖）→ 引擎难度→价位硬闸
+            let price_tiers = crate::meta::price_tier_map(&st);
+            // 活跃集（最近发布/最近使用前 50 + 手动开关）
+            let active_ids = crate::meta::active_id_set(&st);
+
+            // w2 provider 配额闸门：QUOTA_LIMITED 账号的模型配额视图清零
+            // （引擎按模型硬滤 "quota remaining < est"——比 plan_pressure=1.5
+            // 粗粒度方案精确：同 plan_key 多账号不连带受罚）；探测窗口到的
+            // 无 API provider 豁免本轮（放一间探测单验证真实状态）
+            let now_gate = evolve_memory::quota::now_ms();
+            let probe_provider = st.quota.gate_pick_probe(now_gate);
+            for provider in st.quota.gate_blocked() {
+                if Some(provider.as_str()) == probe_provider.as_deref() {
+                    continue;
+                }
+                for mid in st.engine.catalog_snapshot().iter()
+                    .filter(|m| m.provider == provider)
+                    .map(|m| m.id.clone()) {
+                    quota_view.insert(mid, 0);
+                }
+            }
 
             // L3 session-loop: did the previous turn's tool calls come back
             // executed as role=tool messages? (gateway-side semantic signal)
@@ -148,6 +170,8 @@ pub async fn chat_completions(
                 quota: &quota_view,
                 plan_pressure: &plan_pressure,
                 redact: st.config.decision.redact,
+                price_tier_of: &price_tiers,
+                active: &active_ids,
             };
             let d = st.engine.decide(input);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
@@ -402,7 +426,33 @@ pub async fn chat_completions(
                 let head: String = snippet.chars().take(300).collect();
                 tracing::warn!(model = %cand, status = 400, body = %head, "upstream 400 — request rejected");
             }
-            let failure = classify_failure(status.as_u16(), &snippet, retry_after_ms);
+            let mut failure = classify_failure(status.as_u16(), &snippet, retry_after_ms);
+            // w3 404 语义二分（用户裁决）：
+            //  - 模型仍在 provider 的模型列表里 → 临时不可用，5h 冷却后自动重试
+            //  - 列表里没有（上游已移除）→ 永久黑名单（until=哨兵），仅手动恢复
+            if status.as_u16() == 404 {
+                if crate::meta::provider_lists_model(&st, &record.provider, &record.upstream_model) {
+                    failure = Failure {
+                        kind: HealthKind::Unsupported,
+                        message: format!("{} not serving now (still listed; retry in 5h)", record.upstream_model),
+                        until_epoch_ms: Some(evolve_memory::quota::now_ms() + 5 * 3600 * 1000),
+                    };
+                } else {
+                    failure = Failure {
+                        kind: HealthKind::Unsupported,
+                        message: format!("{} removed upstream (manual restore required)", record.upstream_model),
+                        until_epoch_ms: Some(evolve_memory::health::HealthRegistry::PERMANENT_UNTIL),
+                    };
+                }
+            }
+            // w3 配额类（API 型 provider）：既不采信上游长 retry-after，也不落
+            // 健康冷却/探测周期（用户裁决：会周期性查 API 就不需要探活）——
+            // 当场拉一次官方配额 API 定夺：API 说满 → gate 关（账号级窗口）；
+            // API 说有余量 → 保持可用（不因单次 429 误伤）
+            let api_backed_quota = failure.kind == HealthKind::QuotaExhausted
+                && crate::meta::provider_is_api_backed(&st, &record.base_url);
+            // 无 API 型：信任上游给的恢复期（唯一可信信号——月窗 9d9h 如实采用，
+            // 用户裁决）；探活由 watchdog 独立周期探测兜底（不受此冷却阻挡）
             tracing::warn!(model = %cand, status = status.as_u16(), kind = failure.kind.label(), "upstream failure, marking health");
             st.events.record(json!({
                 "kind": "upstream_error",
@@ -435,12 +485,44 @@ pub async fn chat_completions(
             {
                 if !failure_windows.is_empty() {
                     st.quota.observe(&format!("{cand}{KEY_SEP}{key_idx}"), failure_windows.clone());
-                    if let Some(pk) = evolve_core::plans::plan_key_for(&record.base_url) {
-                        st.quota.observe_provider(pk, &failure_windows);
-                    }
+                    st.quota.observe_provider(&record.provider, &failure_windows);
                 }
             }
-            st.health.mark_failure(&health_id, failure);
+            // w2 gate：上游配额信号 → 账号级关闸（面板状态与路由同步）
+            // （置于 mark_failure 之前——Failure 非 Copy，先取用再做健康记账）
+            if matches!(failure.kind, HealthKind::QuotaExhausted | HealthKind::PaymentRequired) {
+                let provider_name = &record.provider;
+                if !provider_name.is_empty() {
+                    let pk_gate = evolve_core::plans::plan_key_for(&record.base_url).unwrap_or_default();
+                    let api_backed = matches!(
+                        pk_gate,
+                        "minimax-coding" | "zhipu-coding" | "zai-devpack" | "opencode-go"
+                    );
+                    let reset_ms = failure_windows.iter().filter_map(|w| w.reset_epoch_ms).max();
+                    if st.quota.gate_get(provider_name).is_none() {
+                        st.events.record(json!({
+                            "kind": "quota_state_changed",
+                            "provider": provider_name, "state": "quota_limited",
+                            "source": if api_backed { "api" } else { "upstream" },
+                        }));
+                    }
+                    st.quota.gate_mark_limited(provider_name, api_backed, reset_ms, evolve_memory::quota::now_ms());
+                }
+            }
+            if api_backed_quota {
+                // 立即用官方 API 复核（异步；gate 由 API 数据接管，不落健康冷却）
+                let st2 = st.clone();
+                let key_name = record.provider.clone();
+                let bu = record.base_url.clone();
+                let pk_now = evolve_core::plans::plan_key_for(&bu).unwrap_or_default().to_string();
+                tokio::spawn(async move {
+                    let _ = crate::meta::refresh_observed(
+                        &st2, &key_name, &bu, &pk_now, None, evolve_memory::quota::now_ms(),
+                    ).await;
+                });
+            } else {
+                st.health.mark_failure(&health_id, failure);
+            }
             let kind_label = {
                 let snap = st.health.snapshot();
                 snap.get(&health_id).map(|h| h.kind.label().to_string()).unwrap_or_default()
@@ -454,9 +536,7 @@ pub async fn chat_completions(
         let windows = evolve_memory::QuotaLedger::parse_headers(resp.headers());
         st.quota.observe(&format!("{cand}{KEY_SEP}{key_idx}"), windows.clone());
         // provider 实时配额（panel 配额展示以此为准，不靠本地 token 累加估算）
-        if let Some(pk) = evolve_core::plans::plan_key_for(&record.base_url) {
-            st.quota.observe_provider(pk, &windows);
-        }
+        st.quota.observe_provider(&record.provider, &windows);
         // success path（review#15：仅 2xx 记健康——409/422/451 等非 fallback
         // 状态码此前 mark_ok 会清零冷却并掩盖上游异常）
         let success_health_id = if keys.is_empty() {
@@ -466,6 +546,32 @@ pub async fn chat_completions(
         };
         if status.is_success() {
             st.health.mark_ok(&success_health_id);
+        }
+        // w2 gate：被路由到且成功 = 真实状态的反证——闸门立即开，状态不再显示
+        // 配额受限；API 型当场强制刷新官方配额（充值/窗口重置即时可见）
+        if status.is_success() && !record.provider.is_empty() {
+            let gated = st.quota.gate_get(&record.provider).map(|g| !g.windows_full.is_empty()).unwrap_or(false);
+            if gated {
+                st.quota.gate_probe_success(&record.provider, evolve_memory::quota::now_ms());
+                st.events.record(json!({
+                    "kind": "quota_state_changed",
+                    "provider": record.provider, "state": "ok", "source": "routed_success",
+                }));
+                let pk_ok = evolve_core::plans::plan_key_for(&record.base_url).unwrap_or_default();
+                if matches!(
+                    pk_ok,
+                    "minimax-coding" | "zhipu-coding" | "zai-devpack" | "opencode-go"
+                ) {
+                    let st2 = st.clone();
+                    let bu = record.base_url.clone();
+                    let key_name = record.provider.clone();
+                    tokio::spawn(async move {
+                        let _ = crate::meta::refresh_observed(
+                            &st2, &key_name, &bu, &pk_ok, None, evolve_memory::quota::now_ms(),
+                        ).await;
+                    });
+                }
+            }
         }
         decision.chosen = cand.clone();
         decision.upstream_model = record.upstream_model.clone();
@@ -576,7 +682,7 @@ pub async fn chat_completions(
             return out.body(axum::body::Body::from_stream(stream)).unwrap();
         }
 
-        let resp_ct = resp
+        let _resp_ct = resp
             .headers()
             .get("content-type")
             .cloned()

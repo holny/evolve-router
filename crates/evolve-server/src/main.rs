@@ -43,6 +43,13 @@ enum Cmd {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// S7 回测验收：对历史请求跑端到端分布报告（难度/能力/价位 7:2:1 + 缓存/成本 KPI）
+    Report {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value = "500")]
+        limit: usize,
+    },
     /// ⑦ Replay historical traffic to A/B test flywheel strategy params
     Backtest {
         #[arg(long)]
@@ -121,6 +128,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::Doctor { config } => doctor(config),
         Cmd::MockUpstream { port } => mock_upstream(port),
         Cmd::Stats { config } => stats(config),
+        Cmd::Report { config, limit } => report(config, limit),
         Cmd::Backtest { config, ok_weight_b, gain_b, limit, judge_samples } => {
             backtest(config, ok_weight_b, gain_b, limit, judge_samples)
         }
@@ -180,7 +188,7 @@ fn backtest(
              [telemetry] response_digest = true 积累事件后再用"
         );
         let backend = evolve_decision::decision_backend::DecisionModelBackend::from_env()
-            .ok_or_else(|| anyhow::anyhow!("--judge-samples 需要 DECISION_MODEL_API_KEY（兼容旧名 TYPESAFE_API_KEY）"))?;
+            .ok_or_else(|| anyhow::anyhow!("--judge-samples requires a decision model: set DECISION_API_KEY (+ DECISION_BASE_URL / DECISION_MODEL)"))?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
         let asker = move |query: &str, response: &str| -> Option<f32> {
             runtime.block_on(backend.judge_response_quality(query, response))
@@ -191,6 +199,65 @@ fn backtest(
     };
     evolve_memory::backtest::print_report(&report);
     Ok(())
+}
+
+/// S7 回测验收报告：优先调用线上网关（目录/快照最准），失败回退本地构建
+fn report(config_path: Option<PathBuf>, limit: usize) -> anyhow::Result<()> {
+    let (cfg, path) = config::load_config(config_path.as_deref())?;
+    println!("config: {}", path.as_deref().map(|p| p.display().to_string()).unwrap_or("<embedded>".into()));
+    // 线上优先：CLI 本地构建不含远程拉取（目录不全，历史事件里的模型解析不到）
+    let url = format!("http://127.0.0.1:{}/api/report?limit={}", cfg.server.port, limit);
+    if let Ok(out) = std::process::Command::new("curl").args(["-s", "--max-time", "20", &url]).output()
+        && let Ok(r) = serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        && r.get("count").is_some()
+    {
+        print_report(&r);
+        return Ok(());
+    }
+    let state = state::build_state(cfg);
+    let r = evolve_server::meta::distribution_report(&state, limit);
+    print_report(&r);
+    Ok(())
+}
+
+fn print_report(r: &serde_json::Value) {
+    let pct = |v: f64| format!("{:.0}%", v * 100.0);
+    let get = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+    let pass = |v: &serde_json::Value| v.get("pass").and_then(|x| x.as_bool()).unwrap_or(false);
+    let n = r.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
+    println!("\nsamples: {n}   unusable models (excluded from basis): {}",
+        r.get("unusable_models").and_then(|x| x.as_u64()).unwrap_or(0));
+    println!("\n{:<12} {:>8} {:>8} {:>8} {:>8}   (target 70/20/10 ±10pp; 历史含旧判定)", "dimension", "low", "mid", "high", "verdict");
+    for (name, key) in [("difficulty", "difficulty"), ("capability", "capability"), ("price_tier", "price_tier")] {
+        let v = &r[key];
+        let (a, b, c) = match key {
+            "difficulty" => (get(v, "l1"), get(v, "l2"), get(v, "l3")),
+            "capability" => (get(v, "basic"), get(v, "standard"), get(v, "powerful")),
+            _ => (get(v, "cheap"), get(v, "medium"), get(v, "premium")),
+        };
+        println!("{:<12} {:>8} {:>8} {:>8} {:>8}", name, pct(a), pct(b), pct(c), if pass(v) { "PASS" } else { "DRIFT" });
+    }
+    let k = &r["kpi"];
+    println!("\nKPI:");
+    println!("  premium on easy tasks (should be ~0): {}", get(k, "premium_on_easy"));
+    println!("  L3 share: {}  (premium on L3: {})", pct(get(k, "l3_share")), get(k, "l3_premium"));
+    println!("  cache hit rate: {}", pct(get(k, "cache_hit_rate")));
+    println!("  avg cost proxy / request: {:.4} ({} costed)", get(k, "avg_cost_proxy"), get(k, "costed_requests"));
+    // 实时快照（本次进程窗口）：校准后的难度分布 + 比例控制器
+    if let Some(live) = r.get("live") {
+        let dz = &live["difficulty"];
+        println!("\nlive window (since gateway start, samples {}):", get(dz, "samples"));
+        let raw = &dz["raw"];
+        let cal = &dz["calibrated"];
+        println!("  difficulty raw        : {}/{}/{}", pct(get(raw, "l1")), pct(get(raw, "l2")), pct(get(raw, "l3")));
+        println!("  difficulty calibrated : {}/{}/{}   (target 70/20/10)", pct(get(cal, "l1")), pct(get(cal, "l2")), pct(get(cal, "l3")));
+        let rz = &live["ratio"];
+        let ob = &rz["observed"];
+        let pn = &rz["penalties"];
+        println!("  price observed        : cheap {} / medium {} / premium {}   (penalties ×{:.2}/×{:.2}/×{:.2})",
+            pct(get(ob, "cheap")), pct(get(ob, "medium")), pct(get(ob, "premium")),
+            get(pn, "cheap"), get(pn, "medium"), get(pn, "premium"));
+    }
 }
 
 fn stats(config_path: Option<PathBuf>) -> anyhow::Result<()> {    let (cfg, path) = config::load_config(config_path.as_deref())?;
@@ -293,6 +360,9 @@ fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Re
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         state.start_background();
+        // w2 配额看门狗：官方端点定时刷新（90s），面板不开也维持 gate 状态新鲜
+        evolve_server::meta::spawn_quota_watchdog(state.clone());
+
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!("evolve gateway listening on http://{addr}");

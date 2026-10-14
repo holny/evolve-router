@@ -74,6 +74,7 @@ pub fn discover_from_text(text: &str) -> anyhow::Result<Vec<ModelRecord>> {
                 weight: None,
                 source: Source::Discovered,
                 source_note: Some("codex".into()),
+                release_ts: None,
             });
         }
     }

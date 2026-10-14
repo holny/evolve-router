@@ -21,6 +21,7 @@ public struct PanelView: View {
     public var body: some View {
         VStack(spacing: 10) {
             header
+            decisionBanner
             metricsCard
             if !state.recent.isEmpty { decisionsCard }
             if !state.providers.isEmpty { providersCard }
@@ -29,9 +30,8 @@ public struct PanelView: View {
         .padding(14)
         .frame(width: 336)
         .task {
-            if ProcessInfo.processInfo.environment["EV_PREVIEW_STATIC"] == nil {
-                await state.pollData()
-            }
+            await state.pollLive()
+            await state.pollData()
         }
         .confirmationDialog(t("quit_confirm"), isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button(t("quit_action"), role: .destructive) { quitAll() }
@@ -79,6 +79,49 @@ public struct PanelView: View {
             .foregroundStyle(.secondary)
             .help(t("copy_cfg"))
         }
+    }
+
+    // MARK: - 决策模型横幅（missing/stale 提示；点按打开 Dashboard）
+
+    @ViewBuilder
+    private var decisionBanner: some View {
+        if state.decisionStatus == "missing" || state.decisionStatus == "stale" {
+            let stale = state.decisionStatus == "stale"
+            Button {
+                openDashboard()
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: stale ? "checkmark.seal" : "exclamationmark.triangle")
+                        .font(.system(size: 10, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(stale ? t("dm_stale") : t("dm_missing"))
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .lineLimit(1)
+                        if !stale {
+                            Text(t("dm_missing_hint"))
+                                .font(.system(size: 9))
+                                .foregroundStyle(.orange.opacity(0.85))
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 8))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.orange)
+            .help(stale ? "Decision model configured — restart the gateway to apply" : "Decision model not configured — set DECISION_JEV_* / LAYA_* / OPENAI_* env (see Dashboard banner)")
+        }
+    }
+
+    private func openDashboard() {
+        if let url = URL(string: Config.baseURL) { NSWorkspace.shared.open(url) }
     }
 
     private var statusColor: Color {
@@ -143,28 +186,29 @@ public struct PanelView: View {
                         Text(r.model)
                             .font(.system(size: 11, weight: .medium))
                             .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                         VStack(alignment: .leading, spacing: 1) {
                             HStack(spacing: 5) {
                                 let routing = r.preprocessMs + r.decisionMs
-                                let llm = max(0, r.totalMs - (r.ttftMs ?? 0) - routing)
                                 Text("ER \(Self.fmtMs(routing))")
                                     .help("EvolveRouter routing decision time")
                                 if let tt = r.ttftMs {
                                     Text("TTFT \(Self.fmtMs(tt))")
                                         .help("upstream time-to-first-token")
                                 }
-                                Text("LLM \(Self.fmtMs(llm))")
-                                    .help("upstream generation time")
                                 if let s = r.tokS, s > 0 {
-                                    Text(String(format: "%.0f tok/s", s))
+                                    Text(String(format: "%.0f t/s", s))
+                                        .help("generation speed")
                                 }
-                                Text("\(AppState.fmtTok(r.totalTokens))(\(r.cachePct ?? 0)%)")
-                                    .help("total tokens (cache hit rate in parens)")
+                                if r.totalTokens > 0 {
+                                    Text("\(AppState.fmtTok(r.totalTokens))(\(r.cachePct ?? 0)%)")
+                                        .help("total tokens (cache hit rate in parens)")
+                                }
                             }
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
-                            .minimumScaleFactor(0.8)
+                            .minimumScaleFactor(0.85)
                             if r.status != 200, let reason = r.failReason {
                                 Text("Fail: \(reason)")
                                     .font(.system(size: 9.5))
@@ -175,10 +219,16 @@ public struct PanelView: View {
                         }
                     }
                     Spacer(minLength: 0)
-                    Text(Self.fmtMs(r.totalMs))
-                        .font(.system(size: 10, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundStyle(r.status == 200 ? .secondary : Color.red)
+                    VStack(alignment: .trailing, spacing: 1) {
+                        Text(Self.fmtMs(r.totalMs))
+                            .font(.system(size: 10, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(r.status == 200 ? .secondary : Color.red)
+                        Text(r.time)
+                            .font(.system(size: 9, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
@@ -214,22 +264,6 @@ public struct PanelView: View {
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                 HStack(spacing: 5) {
-                    if let cd = p.cooldownUntil, cd > Date() {
-                        let remain = Int(cd.timeIntervalSinceNow)
-                        let txt = remain >= 3600 ? "\(remain/3600)h \(remain%3600/60)m"
-                            : remain >= 60 ? "\(remain/60)m \(remain%60)s" : "\(remain)s"
-                        Text("\(t("cooldown")) \(txt)")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.red)
-                            .monospacedDigit()
-                        if let cause = p.cooldownCause, !cause.isEmpty {
-                            Text(cause)
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.red)
-                                .lineLimit(1)
-                                .help(cause)
-                        }
-                    }
                     if !p.enabled {
                         Text(t("disabled"))
                             .font(.system(size: 9.5))
@@ -247,7 +281,7 @@ public struct PanelView: View {
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
                     }
-                    if let rt = p.avgRate {
+                    if let rt = p.avgRate, rt > 0 {
                         Text(String(format: "%.0f t/s", rt))
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
@@ -269,7 +303,38 @@ public struct PanelView: View {
 
     @ViewBuilder
     private func trailingCell(_ p: ProviderRow) -> some View {
-        if let used = p.quotaUsed, let scope = p.quotaScope {
+        // 统一双排模板：第一行状态词（cooldown / 5h full / monthly full / 余额），
+        // 第二行倒计时。原因与模型名进 tooltip——与配额窗口态视觉节奏一致
+        if let cd = p.cooldownUntil, cd > Date() {
+            let txt = Self.fmtCountdown(cd)
+            // 配额类冷却（上游 429 说 "quota window exhausted (monthly)"）本质就是
+            // 窗口耗尽——并轨到配额窗态同款文案（月度 full + 倒计时），区别于
+            // 纯健康冷却（失败驱动）。两条来源在 tooltip 里都写清楚。
+            let quotaStyle = p.cooldownCause?.contains("quota window exhausted") == true
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(quotaStyle ? Self.quotaFullLabel(p.cooldownCause ?? "") : t("cooldown"))
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.red)
+                Text(txt)
+                    .font(.system(size: 9, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.red.opacity(0.8))
+            }
+            .lineLimit(1)
+            .help(Self.cooldownHelp(p))
+        } else if !p.blockedModels.isEmpty {
+            // w3 永久黑名单（上游 404 且不在模型列表）——仅 Web 手动恢复
+            VStack(alignment: .trailing, spacing: 1) {
+                Text("removed")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(.red)
+                Text("\(p.blockedModels.count) · restore in Dashboard")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(Color.red.opacity(0.75))
+            }
+            .lineLimit(1)
+            .help("\(p.blockedModels.joined(separator: ", ")) — removed by upstream (not in the provider model list). Manual restore via Dashboard → Providers → Restore")
+        } else if let used = p.quotaUsed, let scope = p.quotaScope {
             if p.quotaExhausted {
                 VStack(alignment: .trailing, spacing: 1) {
                     Text("\(scope) full")
@@ -285,13 +350,14 @@ public struct PanelView: View {
                 .lineLimit(1)
                 .help("\(scope) quota exhausted — recovers at \(p.quotaReset.map { Self.fmtAbs($0) } ?? "?")")
             } else {
-                quotaBar(used).frame(width: 46)
-                Text("\(used)%")
-                    .font(.system(size: 10, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 38, alignment: .trailing)
-                    .help("\(scope) quota usage")
+                HStack(spacing: 5) {
+                    quotaBar(used).frame(width: 46)
+                    Text("\(used)%")
+                        .font(.system(size: 10, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                .help("\(scope) quota usage · \(Self.srcTip(p.quotaSource))")
             }
         } else if let bal = p.paygBalance {
             Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
@@ -457,12 +523,74 @@ public struct PanelView: View {
 
 // 时长格式：>=1s 折秒，<1s 毫秒
 extension PanelView {
-    static func fmtMs(_ ms: Int) -> String {
-        ms >= 1000 ? String(format: "%.1fs", Double(ms) / 1000) : "\(ms)ms"
+    /// 上游配额信息（"quota window exhausted (monthly)"）→ 窗口态标签
+    static func quotaFullLabel(_ cause: String) -> String {
+        if cause.contains("(monthly)") { return "monthly full" }
+        if cause.contains("(weekly)") { return "weekly full" }
+        return "5h full"
     }
+
+    /// cooldown tooltip：健康冷却（失败驱动、模型级）与配额窗口（数据驱动、账号级）
+    /// 是两条独立的不可用来源——把出处写清楚，免得与 5h/weekly full 混淆
+    static func cooldownHelp(_ p: ProviderRow) -> String {
+        let quotaStyle = p.cooldownCause?.contains("quota window exhausted") == true
+        var s = quotaStyle
+            ? "Quota window exhausted per upstream 429 (account-level window)"
+            : "Health cooldown (upstream failure signal, per model"
+        if !quotaStyle, let m = p.cooldownModel { s += ": \(m)" }
+        if quotaStyle { s += "" } else { s += ")" }
+        if let c = p.cooldownCause, !c.isEmpty, !quotaStyle { s += " — \(c)" }
+        if quotaStyle, let m = p.cooldownModel { s += " — observed on \(m)" }
+        s += ". Recovery: exact reset time comes from the upstream response (Retry-After / reset header), "
+        s += "else platform defaults (quota 5m · rate-limit 60s×hits · auth/payment 30m×hits · missing model 24h), capped 24h"
+        if let reset = p.quotaReset {
+            s += ". Quota window resets at \(fmtAbs(reset))"
+        }
+        return s
+    }
+
+    static func fmtMs(_ ms: Int) -> String {
+        if ms >= 60_000 { return String(format: "%dm%02ds", ms / 60_000, (ms % 60_000) / 1000) }
+        if ms >= 1000 { return String(format: "%.1fs", Double(ms) / 1000) }
+        return "\(ms)ms"
+    }
+    // w2 配额信息源标签（quota refresh source，非 provider 接入方式）：
+    // live = 官方配额端点实测（watchdog 90s 自动刷新，失败兜底 1h 再试）；
+    // hdr  = 官方限流响应头学习（该账号每次请求到达即更新）；
+    // est  = 无官方信号，网关按 tokens×单价 推算（每次轮询重算）
+    static func srcTag(_ source: String) -> String {
+        switch source {
+        case "official": return "live"
+        case "official_headers": return "hdr"
+        case "estimated": return "est"
+        default: return ""
+        }
+    }
+
+    static func srcTip(_ source: String) -> String {
+        switch source {
+        case "official":
+            return "Quota LIVE from the provider's official API — watchdog refreshes every ~90s (retry 1h on failure)"
+        case "official_headers":
+            return "Quota learned from official rate-limit response headers — updates with each request on this account"
+        case "estimated":
+            return "No official quota source — gateway estimates from tokens × unit price, recomputed each panel poll"
+        default: return ""
+        }
+    }
+
+    /// 统一倒计时档位（用户裁决）：
+    /// ≥24h → xxdxxhxxm（不显秒）；≥1h → xxhxxm（不显秒）；<1h → xxmxxs（秒级倒计时）
+    static func fmtCountdown(seconds: Int) -> String {
+        let s = max(0, seconds)
+        if s >= 86_400 { return "\(s / 86_400)d\(s % 86_400 / 3_600)h\(s % 3_600 / 60)m" }
+        if s >= 3_600 { return "\(s / 3_600)h\(s % 3_600 / 60)m" }
+        if s >= 60 { return "\(s / 60)m\(s % 60)s" }
+        return "\(s)s"
+    }
+
     static func fmtCountdown(_ until: Date) -> String {
-        let s = max(0, Int(until.timeIntervalSinceNow))
-        return s >= 3600 ? "\(s/3600)h \(s%3600/60)m" : s >= 60 ? "\(s/60)m \(s%60)s" : "\(s)s"
+        fmtCountdown(seconds: Int(until.timeIntervalSinceNow))
     }
     static func fmtAbs(_ d: Date) -> String {
         d.formatted(date: .abbreviated, time: .shortened)

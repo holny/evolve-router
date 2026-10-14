@@ -228,6 +228,7 @@ fn extract_models(root: &Value) -> Vec<ModelRecord> {
                 weight: None,
                 source: Source::Discovered,
                 source_note: Some("opencode".into()),
+                release_ts: None,
             });
         }
     }

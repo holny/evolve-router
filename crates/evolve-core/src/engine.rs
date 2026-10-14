@@ -19,6 +19,12 @@ pub struct RoutingInput<'a> {
     pub plan_pressure: &'a HashMap<String, f32>,
     /// 隐私红线：true 时用户原文不得离开本机（advisor 兜底路径禁用等）
     pub redact: bool,
+    /// S2 价格层标签（model_id → 0=cheap / 1=medium / 2=premium；空表 = 不启用硬闸）。
+    /// 由 server 侧按 tags（自动推导 + 用户覆盖）计算后传入——引擎不碰 overrides。
+    pub price_tier_of: &'a HashMap<String, u8>,
+    /// 活跃集（用户裁决：最近发布/最近使用的前 50；空集 = 不启用过滤）——
+    /// 非活跃模型不参与路由（Web 可手动开启，开启自动顶掉最低分者）
+    pub active: &'a std::collections::HashSet<String>,
 }
 
 /// Linear blend of tier fields: conf 1.0 -> new, 0.0 -> base.
@@ -52,6 +58,12 @@ pub struct Engine {
     /// 面板可调的用户权重覆盖（模型级），评分时覆盖目录 weight
     weight_overlay: std::sync::RwLock<HashMap<String, f32>>,
     counter: std::sync::atomic::AtomicU64,
+    /// 难度经验分位校准（目标 70/20/10）——判定器系统性偏移的归一器
+    calibrator: crate::calibration::DifficultyCalibrator,
+    calibration_enabled: bool,
+    /// S5 层级比例反馈（实际选用分布 → 目标 7:2:1 的纠偏器）
+    ratio: crate::ratio::RatioController,
+    ratio_enabled: bool,
 }
 
 impl Engine {
@@ -65,7 +77,39 @@ impl Engine {
             weights_override: std::sync::RwLock::new(None),
             weight_overlay: std::sync::RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
+            calibrator: crate::calibration::DifficultyCalibrator::default(),
+            calibration_enabled: true,
+            ratio: crate::ratio::RatioController::default(),
+            ratio_enabled: true,
         }
+    }
+
+    /// S5 配置层级比例控制器（target = [cheap, medium, premium] 份额；band 容忍带）
+    pub fn set_ratio_control(&mut self, enabled: bool, target: [f32; 3], band: f32) {
+        self.ratio_enabled = enabled;
+        self.ratio = crate::ratio::RatioController::new(target, band);
+    }
+
+    /// 比例控制器快照（观测用）
+    pub fn ratio_snapshot(&self) -> (crate::ratio::RatioSnapshot, [f32; 3], f32, bool) {
+        let (t, b) = (self.ratio.target(), self.policy.ratio_band);
+        (self.ratio.snapshot(), t, b, self.ratio_enabled)
+    }
+
+    /// 配置难度校准（target 为 [l1,l2,l3] 份额；enabled=false 回退原始判定）
+    pub fn set_difficulty_calibration(&mut self, enabled: bool, target: [f32; 3]) {
+        self.calibration_enabled = enabled;
+        self.calibrator = crate::calibration::DifficultyCalibrator::new(target);
+    }
+
+    /// 校准样本量（观测用）
+    pub fn calibration_samples(&self) -> usize {
+        self.calibrator.samples()
+    }
+
+    /// 难度分布快照（raw vs calibrated + 目标 7:2:1）——面板/统计观测用
+    pub fn difficulty_snapshot(&self) -> (crate::calibration::DifficultySnapshot, [f32; 3], bool) {
+        (self.calibrator.snapshot(), self.calibrator.target(), self.calibration_enabled)
     }
 
     /// 目录热更新：整体替换模型列表（重建索引）。扫描合入 / 面板删除后调用。
@@ -170,7 +214,20 @@ impl Engine {
                 && est.saturating_mul(2) >= sticky.est_tokens;
             let low_diff = sticky.difficulty <= 1.6;
             let tools_same = sticky.tools_sig == input.tools_sig;
-            if still_fits && size_ok && low_diff && tools_same && sticky.turns_left > 0 {
+            // S2：粘性复用同样受价格层硬闸约束（贵模型不得借粘性赖在简单任务上）
+            let tier_ok = if input.price_tier_of.is_empty() {
+                true
+            } else {
+                let allowed: u8 = if sticky.difficulty <= 0.8 {
+                    0
+                } else if sticky.difficulty <= 2.0 {
+                    1
+                } else {
+                    2
+                };
+                input.price_tier_of.get(&sticky.chosen).copied().unwrap_or(1) <= allowed
+            };
+            if still_fits && size_ok && low_diff && tools_same && tier_ok && sticky.turns_left > 0 {
                 // zero external calls on the sticky fast path: reuse the
                 // sticky judgment snapshot instead of invoking the backend
                 let j = JudgmentSet {
@@ -243,8 +300,16 @@ impl Engine {
         };
         let mut j = self.judge.judge(&input.features, input.digest, &candidates_hint);
         let judge_ms = now_epoch_ms().saturating_sub(judge_started);
-        let relevance = j.session_relevance;
-        let difficulty_eff = (j.difficulty + relevance * (j.session_depth * 0.5).max(0.0)).clamp(0.0, 3.0);
+        // 难度校准（2026-10）：判定器（尤其 heuristic）的系统性偏高由经验分位
+        // 校准层归一——保证实际分布收敛目标 70/20/10；关闭时直通原值
+        let raw_difficulty = j.difficulty;
+        self.calibrator.observe(raw_difficulty);
+        if self.calibration_enabled {
+            j.difficulty = self.calibrator.calibrate(j.difficulty);
+        }
+        // 会话放大已并入判定器内部（封顶 +0.4）——此处不再二次叠加（旧双计是
+        // 难度重心上移的成因之一）
+        let difficulty_eff = j.difficulty.clamp(0.0, 3.0);
 
         let weights = match input.policy {
             Some(p) => p.weights(),
@@ -272,9 +337,23 @@ impl Engine {
             if let Some(p) = p_key
                 && *p > 0.95
             {
+                let cause = if *p >= 1.5 {
+                    // w2 provider 配额闸门：QUOTA_LIMITED（观测/上游信号判定）
+                    "quota limited (provider gate)".to_string()
+                } else {
+                    format!("plan budget {:.0}% consumed (soft reserve)", p * 100.0)
+                };
                 filtered.push(FilteredOut {
                     model: m.id.clone(),
-                    cause: format!("plan budget {:.0}% consumed (soft reserve)", p * 100.0),
+                    cause,
+                });
+                continue;
+            }
+            // 活跃集过滤（用户裁决）：非活跃模型只在 Web 展示、不参与路由
+            if !input.active.is_empty() && !input.active.contains(&m.id) {
+                filtered.push(FilteredOut {
+                    model: m.id.clone(),
+                    cause: "inactive (enable it in Dashboard → 模型标签卡；启用会顶掉最低分)".into(),
                 });
                 continue;
             }
@@ -397,6 +476,89 @@ impl Engine {
             );
         }
 
+        // 被价格层闸门挡下的模型（质量兜底时优先回退闸门而非质量门槛）
+        let mut price_gated: Vec<ModelRecord> = Vec::new();
+
+        // ── S2 价格层硬闸（2026-10，用户裁决：不轻易使用贵模型）────────────
+        // 难度 → 允许的最高价位层：L1 仅 cheap；L2 到 medium；L3 全开。
+        // 倒挂例外：**同家族内**高价位模型的有效成本 ≤ 该家族允许层的中位成本时
+        // 放行（订阅内 mp≈0、活动价、官方定价倒挂都属此列）——只做上限不做下限，
+        // 便宜层高能力模型不受影响。闸门清空则跳过（不让任务无模型可用）。
+        if !input.price_tier_of.is_empty() {
+            let max_tier: u8 = if difficulty_eff <= 0.8 {
+                0
+            } else if difficulty_eff <= 2.0 {
+                1
+            } else {
+                2
+            };
+            if max_tier < 2 {
+                // 成本代理：None = 不可知——**不参与倒挂判定**（此前 MAX≤MAX
+                // 会把"成本未知"当倒挂放行，贵模型照样进 L1）
+                let cost_proxy = |m: &ModelRecord| -> Option<f32> {
+                    if m.plan {
+                        crate::plans::model_price_hint(&m.base_url, &m.id)
+                    } else {
+                        scoring::est_cost(m, est, est.max(256), None)
+                    }
+                };
+                let family_of = |m: &ModelRecord| -> String {
+                    crate::plans::plan_key_for(&m.base_url)
+                        .map(|k| k.to_string())
+                        .unwrap_or_else(|| m.provider.clone())
+                };
+                // 允许层的中位成本（按家族分组，用于倒挂判定）
+                let mut fam_costs: HashMap<String, Vec<f32>> = HashMap::new();
+                for m in &candidates {
+                    let t = input.price_tier_of.get(&m.id).copied().unwrap_or(1);
+                    if t <= max_tier && let Some(c) = cost_proxy(m) {
+                        fam_costs.entry(family_of(m)).or_default().push(c);
+                    }
+                }
+                for v in fam_costs.values_mut() {
+                    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                }
+                let mut gated_out: Vec<ModelRecord> = Vec::new();
+                let keep: Vec<ModelRecord> = candidates
+                    .iter()
+                    .filter(|m| {
+                        let t = input.price_tier_of.get(&m.id).copied().unwrap_or(1);
+                        if t <= max_tier {
+                            return true;
+                        }
+                        // 倒挂例外：同家族允许层中位成本 ≥ 自身成本 → 放行
+                        // （自身成本不可知 → 不放行；无同家族允许成员 → 不放行）
+                        match (cost_proxy(m), fam_costs.get(&family_of(m))) {
+                            (Some(c), Some(costs)) if !costs.is_empty() => c <= costs[costs.len() / 2],
+                            _ => false,
+                        }
+                    })
+                    .cloned()
+                    .collect();
+                if keep.is_empty() {
+                    tracing::warn!(difficulty = difficulty_eff, max_tier, "price-tier gate would empty the pool — skipped");
+                } else {
+                    let dropped = candidates.len() - keep.len();
+                    if dropped > 0 {
+                        for m in candidates.iter() {
+                            let t = input.price_tier_of.get(&m.id).copied().unwrap_or(1);
+                            if t > max_tier && !keep.iter().any(|k| k.id == m.id) {
+                                gated_out.push(m.clone());
+                                filtered.push(FilteredOut {
+                                    model: m.id.clone(),
+                                    cause: format!("price tier {} above allowed {} (difficulty {:.1})", t, max_tier, difficulty_eff),
+                                });
+                            }
+                        }
+                        tracing::debug!(dropped, max_tier, "price-tier gate filtered candidates");
+                    }
+                    candidates = keep;
+                    // 被闸掉的模型记入 price_gated（质量兜底时可回退——见下方 floor 逻辑）
+                    price_gated = gated_out;
+                }
+            }
+        }
+
         let est_output = max_output.min(est / 2 + 1024);
         // Two-phase scoring: quality floor first ("good enough" set), then
         // composite weights (cost/speed) decide among the eligible.
@@ -405,6 +567,21 @@ impl Engine {
         for m in &candidates {
             if scoring::quality(m, &j, difficulty_eff) >= floor {
                 eligible.push(m.clone());
+            }
+        }
+        if eligible.is_empty() && !price_gated.is_empty() {
+            // 质量优先于省钱：价格层闸门把唯一达标模型挡掉时，先回退闸门
+            // （避免难任务被便宜弱模型硬扛），再考虑回退质量门槛
+            let mut relaxed = candidates.clone();
+            relaxed.extend(price_gated.iter().cloned());
+            for m in &relaxed {
+                if scoring::quality(m, &j, difficulty_eff) >= floor {
+                    eligible.push(m.clone());
+                }
+            }
+            if !eligible.is_empty() {
+                tracing::debug!(difficulty = difficulty_eff, "price-tier gate relaxed: no model met the quality floor");
+                candidates = relaxed;
             }
         }
         if eligible.is_empty() {
@@ -445,8 +622,10 @@ impl Engine {
             stability: eff_weights[3],
             headroom: eff_weights[4],
         };
-        let mut scores = scoring::score_all(
-            &eligible.iter().collect::<Vec<_>>(), &j, difficulty_eff, est, est_output, &eff_policy, input.telemetry);
+        let tier_penalty = if self.ratio_enabled { self.ratio.penalties() } else { [1.0; 3] };
+        let mut scores = scoring::score_all_tiered(
+            &eligible.iter().collect::<Vec<_>>(), &j, difficulty_eff, est, est_output, &eff_policy,
+            input.telemetry, input.price_tier_of, &tier_penalty);
         // 订阅方案预算软降权（用户裁决：配额宝贵，别让一个会话烧光）：
         // 消耗超软阈值后按超出幅度压分，难度越高压制越轻（硬任务保留好模型）
         let soft = self.policy.plan_soft_pct.clamp(10.0, 95.0) / 100.0;
@@ -549,6 +728,38 @@ impl Engine {
                 && let Some(ps) = prev_score {
                     chosen = ps.clone();
                 }
+        }
+
+        // S4 缓存经济（用户裁决/方案 §2）：会话前缀缓存热（该模型近期实测命中率高）
+        // 时，切换到"仅略便宜"的模型是亏的——重打前缀的全 miss 价差远大于单价差。
+        // 规则：命中率 > 0.6 ∧ 新旧模型都在允许价位层内 ∧ 新模型不便宜 15% 以上
+        // → 保持原模型（附 reason 标注）。
+        if let Some(prev) = sticky_model
+            && chosen.model_id != prev
+            && let Some(prev_m) = candidates.iter().find(|m| m.id == prev)
+            && let Some(new_m) = candidates.iter().find(|m| m.id == chosen.model_id)
+        {
+            let hit = scoring::cache_hit_rate(input.telemetry.get(prev));
+            let tier_ok = |m: &ModelRecord| -> bool {
+                if input.price_tier_of.is_empty() {
+                    return true;
+                }
+                let allowed: u8 = if difficulty_eff <= 0.8 { 0 } else if difficulty_eff <= 2.0 { 1 } else { 2 };
+                input.price_tier_of.get(&m.id).copied().unwrap_or(1) <= allowed
+            };
+            let cost_gap = match (scoring::est_cost(prev_m, est, est.max(256), input.telemetry.get(&prev_m.id)),
+                                  scoring::est_cost(new_m, est, est.max(256), input.telemetry.get(&new_m.id))) {
+                (Some(a), Some(b)) => b / a.max(1e-6), // <1 表示新模型更便宜
+                _ => 1.0,
+            };
+            if hit.map(|h| h > 0.6).unwrap_or(false) && tier_ok(prev_m) && tier_ok(new_m) && cost_gap > 0.85 {
+                chosen = scoring::CandidateScore {
+                    model_id: prev.to_string(),
+                    score: chosen.score,
+                    ..scores.iter().find(|s| s.model_id == prev).cloned().unwrap_or(chosen.clone())
+                };
+                tracing::debug!(prev, hit = ?hit, cost_gap, "cache-economy sticky: kept warm-cache model");
+            }
         }
 
         // Thompson Sampling（BayesianRouter Eqs.4–6）：真 Beta 后验采样。
@@ -683,6 +894,16 @@ impl Engine {
         );
         decision.weights = eff_weights;
         decision.judge_ms = judge_ms;
+        // S5 比例控制器观测：记录本次实际选用层级（cheap/medium/premium），
+        // 供下一轮 penalties() 纠偏（此处有 tier 表，观测点唯一且准确）
+        if self.ratio_enabled {
+            let tier = input
+                .price_tier_of
+                .get(&decision.chosen)
+                .copied()
+                .unwrap_or(1);
+            self.ratio.observe(tier);
+        }
         decision
     }
 
@@ -974,10 +1195,16 @@ mod tests {
             telemetry: &EMPTY_TELEM,
             quota: &EMPTY_QUOTA,
             plan_pressure: &EMPTY_PRESSURE,
+            price_tier_of: &EMPTY_TIERS,
+            active: &EMPTY_ACTIVE,
             redact: true, // 测试默认走 redact 语义（advisor 禁用），与生产默认一致
         }
     }
 
+    pub(crate) static EMPTY_TIERS: std::sync::LazyLock<HashMap<String, u8>> =
+        std::sync::LazyLock::new(HashMap::new);
+    pub(crate) static EMPTY_ACTIVE: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_PRESSURE: std::sync::LazyLock<HashMap<String, f32>> =
         std::sync::LazyLock::new(HashMap::new);
 
@@ -1069,13 +1296,141 @@ mod tests {
     }
 
     #[test]
-    fn medium_task_lands_on_standard() {
+    fn price_tier_gate_blocks_premium_on_easy_task() {
+        // easy 任务（L1）→ 仅 cheap 层；frontier（premium）应被硬闸挡下
+        let e = engine();
+        let text = "hello, how are you?";
+        let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
+        let h = HealthMap::new();
+        let tiers: HashMap<String, u8> = HashMap::from([
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]);
+        let mut input = input(text, 400, &d, None, &h);
+        input.price_tier_of = &tiers;
+        let dec = e.decide(input);
+        assert_ne!(dec.chosen, "frontier", "premium must be gated on L1: {}", dec.reason);
+    }
+
+    #[test]
+    fn price_tier_gate_allows_all_on_hard_task() {
+        // 难任务（L3）→ 全层开放，frontier 可被选中
+        let e = engine();
+        let text = "重构整个认证模块：跨模块迁移到新架构，处理并发竞态与分布式一致性权衡，并证明幂等性";
+        let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
+        let h = HealthMap::new();
+        let tiers: HashMap<String, u8> = HashMap::from([
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]);
+        let mut input = input(text, 60_000, &d, None, &h);
+        input.price_tier_of = &tiers;
+        let dec = e.decide(input);
+        assert_eq!(dec.chosen, "frontier", "hard task should reach frontier: {}", dec.reason);
+    }
+
+    #[test]
+    fn cache_economy_keeps_warm_model() {
+        // 上一轮用 standard（缓存热：命中率 90%）；本轮评分可能偏向便宜的 mini，
+        // 但 mini 只便宜一点点（<15%）→ 保持 standard（避免重打前缀全 miss）
+        let mut cat = catalog3();
+        // mini 0.1 / standard 0.6 → standard 贵 6 倍；把 mini 调贵到 0.55 使差距 <15%
+        if let Some(m) = cat.models.iter_mut().find(|m| m.id == "mini") {
+            m.cost = Some(crate::types::Cost { input: 0.55, output: 20.0 });
+        }
+        let e = Engine::new(cat, det_policy(), Box::new(crate::heuristic::HeuristicJudge));
+        let text = "给这个函数补三个单元测试";
+        let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
+        let h = HealthMap::new();
+        let sticky = StickyState {
+            chosen: "standard".into(),
+            est_tokens_band: crate::tokens::tokens_band(12_000),
+            turns_left: 2,
+            tools_sig: 0,
+            domain: Domain::Code,
+            difficulty: 1.2,
+            est_tokens: 12_000,
+        };
+        // 注入热缓存遥测：standard 命中率 90%
+        let mut tel: TelemetrySnapshot = HashMap::new();
+        tel.insert(
+            "standard".to_string(),
+            ModelTelemetry {
+                recent: Some(vec![crate::types::ReqSample {
+                    ts: 1, ttft_ms: 100, total_ms: 900, in_tok: 10_000, cached_tok: 9_000, out_tok: 500,
+                    ok: true, tools_total: 0, tools_ok: 0,
+                }]),
+                ..Default::default()
+            },
+        );
+        let mut inp = input(text, 12_000, &d, Some(sticky), &h);
+        inp.telemetry = &tel;
+        let dec = e.decide(inp);
+        assert_eq!(dec.chosen, "standard", "warm cache must keep the model: {}", dec.reason);
+    }
+
+    #[test]
+    fn price_tier_gate_breaks_sticky_on_premium() {
+        // 上一轮把 frontier（premium）粘住，但本任务是 L1 → 粘性必须断开
+        let e = engine();
+        let text = "hi";
+        let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
+        let h = HealthMap::new();
+        let sticky = StickyState {
+            chosen: "frontier".into(),
+            est_tokens_band: crate::tokens::tokens_band(200),
+            turns_left: 3,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 0.5,
+            est_tokens: 200,
+        };
+        let tiers: HashMap<String, u8> = HashMap::from([
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]);
+        let mut input = input(text, 200, &d, Some(sticky), &h);
+        input.price_tier_of = &tiers;
+        let dec = e.decide(input);
+        assert_ne!(dec.chosen, "frontier", "sticky must not bypass price-tier gate: {}", dec.reason);
+    }
+
+    #[test]
+    fn price_tier_gate_inversion_exception() {
+        // 倒挂例外：把 frontier 的目录价压到比 standard 更低（模拟订阅内 mp≈0/活动价）
+        // → L1 也应放行（同家族成本不超过允许层中位）
+        let mut cat = catalog3();
+        if let Some(m) = cat.models.iter_mut().find(|m| m.id == "frontier") {
+            m.cost = Some(crate::types::Cost { input: 0.01, output: 0.01 });
+        }
+        let e = Engine::new(cat, det_policy(), Box::new(crate::heuristic::HeuristicJudge));
+        let text = "hello, how are you?";
+        let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
+        let h = HealthMap::new();
+        let tiers: HashMap<String, u8> = HashMap::from([
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]);
+        let mut input = input(text, 400, &d, None, &h);
+        input.price_tier_of = &tiers;
+        let dec = e.decide(input);
+        assert_eq!(dec.chosen, "frontier", "inversion (cheaper than allowed median) must pass: {}", dec.reason);
+    }
+
+    #[test]
+    fn low_task_lands_on_cheap_model() {
+        // 语义更新（2026-10 质量门槛方向修正后）：补单测/覆盖边界属低难度常规改动，
+        // 质量门槛放松 → 成本主导 → 选最便宜的 mini（用户裁决：简单任务用便宜模型）
         let e = engine();
         let text = "给这个函数补三个单元测试，覆盖边界情况，然后跑一遍";
         let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
         let h = HealthMap::new();
         let dec = e.decide(input(text, 12_000, &d, None, &h));
-        assert_eq!(dec.chosen, "standard", "reason: {}", dec.reason);
+        assert_eq!(dec.chosen, "mini", "reason: {}", dec.reason);
     }
 
     #[test]
@@ -1160,3 +1515,4 @@ fn sample_gamma(shape: f32, rand: &mut impl FnMut() -> f64) -> f32 {
         }
     }
 }
+
