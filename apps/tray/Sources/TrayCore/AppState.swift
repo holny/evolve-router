@@ -103,6 +103,8 @@ public final class AppState: ObservableObject {
     @Published public var decisionStatus = "ok"
     /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
     @Published public var version = ""
+    /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
+    @Published public var softPct = 60
     @Published public var pulse = false
     @Published public var requests = 0
     @Published public var successRate = 0
@@ -189,7 +191,15 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/providers"),
            let wrapper = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let arr = wrapper["providers"] as? [[String: Any]] {
+            // 配额告警阈值与 Web 同源（每行的 soft_pct = 服务端 plan_soft_pct）；
+            // 此前面板硬编码 85，调 plan_soft_pct 时两端配色不同步
+            if let sp = (wrapper["soft_pct"] as? Double) ?? (wrapper["soft_pct"] as? Int).map(Double.init) {
+                softPct = Int(sp)
+            }
             for p in arr {
+                if let sp = (p["soft_pct"] as? Double) ?? (p["soft_pct"] as? Int).map(Double.init) {
+                    softPct = Int(sp)
+                }
                 let key = (p["key"] as? String) ?? "-"
                 let mergedKeys = (p["merged_from"] as? [Any])?.compactMap { $0 as? String } ?? [key]
                 let kind = (p["plan_kind"] as? String) ?? "-"
@@ -273,7 +283,10 @@ public final class AppState: ObservableObject {
             if let obsRaw = r.observedRaw {
                 let scopeLabel = ["5h": "5h", "weekly": "weekly", "monthly": "monthly"]
                 for (scope, label) in scopeLabel {
-                    guard let w = obsRaw[scope] as? [String: Any],
+                    // scope 映射：7d ≈ weekly（Anthropic 系把周窗写成 7d）——与 Web 的
+                    // obsWin 同规则；此前只认 "weekly" → 该系周配额在面板缺失
+                    guard let w = (obsRaw[scope] as? [String: Any])
+                            ?? (scope == "weekly" ? obsRaw["7d"] as? [String: Any] : nil),
                           let limit = (w["limit"] as? Double) ?? (w["limit"] as? Int).map(Double.init),
                           limit > 0,
                           let remaining = (w["remaining"] as? Double) ?? (w["remaining"] as? Int).map(Double.init) else { continue }

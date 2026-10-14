@@ -1547,9 +1547,16 @@ function renderProviders(){
         + '</div>';
     }
     const summary = tierBadge;
-    // 实时状态（providersStatus 轮询数据，按 key 匹配）
-    const stat = ((state.providersStatus||{}).providers||[]).find(s => s.key === p.key) || {};
-    const onCool = stat.cooldown_remaining_ms && stat.cooldown_remaining_ms > 0;
+    // 实时状态（providersStatus 轮询数据）。合并行（服务端按 key_fp 合并同账号多
+    // provider，带 merged_from）必须跨全部来源账号聚合——/api/providers 合并、
+    // /api/providers/status 不合并，只按 p.key 查会漏掉第二账号的冷却/黑名单
+    // （与 macOS 面板口径分叉）。
+    const statusAll = (state.providersStatus||{}).providers || [];
+    const mkeys = (p.merged_from && p.merged_from.length) ? p.merged_from : [p.key];
+    const statRows = statusAll.filter(s => mkeys.indexOf(s.key) >= 0);
+    const stat = statRows[0] || {};
+    const coolMs = statRows.reduce((m, s) => Math.max(m, s.cooldown_remaining_ms || 0), 0);
+    const onCool = coolMs > 0;
     // 倒计时档位（用户裁决）：≥24h → xxdxxhxxm；≥1h → xxhxxm；<1h → xxmxxs
     const fmtCd = (ms) => {
       let s = Math.max(0, Math.floor(ms/1000));
@@ -1559,12 +1566,12 @@ function renderProviders(){
       return s+'s';
     };
     const statusBadge = onCool
-      ? '<span class="la f">⏳ '+fmtCd(stat.cooldown_remaining_ms)+'</span>'
+      ? '<span class="la f">⏳ '+fmtCd(coolMs)+'</span>'
       : '<span class="la c">✓</span>';
-    // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口
-    const blocked = stat.blocked_models || [];
+    // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口（并集；清除按来源账号逐个）
+    const blocked = [...new Set(statRows.flatMap(s => s.blocked_models || []))];
     const unblockBtn = blocked.length
-      ? '<button class="lang-btn" data-pv-unblock="'+esc(p.key)+'" style="border-color:var(--red);color:var(--red)" title="'+esc(blocked.join(', '))+'">⛔ '+blocked.length+' · '+esc(t('pv_restore_models'))+'</button>'
+      ? '<button class="lang-btn" data-pv-unblock="'+esc(mkeys.join(','))+'" style="border-color:var(--red);color:var(--red)" title="'+esc(blocked.join(', '))+'">⛔ '+blocked.length+' · '+esc(t('pv_restore_models'))+'</button>'
       : '';
     // 周月窗口展示
     const wk = p.windows && p.windows['weekly'];
@@ -1608,8 +1615,10 @@ function renderProviders(){
   cont.querySelectorAll('[data-pv-reconcile]').forEach(b => b.addEventListener('click', () => reconcileProvider(b.dataset.pvReconcile)));
   cont.querySelectorAll('[data-pv-restore]').forEach(b => b.addEventListener('click', () => restoreProvider(b.dataset.pvRestore)));
   cont.querySelectorAll('[data-pv-unblock]').forEach(b => b.addEventListener('click', () => {
-    fetch('/api/health/clear', {method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({provider: b.dataset.pvUnblock})}).then(() => refresh());
+    // 合并行：按来源账号逐个清（与上方聚合口径一致）
+    const keys = String(b.dataset.pvUnblock).split(',').filter(Boolean);
+    Promise.all(keys.map(k => fetch('/api/health/clear', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({provider: k})}))).then(() => refresh());
   }));
 }
 function confirmDeleteProvider(key){

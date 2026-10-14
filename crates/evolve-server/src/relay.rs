@@ -988,16 +988,19 @@ enum Target {
 }
 
 /// `model` 字段归一（容错）：面板「复制网关配置」输出的人读写法
-/// `Auto (smart routing)`（含大小写/空白变体）与 `auto` 等价。
+/// `Auto (smart routing)` 与 `auto` 等价。忽略大小写、首尾及**内部多余空白**。
 pub(crate) fn auto_request(model_field: &str) -> bool {
-    matches!(
-        model_field.trim().to_ascii_lowercase().as_str(),
-        "auto" | "auto (smart routing)" | "auto (smart)" | "smart routing"
-    )
+    let norm = model_field
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    matches!(norm.as_str(), "auto" | "auto (smart routing)" | "auto (smart)" | "smart routing")
 }
 
 #[allow(clippy::result_large_err)]
-fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> {    if let Some(alias) = model_field.strip_prefix("auto:") {
+fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> {
+    if let Some(alias) = model_field.strip_prefix("auto:") {
         let policy = PolicyProfile::parse(alias).ok_or_else(|| {
             json_error(StatusCode::NOT_FOUND, &format!("unknown policy alias '{alias}'"))
         })?;
@@ -1236,10 +1239,10 @@ mod auto_alias_tests {
         // 面板「复制网关配置」输出 + 大小写/空白变体
         assert!(auto_request("auto"));
         assert!(auto_request("Auto"));
-        assert!(auto_request("auto"));
         assert!(auto_request("Auto (smart routing)"));
         assert!(auto_request("  auto (smart routing) "));
         assert!(auto_request("AUTO (SMART ROUTING)"));
+        assert!(auto_request("auto  (smart   routing)"));
         assert!(auto_request("auto (smart)"));
     }
 

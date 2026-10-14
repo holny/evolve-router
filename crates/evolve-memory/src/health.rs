@@ -120,15 +120,18 @@ impl Default for HealthRegistry {
 /// refine 429s into quota-exhausted vs plain rate limits.
 pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<u64>) -> Failure {
     let lower = body_snippet.to_lowercase();
-    // 余额/付费类关键词（含实证的上游写法：volcengine "Insufficient account funds"）
+    // 余额/付费类关键词（含实证的上游写法：volcengine "Insufficient account funds"）。
+    // 只收**明确支付语义**的组合——不用裸 "funds"（任何含该子串的正文都会被误判为
+    // 长冷却的 PaymentRequired）
     let no_credit = ["insufficient balance", "insufficient_quota", "insufficient account funds",
-        "insufficient funds", "account funds", "funds", "balance", "arrears", "欠费", "余额不足",
+        "insufficient funds", "account funds", "balance", "arrears", "欠费", "余额不足",
         "no credit", "payment required", "billing"];
     // 配额类关键词（含中文实证：智谱"您已达到每周/每月使用上限，您的限额将在 … 重置。"）。
-    // 中文只取**配额专用**词（使用/用量/额度/配额上限、限额、每周/每月）——不用裸
-    // "上限"，否则"请求频率上限""速率上限"这类真实限流会被误判为长冷却的配额超限。
+    // 中文只取**配额专用**词（使用/用量/额度/配额+上限、每周/每月）——不用裸 "上限"、
+    // 也不用裸 "限额"，否则"请求频率上限/频率限额/速率限额"这类真实限流会被误判为
+    // 长冷却的配额超限。
     let quota = ["quota", "exceeded your", "usage limit", "limit reached", "rate limit exceeded",
-        "使用上限", "用量上限", "额度上限", "配额上限", "限额", "每周", "每月",
+        "使用上限", "用量上限", "额度上限", "配额上限", "每周", "每月",
         "额度", "配额", "用量", "超限"];
 
     match status {
@@ -314,13 +317,16 @@ mod tests {
         // opencode：账户余额不足（此前 "funds" 不在关键词表 → 误判为限流）
         let f = classify_failure(429, "Upstream request failed: Insufficient account funds", None);
         assert_eq!(f.kind, HealthKind::PaymentRequired, "account funds must be payment-required");
-        // 中文限流（含"上限"字面但不是配额）不得被误判为长冷却的配额超限
+        // 中文限流（含"上限/限额"字面但不是配额）不得被误判为长冷却的配额超限
         let f = classify_failure(429, "您已达到请求频率上限，请稍后重试。", None);
         assert_eq!(f.kind, HealthKind::RateLimited, "chinese rate-limit wording must stay rate-limited");
+        let f = classify_failure(429, "速率限额已满，请降低请求频率", None);
+        assert_eq!(f.kind, HealthKind::RateLimited, "速率限额 is a rate limit, not a quota");
     }
 
     #[test]
-    fn repeat_failures_extend_cooldown() {        let reg = HealthRegistry::new();
+    fn repeat_failures_extend_cooldown() {
+        let reg = HealthRegistry::new();
         for _ in 0..3 {
             reg.mark_failure("m", classify_failure(429, "rate limit exceeded", None));
         }
@@ -474,7 +480,8 @@ mod reset_tests {
     }
 
     #[test]
-    fn parses_relative_minutes_and_hours() {        let now = 1_760_000_000_000;
+    fn parses_relative_minutes_and_hours() {
+        let now = 1_760_000_000_000;
         assert_eq!(parse_reset_epoch_ms("resets in 47 minutes", now), Some(now + 47 * 60_000));
         assert_eq!(parse_reset_epoch_ms("try again in 2 hours", now), Some(now + 2 * 3_600_000));
     }

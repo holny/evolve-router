@@ -322,6 +322,7 @@ public struct PanelView: View {
                 Text(quotaStyle ? Self.quotaFullLabel(p.cooldownCause ?? "") : t("cooldown"))
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.red)
+                    .minimumScaleFactor(0.8)
                 Text(txt)
                     .font(.system(size: 9, design: .rounded))
                     .monospacedDigit()
@@ -491,8 +492,10 @@ public struct PanelView: View {
     }
 
     private func quotaBar(_ pct: Int) -> some View {
-        ProgressView(value: Double(min(max(pct, 0), 100)))
-            .tint(pct >= 85 ? .orange : .accentColor)
+        // 三档配色与 Web 同源（阈值 90 / soft_pct，不再硬编码 85）
+        let tint: Color = pct >= 90 ? .red : (pct >= state.softPct ? .orange : .accentColor)
+        return ProgressView(value: Double(min(max(pct, 0), 100)))
+            .tint(tint)
             .progressViewStyle(.linear)
             .accessibilityValue("\(pct)%")
     }
@@ -532,6 +535,9 @@ public struct PanelView: View {
 extension PanelView {
     /// 上游配额信息（"quota window exhausted (monthly)"）→ 窗口态标签
     static func quotaFullLabel(_ cause: String) -> String {
+        // 顺序：先判组合标签——"(weekly/monthly)" 既不整词含 "(monthly)"
+        // 也不整词含 "(weekly)"，漏判会一律显示成 "5h full"
+        if cause.contains("(weekly/monthly)") { return "weekly/monthly full" }
         if cause.contains("(monthly)") { return "monthly full" }
         if cause.contains("(weekly)") { return "weekly full" }
         return "5h full"
