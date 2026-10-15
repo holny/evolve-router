@@ -66,6 +66,10 @@ struct FlywheelInner {
     /// 精确（日界落在整点的时区）且重启不丢。保留 3 天，写入时剪枝。
     #[serde(default)]
     hourly: HashMap<String, Vec<HourBucket>>,
+    /// 统计起点（首次记录时刻，epoch ms）：面板"总览"卡标注"自 …起统计"。
+    /// 0 = 尚无数据。随快照持久化——重启不重置（数据是累计口径）。
+    #[serde(default)]
+    since_ms: u64,
     dirty: bool,
 }
 
@@ -180,11 +184,21 @@ impl Flywheel {
     pub fn open_with(dir: &str, params: crate::strategy::StrategyParams) -> Self {
         let expanded = crate::events::shellexpand_home_pub(dir);
         let path = expanded.join("snapshot.json");
-        let inner: FlywheelInner = std::fs::read_to_string(&path)
+        let mut inner: FlywheelInner = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         if !inner.models.is_empty() {
+            // 快照缺 since_ms（升级首启）：用可见样本的最早时刻近似统计起点——
+            // 累计口径的"自 …起统计"标注需要它，且随下次 save 持久化
+            if inner.since_ms == 0 {
+                inner.since_ms = inner
+                    .models
+                    .values()
+                    .filter_map(|m| m.recent.first().map(|s| s.ts))
+                    .min()
+                    .unwrap_or_else(now_ms);
+            }
             tracing::info!(models = inner.models.len(), "flywheel snapshot restored");
         }
         let params = params.sanitized();
@@ -207,6 +221,10 @@ impl Flywheel {
         }
         let Some(chosen) = event.get("chosen").and_then(|c| c.as_str()) else { return };
         let Ok(mut inner) = self.inner.lock() else { return };
+        // 统计起点：首次记录时落定（epoch ms），随快照持久化
+        if inner.since_ms == 0 {
+            inner.since_ms = event.get("ts").and_then(|v| v.as_u64()).unwrap_or_else(now_ms);
+        }
         let s = inner.models.entry(chosen.to_string()).or_default();
         s.requests += 1;
         let status = event.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -421,6 +439,11 @@ impl Flywheel {
 
     pub fn stats(&self) -> HashMap<String, ModelStats> {
         self.inner.lock().map(|i| i.models.clone()).unwrap_or_default()
+    }
+
+    /// 统计起点（首次记录时刻，epoch ms；0 = 尚无数据）
+    pub fn since_ms(&self) -> u64 {
+        self.inner.lock().map(|i| i.since_ms).unwrap_or(0)
     }
 
     /// 日历窗口聚合（今天/昨天等）：基于**持久化小时桶**——不受样本环 cap 300

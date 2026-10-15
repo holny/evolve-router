@@ -151,8 +151,10 @@ public struct PanelView: View {
             metric("gauge.with.needle", label: t("reqs"), value: "\(state.requests)")
             metric("arrow.up.right", label: t("success_rate"), value: "\(state.successRate)%")
             metric("number", label: t("tokens"), value: state.tokensK)
+            metric("arrow.triangle.2.circlepath", label: t("cache_hit"),
+                   value: state.cacheHit.map { "\($0)%" } ?? "-")
             Spacer(minLength: 0)
-            // 窗口标签本身即切换钮（用户裁决）：今天 ⇄ 昨天；点一下立即重取
+            // 窗口标签即切换钮（用户裁决）：今天 ⇄ 昨天——同时作用于顶部指标与 Providers 行
             Button {
                 state.statWindowToday.toggle()
                 Task { await state.pollData() }

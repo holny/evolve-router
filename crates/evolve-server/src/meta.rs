@@ -478,7 +478,15 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
         "penalties": {"cheap": rsnap.penalties[0], "medium": rsnap.penalties[1], "premium": rsnap.penalties[2]},
     });
     let recent100 = recent_distribution(st, 100);
-    (axum::Json(json!({"models": models, "difficulty": difficulty, "last100": recent100, "ratio": ratio}))).into_response()
+    // 统计起点（flywheel 首次记录时刻）：面板顶部"总览"卡标注"自 …起统计"
+    (axum::Json(json!({
+        "models": models,
+        "since_ms": st.flywheel.since_ms(),
+        "difficulty": difficulty,
+        "last100": recent100,
+        "ratio": ratio
+    })))
+    .into_response()
 }
 
 /// Benchmark feed status + currently applied tier overlay.

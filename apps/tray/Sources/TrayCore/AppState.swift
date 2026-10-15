@@ -108,6 +108,8 @@ public final class AppState: ObservableObject {
     @Published public var softPct = 60
     /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
     @Published public var statWindowToday = true
+    /// 窗口内缓存命中率（cached/prompt，%）；无用量为 nil
+    @Published public var cacheHit: Int?
     @Published public var pulse = false
     @Published public var requests = 0
     @Published public var successRate = 0
@@ -160,8 +162,9 @@ public final class AppState: ObservableObject {
     public func pollData() async {
         guard healthy else { return }
         var models: [String: Any] = [:]
-        // 指标窗口（用户裁决）：**今天 / 昨天**（日历口径，各自有上下界），可点击切换。
-        // 服务端不引时区库 → 面板按本地时区算好两端 epoch，用 `window=range:<s>-<e>` 传。
+        // 指标窗口（用户裁决）：**今天 / 昨天**（日历口径，各有上下界），顶部指标卡
+        // 与 Providers 行共用；可点击切换。服务端不引时区库 → 面板按本地时区算好
+        // 两端 epoch，用 `window=range:<s>-<e>` 传。
         let cal = Calendar.current
         let dayStart = cal.startOfDay(for: Date())
         let startMs: Int64
@@ -177,17 +180,20 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             models = (obj["models"] as? [String: Any]) ?? obj
-            var reqs = 0, ok = 0, toks = 0
+            var reqs = 0, ok = 0, toks = 0, cached = 0, prompt = 0
             for (_, s) in models {
                 guard let s = s as? [String: Any] else { continue }
                 reqs += (s["requests"] as? Int) ?? Int((s["requests"] as? Double) ?? 0)
                 ok += (s["success"] as? Int) ?? Int((s["success"] as? Double) ?? 0)
                 toks += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
                 toks += (s["completion_tokens"] as? Int) ?? Int((s["completion_tokens"] as? Double) ?? 0)
+                cached += (s["cached_tokens"] as? Int) ?? Int((s["cached_tokens"] as? Double) ?? 0)
+                prompt += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
             }
             requests = reqs
             successRate = reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0
             tokensK = Self.fmtTok(toks)
+            cacheHit = prompt > 0 ? Int(round(100.0 * Double(cached) / Double(prompt))) : nil
         }
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
