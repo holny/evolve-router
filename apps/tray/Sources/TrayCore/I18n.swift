@@ -15,7 +15,6 @@ let T: [String: String] = [
     "reqs": "reqs",
     "success_rate": "success",
     "tokens": "tokens",
-    "cache_hit": "hit",
     "last_24h": "last 5h",
     "last_sync": "synced",
     "plan_5h": "Plan usage · 5h",
