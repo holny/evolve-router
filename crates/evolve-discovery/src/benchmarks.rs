@@ -278,7 +278,7 @@ pub fn parse_source(cfg: &BenchSourceCfg, payload: &Value) -> anyhow::Result<Vec
             let html = payload
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("lmarena_mirror expects the raw HTML body"))?;
-            Ok(parse_lmarena_mirror(html))
+            parse_lmarena_mirror(html)
         }
         other => Err(anyhow::anyhow!("unknown benchmark format '{other}'")),
     }
@@ -287,7 +287,7 @@ pub fn parse_source(cfg: &BenchSourceCfg, payload: &Value) -> anyhow::Result<Vec
 /// 解析 LMArena 镜像站（arena.atease.dev/text/）页面：Next.js flight 数据
 /// 内嵌完整榜单（{"rank":N,"model":"...","score_val":N,...}，414 行）。
 /// 官方 lmarena.ai 国内不可达——镜像页与官方同源同数据。
-pub fn parse_lmarena_mirror(html: &str) -> Vec<BenchScore> {
+pub fn parse_lmarena_mirror(html: &str) -> anyhow::Result<Vec<BenchScore>> {
     // 实际页面为无空格形式：push([1,"..."])
     const MARKER: &str = "self.__next_f.push([1,\"";
     let mut blob = String::new();
@@ -370,7 +370,14 @@ pub fn parse_lmarena_mirror(html: &str) -> Vec<BenchScore> {
             b.agentic = Some(norm);
         }
     }
-    out
+    if out.is_empty() {
+        // 结构性解析失败（页面改版/反爬页）：必须 Err——否则上层"保留旧值"
+        // 路径不会触发，快照里的 last-good 会被空结果覆盖
+        return Err(anyhow::anyhow!(
+            "no leaderboard rows parsed (mirror page structure changed?)"
+        ));
+    }
+    Ok(out)
 }
 
 fn unescape_js_string(s: &str) -> String {
@@ -788,7 +795,7 @@ mod lmarena_tests {
         // 镜像页 flight 数据的最小复刻（转义后的内嵌 JSON）
         let html = r#"<html><script>self.__next_f.push([1,"3:{\"rank\":27,\"sortRank\":27,\"model\":\"glm-5.3-max\",\"score_val\":1478,\"votes\":\"20,049\"}"])</script>
         <script>self.__next_f.push([1,"5:{\"rank\":38,\"sortRank\":38,\"model\":\"glm-5.3-flash\",\"score_val\":1475}"])</script>"#;
-        let scores = parse_lmarena_mirror(html);
+        let scores = parse_lmarena_mirror(html).expect("mirror rows parse");
         assert_eq!(scores.len(), 2, "rows: {scores:?}");
         let max = scores.iter().find(|s| s.alias == "glm-5.3-max").unwrap();
         assert!(max.coding.unwrap() > 0.0);

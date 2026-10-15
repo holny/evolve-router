@@ -317,29 +317,51 @@ impl Inner {
             let interval_h = self.config.benchmarks.interval_hours.max(1) as u64;
             tokio::spawn(async move {
                 loop {
-                    let mut sources: Vec<(String, Vec<evolve_discovery::benchmarks::BenchScore>)> =
-                        vec![(
-                            "seed".into(),
-                            evolve_discovery::benchmarks::load_seed(),
-                        )];
-                    // 上次快照：拉取失败的源保留旧值
+                    let now_ms = evolve_memory::health::now();
                     let prev = b_state.bench_snapshot();
+                    // 逐源构建 SourceState：新拉成功 → 新值；失败/空 → 保留旧值
+                    // 并标记错误（快照如实反映数据新旧，不把旧数据伪装成新鲜）
+                    let mut sources: Vec<(String, evolve_discovery::benchmarks::SourceState)> = vec![(
+                        "seed".into(),
+                        evolve_discovery::benchmarks::SourceState {
+                            fetched_at_ms: now_ms,
+                            scores: evolve_discovery::benchmarks::load_seed(),
+                            error: None,
+                        },
+                    )];
                     for cfg in &b_state.config.benchmarks.sources {
                         match evolve_discovery::benchmarks::fetch_source(&b_state.http, cfg).await {
                             Ok(scores) if !scores.is_empty() => {
-                                sources.push((cfg.name.clone(), scores));
+                                sources.push((
+                                    cfg.name.clone(),
+                                    evolve_discovery::benchmarks::SourceState {
+                                        fetched_at_ms: now_ms,
+                                        scores,
+                                        error: None,
+                                    },
+                                ));
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::warn!(source = %cfg.name, error = %e, "benchmark source fetch failed, keeping last-good");
+                            other => {
+                                let err = match &other {
+                                    Ok(_) => "fetch returned no rows (page structure changed?)".to_string(),
+                                    Err(e) => format!("fetch failed: {e}"),
+                                };
+                                tracing::warn!(source = %cfg.name, error = %err, "benchmark source: keeping last-good scores");
                                 if let Some(prev_src) = prev.sources.get(&cfg.name) {
-                                    sources.push((cfg.name.clone(), prev_src.scores.clone()));
+                                    let mut kept = prev_src.clone();
+                                    kept.error = Some(err);
+                                    sources.push((cfg.name.clone(), kept));
                                 }
                             }
                         }
                     }
-                    let n = evolve_discovery::benchmarks::apply_to_engine(&b_state.engine, &sources);
-                    b_state.save_bench_snapshot(&sources);
+                    // apply/快照只吃分数列表（SourceState 的 error/时间戳仅用于展示）
+                    let scores_only: Vec<(String, Vec<evolve_discovery::benchmarks::BenchScore>)> =
+                        sources.iter()
+                            .map(|(n, st)| (n.clone(), st.scores.clone()))
+                            .collect();
+                    let n = evolve_discovery::benchmarks::apply_to_engine(&b_state.engine, &scores_only);
+                    b_state.save_bench_snapshot(&scores_only);
                     tracing::info!(applied = n, sources = sources.len(), "benchmark tiers refreshed");
                     tokio::time::sleep(Duration::from_secs(interval_h * 3600)).await;
                 }

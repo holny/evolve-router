@@ -329,12 +329,19 @@ fn mock_upstream(port: u16) -> anyhow::Result<()> {
 }
 
 fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {
-    let (cfg, path) = config::load_config(config_path.as_deref())?;
+    let (mut cfg, path) = config::load_config(config_path.as_deref())?;
     tracing::info!(?path, "config loaded");
-    // 缺省兜底（安全默认）：host 为空会得到 ":8787" → **绑定全部网卡**，把无鉴权
-    // 的管理面暴露到 LAN（精简配置/旧版升级缺 [server] 段时触发）；port 0 同理
-    let host = if cfg.server.host.trim().is_empty() { "127.0.0.1".to_string() } else { cfg.server.host.clone() };
-    let port = port_override.unwrap_or(if cfg.server.port == 0 { 8787 } else { cfg.server.port });
+    // 安全默认（审查 #2）：host/port 缺省只修了 bind，而 build_state 里的
+    // cfg.server 仍是空/0 → 所有自引用防护（自递归/自 provider 排除）算出
+    // ":0" 全部失效。在 build_state **之前**统一兜底，bind 与下游同值。
+    if cfg.server.host.trim().is_empty() {
+        cfg.server.host = "127.0.0.1".into();
+    }
+    if cfg.server.port == 0 {
+        cfg.server.port = 8787;
+    }
+    let port = port_override.unwrap_or(cfg.server.port);
+    let host = cfg.server.host.clone();
     let state = state::build_state(cfg);
 
     let app = state::build_router(state.clone());

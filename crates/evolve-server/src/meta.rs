@@ -188,6 +188,7 @@ fn apply_windowed(s: &mut evolve_memory::flywheel::ModelStats, view: &serde_json
     let g = |k: &str| view.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     s.requests = g("requests");
     s.success = g("success");
+    s.failures = g("failures");
     // 窗口内无样本 → view 为空对象 → 全部归零。**不得保留累计值充数**：否则
     // "今日/5h 内 0 次"的模型会显示成历史累计（此前 5h=1229 vs 24h=107 的自相
     // 矛盾即源于此：5h 窗口空 → 保留累计，24h 有样本 → 覆盖成窗口值）
@@ -427,12 +428,20 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
                 "last_seen_ms": (s.last_seen_ms > 0).then_some(s.last_seen_ms),
                 "last_total_ms": (s.last_total_ms > 0).then_some(s.last_total_ms),
                 "last_ttft_ms": (s.last_ttft_ms > 0).then_some(s.last_ttft_ms),
-                // 平均吐字速率：完成 tokens ÷ 生成窗口（总耗时-TTFT 累计）；
-                // f64 域取整避免 f32 序列化毛刺
-                "avg_rate_tok_s": (s.total_ms_sum > s.ttft_ms_sum).then(|| {
-                    let gen_s = (s.total_ms_sum - s.ttft_ms_sum) as f32 / 1000.0;
-                    ((s.completion_tokens as f64 / gen_s as f64) * 10.0).round() / 10.0
-                }),
+                // 平均吐字速率：窗口视图（today/yesterday 等）自带 **sum 口径**
+                // 正确速率（apply_windowed 写入 last_rate_tok_s）→ 直接透传；
+                // 总览（累计口径）保持均值差重算。此前窗口模式也走均值差重算，
+                // 缓存命中样本（total≈ttft）稀释分母 → tok/s 虚高数倍。
+                "avg_rate_tok_s": if window != "overview" {
+                    (s.last_rate_tok_s > 0).then(|| {
+                        ((s.last_rate_tok_s as f64) * 10.0).round() / 10.0
+                    })
+                } else {
+                    (s.total_ms_sum > s.ttft_ms_sum).then(|| {
+                        let gen_s = (s.total_ms_sum - s.ttft_ms_sum) as f32 / 1000.0;
+                        ((s.completion_tokens as f64 / gen_s as f64) * 10.0).round() / 10.0
+                    })
+                },
                 "last_rate_tok_s": (s.last_rate_tok_s > 0).then_some(s.last_rate_tok_s),
                 "telemetry": t,
                 "user_weight": st
