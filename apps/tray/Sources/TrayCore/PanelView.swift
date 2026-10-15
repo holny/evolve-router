@@ -231,18 +231,13 @@ public struct PanelView: View {
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
-                            // 决策打标微缩行（用户裁决）：只留决策级标签——任务难度 +
-                            // 网关评分 + 难度↔能力匹配；模型侧标签（cap/price）只在 Model 列表展示
+                            // 标签约定（用户裁决）：颜色只表示"类别"，胶囊内的字表示"该类别的哪个值"
+                            // → 与色卡一一对应，此处只出决策级标签（difficulty / score / fit）
                             if r.difficulty != nil || r.score != nil {
                                 HStack(spacing: 3) {
                                     if let d = r.difficulty {
-                                        let (label, col) = AppState.diffBadge(d)
-                                        Text(label)
-                                            .help(Self.tagHelpDiff)
-                                            .font(.system(size: 8.5, weight: .medium))
-                                            .padding(.horizontal, 4).padding(.vertical, 1)
-                                            .background(Capsule().fill(col.opacity(0.15)))
-                                            .foregroundStyle(col)
+                                        tagPill(AppState.diffLabel(d), tint: Self.tagColorDiff,
+                                                bg: Self.tagColorDiff.opacity(0.15), help: Self.tagHelpDiff)
                                     }
                                     if let sc = r.score {
                                         tagPill(String(format: "%.2f", sc), help: Self.tagHelpScore)
@@ -252,7 +247,7 @@ public struct PanelView: View {
                                        let cIdx = capMap[cap] {
                                         let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
                                         let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over" : "under")
-                                        tagPill(m, tint: dIdx == cIdx ? .teal : .pink, bg: (dIdx == cIdx ? Color.teal : Color.pink).opacity(0.16), help: Self.tagHelpFit)
+                                        tagPill(m, tint: Self.tagColorFit, bg: Self.tagColorFit.opacity(0.15), help: Self.tagHelpFit)
                                     }
                                 }
                                 .lineLimit(1)
@@ -350,10 +345,10 @@ public struct PanelView: View {
                     // 当前态标签对历史无意义（用户裁决）→ 不展示
                     if state.statWindowToday {
                         if let cap = m.capability, !cap.isEmpty {
-                            tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14), help: Self.tagHelpCap)
+                            tagPill(cap, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: Self.tagHelpCap)
                         }
                         if let pt = m.priceTier, !pt.isEmpty {
-                            tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14), help: Self.tagHelpPrice)
+                            tagPill(pt, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: Self.tagHelpPrice)
                         }
                     }
                     if m.tok > 0 {
@@ -640,33 +635,35 @@ public struct PanelView: View {
         return help.isEmpty ? AnyView(t) : AnyView(t.help(help))
     }
 
-    // 标签语义（色卡 + 悬停详解）——"什么难度/什么分/谁的价位"必须一眼可辨
-    static let tagHelpDiff = "task difficulty for this request: easy / medium / hard (green / orange / red)"
-    static let tagHelpCap = "model capability tier (basic / standard / powerful)"
-    static let tagHelpPrice = "model price tier (cheap / medium / premium)"
-    static let tagHelpScore = "router score for the chosen model on this request (0-1)"
+    // 标签语义（色卡 + 悬停详解）：颜色 = 类别，胶囊里的字 = 该类别的具体取值
+    static let tagColorDiff: Color = .green
+    static let tagColorCap: Color = .blue
+    static let tagColorPrice: Color = .purple
+    static let tagColorScore: Color = .secondary
+    static let tagColorFit: Color = .orange
+
+    static let tagHelpDiff = "task difficulty of this request: easy / medium / hard"
+    static let tagHelpCap = "model capability tier: basic / standard / powerful"
+    static let tagHelpPrice = "model price tier: cheap / medium / premium"
+    static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
 
-    /// 标签颜色说明（色卡 + 类别名；悬停给完整解释）
+    /// 标签颜色说明（色卡 = 类别名，悬停给完整解释）
     private var tagLegend: some View {
-        HStack(spacing: 8) {
-            legendItem([.green, .orange, .red], "difficulty", Self.tagHelpDiff)
-            legendItem([.blue], "capability", Self.tagHelpCap)
-            legendItem([.purple], "price", Self.tagHelpPrice)
-            legendItem([.secondary], "score", Self.tagHelpScore)
-            legendItem([.teal, .pink], "fit", Self.tagHelpFit)
+        HStack(spacing: 9) {
+            legendItem(Self.tagColorDiff, "difficulty", Self.tagHelpDiff)
+            legendItem(Self.tagColorCap, "capability", Self.tagHelpCap)
+            legendItem(Self.tagColorPrice, "price", Self.tagHelpPrice)
+            legendItem(Self.tagColorScore, "score", Self.tagHelpScore)
+            legendItem(Self.tagColorFit, "fit", Self.tagHelpFit)
         }
         .font(.system(size: 8.5))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func legendItem(_ cs: [Color], _ label: String, _ help: String) -> some View {
+    private func legendItem(_ c: Color, _ label: String, _ help: String) -> some View {
         HStack(spacing: 3) {
-            HStack(spacing: 1.5) {
-                ForEach(Array(cs.enumerated()), id: \.offset) { _, c in
-                    Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
-                }
-            }
+            Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
             Text(label).foregroundStyle(.tertiary)
         }
         .help(help)
