@@ -653,7 +653,6 @@ const T = {
   chip_cost:  {zh:'累计费用', en:'cost', ko:'누적 비용', ja:'累計費用', es:'coste', fr:'coût'},
   chip_active:{zh:'活跃模型', en:'active', ko:'활성 모델', ja:'アクティブ', es:'activos', fr:'actifs'},
   chip_tokens:{zh:'Tokens 用量', en:'tokens used', ko:'토큰 사용량', ja:'トークン使用量', es:'tokens usados', fr:'tokens utilisés'},
-  chip_plans: {zh:'套餐 5h 用量', en:'plan 5h usage', ko:'플랜 5h 사용량', ja:'プラン 5h 使用量', es:'uso 5h del plan', fr:'utilisation 5h du plan'},
   s_in:   {zh:'入', en:' in', ko:'입', ja:'入', es:' ent', fr:' entr'},
   s_out:  {zh:'出', en:' out', ko:'출', ja:'出', es:' sal', fr:' sor'},
   s_read: {zh:'读', en:'r', ko:'읽', ja:'読', es:'lee', fr:'lect'},
@@ -1377,25 +1376,12 @@ function renderChips(){
   const rate = reqs ? Math.round(100*ok/reqs) : null;
   const rateCls = rate===null ? '' : (rate >= 95 ? ' good' : (rate < 90 ? ' warn' : ''));
   const toks = all.reduce((a,s) => a+(s.prompt_tokens||0)+(s.completion_tokens||0), 0);
-  // 套餐用量：按方案聚合 5h 消耗/额度占比，取最紧套餐展示（源自 p.quota，与 Provider 卡同源）
-  const byPlan = {};
-  (state.providers||[]).forEach(p => {
-    const k = PK_SHORT[p.plan_kind] || p.plan_kind || '-';
-    // 派生配额视图（服务端算好，与 macOS 面板同源）——取 5h 窗口占用
-    const w = p.quota && p.quota['5h'];
-    if (!w) return;
-    byPlan[k] = Math.max(byPlan[k]||0, Math.min(100, Math.round(w.used_pct || 0)));
-  });
-  // 告警阈值与配额条同源（行内 soft_pct = 服务端 plan_soft_pct），不再硬编码 85
-  const soft = (state.providers.find(p => p.soft_pct != null) || {}).soft_pct || 60;
-  const planTxt = Object.entries(byPlan).length
-    ? Object.entries(byPlan).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
-        '<b class="'+(v>=90||v>=soft?'warn':'')+'" style="font-size:13px'+((v>=90||v>=soft)?'':';color:var(--fg)')+'">'+k+' '+v+'%</b>').join(' <span class="dim2">·</span> ')
-    : '-';
+  // 套餐 chip 已移除：它固定取 5h 窗口占用，而订阅的真实约束是"最紧窗口"
+  // （5h 0% 但月窗耗尽时会显示 0%，与 Provider 卡的 monthly full 自相矛盾）。
+  // 窗口级用量已在下方 Provider 卡逐行展示（binding = 服务端派生的最紧窗口）。
   document.getElementById('chips').innerHTML =
     '<span class="chip"><span>'+t('chip_reqs')+'</span><b>'+reqs+(rate!==null?' <b class="'+rateCls.trim()+'" style="font-size:12px">'+rate+'%</b>':'')+'</b></span>' +
     '<span class="chip"><span>'+t('chip_tokens')+'</span><b style="font-size:13px">'+fmtK(toks)+'</b></span>' +
-    '<span class="chip"><span>'+t('chip_plans')+'</span><b style="font-size:13px;font-weight:600">'+planTxt+'</b></span>' +
     '<span class="chip"><span>'+t('chip_cost')+'</span><b style="font-size:13px">'+cost+'</b></span>' +
     '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>';
   renderPwPanel();
@@ -1405,7 +1391,6 @@ const PLANS_COLS = [
   {k:'plan_used', num:1}, {k:'plan_models', num:1}, {k:'plan_tier'}, {k:'r_toggle'}, {k:'plan_docs'},
 ];
 const PK_LABEL = {'api':'pk_api', coding:'pk_coding', go:'pk_go', agent:'pk_agent'};
-const PK_SHORT = {api:'API', coding:'CP', go:'GO', agent:'AP'};
 const RATE_COLS = {
   credits: [['m', 'rate_model'], ['a', 'rate_in_c'], ['b', 'rate_cached_c'], ['v', 'rate_out_c']],
   dollar:  [['m', 'rate_model'], ['a', 'rate_in_d'], ['b', 'rate_cached_d'], ['v', 'rate_out_d'], ['l', 'rate_limit']],
