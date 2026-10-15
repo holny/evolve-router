@@ -238,26 +238,27 @@ public struct PanelView: View {
                                     if let d = r.difficulty {
                                         let (label, col) = AppState.diffBadge(d)
                                         Text(label)
+                                            .help(Self.tagHelpDiff)
                                             .font(.system(size: 8.5, weight: .medium))
                                             .padding(.horizontal, 4).padding(.vertical, 1)
                                             .background(Capsule().fill(col.opacity(0.15)))
                                             .foregroundStyle(col)
                                     }
                                     if let cap = r.capability {
-                                        tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14))
+                                        tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14), help: Self.tagHelpCap)
                                     }
                                     if let pt = r.priceTier {
-                                        tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14))
+                                        tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14), help: Self.tagHelpPrice)
                                     }
                                     if let sc = r.score {
-                                        tagPill(String(format: "score %.2f", sc))
+                                        tagPill(String(format: "score %.2f", sc), help: Self.tagHelpScore)
                                     }
                                     let capMap = ["basic": 0, "standard": 1, "powerful": 2]
                                     if let cap = r.capability, let d = r.difficulty,
                                        let cIdx = capMap[cap] {
                                         let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
-                                        let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over-fit" : "under-fit")
-                                        tagPill(m, tint: dIdx == cIdx ? .green : .orange, bg: (dIdx == cIdx ? Color.green : Color.orange).opacity(0.15))
+                                        let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over" : "under")
+                                        tagPill("fit \(m)", tint: dIdx == cIdx ? .green : .orange, bg: (dIdx == cIdx ? Color.green : Color.orange).opacity(0.15), help: Self.tagHelpFit)
                                     }
                                 }
                                 .lineLimit(1)
@@ -355,10 +356,10 @@ public struct PanelView: View {
                     // 当前态标签对历史无意义（用户裁决）→ 不展示
                     if state.statWindowToday {
                         if let cap = m.capability, !cap.isEmpty {
-                            tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14))
+                            tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14), help: Self.tagHelpCap)
                         }
                         if let pt = m.priceTier, !pt.isEmpty {
-                            tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14))
+                            tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14), help: Self.tagHelpPrice)
                         }
                     }
                     if m.tok > 0 {
@@ -635,33 +636,42 @@ public struct PanelView: View {
         }
     }
 
-    /// 打标胶囊（英文小标签 + 类别底色）
-    private func tagPill(_ text: String, tint: Color = .secondary, bg: Color? = nil) -> some View {
-        Text(text)
+    /// 打标胶囊（英文小标签 + 类别底色 + 悬停详解）
+    private func tagPill(_ text: String, tint: Color = .secondary, bg: Color? = nil, help: String = "") -> some View {
+        let t = Text(text)
             .font(.system(size: 8.5))
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(Capsule().fill(bg ?? Color.primary.opacity(0.08)))
             .foregroundStyle(tint)
+        return help.isEmpty ? AnyView(t) : AnyView(t.help(help))
     }
 
-    /// 标签颜色说明（每项 1-2 词）
+    // 标签语义（色卡 + 悬停详解）——"什么难度/什么分/谁的价位"必须一眼可辨
+    static let tagHelpDiff = "task difficulty judged for this request (easy / medium / hard)"
+    static let tagHelpCap = "model capability tier (basic / standard / powerful)"
+    static let tagHelpPrice = "model price tier (cheap / medium / premium)"
+    static let tagHelpScore = "router evaluation score for the chosen model (0-1)"
+    static let tagHelpFit = "difficulty ↔ capability fit: match (aligned) / over (capability above task) / under (capability below task)"
+
+    /// 标签颜色说明（色卡 + 类别名；悬停给完整解释）
     private var tagLegend: some View {
         HStack(spacing: 9) {
-            legendItem(.green, "difficulty")
-            legendItem(.blue, "cap")
-            legendItem(.purple, "price")
-            legendItem(.secondary, "score")
-            legendItem(.orange, "match")
+            legendItem(.green, "difficulty", Self.tagHelpDiff)
+            legendItem(.blue, "capability", Self.tagHelpCap)
+            legendItem(.purple, "price", Self.tagHelpPrice)
+            legendItem(.secondary, "score", Self.tagHelpScore)
+            legendItem(.orange, "fit", Self.tagHelpFit)
         }
         .font(.system(size: 8.5))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func legendItem(_ c: Color, _ label: String) -> some View {
+    private func legendItem(_ c: Color, _ label: String, _ help: String) -> some View {
         HStack(spacing: 3) {
             Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
             Text(label).foregroundStyle(.tertiary)
         }
+        .help(help)
     }
 
     private func quotaBar(_ pct: Int) -> some View {
