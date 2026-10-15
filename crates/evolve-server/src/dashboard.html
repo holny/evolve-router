@@ -443,6 +443,21 @@ const T = {
   t_diff:    {zh:'任务难度 0-3：由判定器（决策模型+规则）评估请求复杂度，随会话深度略增。用途：难度越高质量底线越高（弱模型先出局）、≥2 取消 ε 探索、影响评分权重', en:'task difficulty 0-3, judged by the decision model + rules, rises slightly with session depth. Used for: higher quality floor at higher difficulty (weak models drop first), no ε-exploration at ≥2, and scoring weights', ko:'작업 난이도 0-3: 결정 모델+규칙이 평가, 세션 깊이에 따라 소폭 증가. 용도: 난이도가 높을수록 품질 기준 상승(약한 모델 먼저 탈락), ≥2면 ε 탐색 중단, 점수 가중치 영향', ja:'タスク難度 0-3：判断モデル＋規則がリクエスト複雑度を評価、セッション深度で微増。用途：難度が高いほど品質基準上昇（弱いモデルから脱落）、≥2でε探索中止、スコア重みに影響', es:'dificultad de la tarea 0-3, evaluada por el modelo de decisión + reglas, sube algo con la profundidad de la sesión. Usos: a más dificultad, más piso de calidad (los débiles caen primero), sin exploración ε si ≥2, afecta los pesos', fr:'difficulté de tâche 0-3, évaluée par le modèle de décision + règles, augmente un peu avec la profondeur de session. Usages : difficulté plus haute ⇒ plancher plus haut (les faibles sortent d\'abord), pas d\'exploration ε si ≥2, influence les poids'},
   p_alt:     {zh:'备选', en:'runner-ups', ko:'차점', ja:'次点', es:'alternos', fr:'alternatives'},
   p_diff:    {zh:'难度', en:'difficulty', ko:'난이도', ja:'難度', es:'dificultad', fr:'difficulté'},
+  p_cap:     {zh:'能力', en:'capability', ko:'역량', ja:'能力', es:'capacidad', fr:'capacité'},
+  p_price:   {zh:'价位', en:'price', ko:'가격', ja:'価格', es:'precio', fr:'prix'},
+  p_score:   {zh:'评分', en:'score', ko:'점수', ja:'スコア', es:'puntuación', fr:'score'},
+  p_match:   {zh:'匹配', en:'match', ko:'적합', ja:'適合', es:'ajuste', fr:'adéquation'},
+  m_over:    {zh:'过配', en:'over-provisioned', ko:'과투입', ja:'過剰', es:'sobre', fr:'surdimensionné'},
+  m_under:   {zh:'欠配', en:'under-provisioned', ko:'과소', ja:'不足', es:'infra', fr:'sous-dimensionné'},
+  cap_basic:    {zh:'基础', en:'basic', ko:'기본', ja:'ベーシック', es:'básico', fr:'basique'},
+  cap_standard: {zh:'标准', en:'standard', ko:'표준', ja:'スタンダード', es:'estándar', fr:'standard'},
+  cap_powerful: {zh:'旗舰', en:'flagship', ko:'플래그십', ja:'フラッグシップ', es:'buque', fr:'haut de gamme'},
+  price_cheap:   {zh:'低价', en:'budget', ko:'저가', ja:'低価格', es:'económico', fr:'économique'},
+  price_medium:  {zh:'中价', en:'mid', ko:'중간', ja:'ミディアム', es:'medio', fr:'moyen'},
+  price_premium: {zh:'高价', en:'premium', ko:'프리미엄', ja:'プレミアム', es:'premium', fr:'premium'},
+  diff_easy: {zh:'简单', en:'easy', ko:'쉬움', ja:'簡単', es:'fácil', fr:'facile'},
+  diff_mid:  {zh:'普通', en:'medium', ko:'보통', ja:'普通', es:'medio', fr:'moyen'},
+  diff_hard: {zh:'高难', en:'hard', ko:'어려움', ja:'高難度', es:'difícil', fr:'difficile'},
   p_est:     {zh:'预估入', en:'est in', ko:'추정 입', ja:'推定入', es:'ent est.', fr:'entr est.'},
   t_est:     {zh:'请求发出前的输入 tokens 估算（用于窗口/配额/粘性检查）；行内「入」是上游实报用量，两者可能不同', en:'input-token estimate made before the request (drives window/quota/sticky checks); the in/out in the row are actual usage reported by upstream and may differ', ko:'요청 전 입력 토큰 추정(윈도우/쿼터/스티키 검사용); 행의 입/출은 업스트림 실제 사용량으로 다를 수 있음', ja:'リクエスト前の入力トークン推定（窓/クォータ/スティキー検査用）；行内の入/出は上流の実使用量で異なり得る', es:'estimación de tokens de entrada antes de la solicitud (ventana/cuota/sticky); lo in/out de la fila es uso real reportado por el upstream', fr:'estimation des jetons d\'entrée avant la requête (fenêtre/quota/sticky) ; le entr/sort de la ligne est l\'usage réel remonté, qui peut différer'},
   t_actual:  {zh:'入=上游实报的总输入 tokens（读是其中命中缓存、按折扣计价的部分；写=新增缓存计费；出=补全）。入的大小由发送内容决定：全新短请求几十 token、带全部历史的长会话几十万都正常', en:'in = total input tokens reported by upstream (r = the cached subset, billed at discount; w = new cache written, billed; out = completion). Size follows content: a fresh short request is tens of tokens, a long session with full history is hundreds of thousands', ko:'입=업스트림이 보고한 총 입력 토큰(읽=그중 캐시 적중 부분, 할인 과금; 쓰=신규 캐시 기록, 과금; 출=보완). 크기는 내용에 비례: 새 짧은 요청은 수십 토큰, 전체 히스토리를 실Long 세션은 수십만', ja:'入=上流が報告する総入力トークン（読=うちキャッシュ適中部分、割引課金；書=新規キャッシュ書き込み、課金；出=補完）。大きさは内容次第：全新の短いリクエストは数十トークン、全履歴を含む長いセッションは数十万', es:'ent = total de tokens de entrada reportados por el upstream (lee = parte en caché, con descuento; esc = caché nueva, facturada; sal = complementación). El tamaño sigue al contenido: una petición corta nueva son decenas de tokens, una sesión larga con historial son cientos de miles', fr:'entr = total des jetons d\'entrée remontés (lect = partie en cache, facturée au rabais ; éc = cache nouvelle, facturée ; sor = complétion). La taille suit le contenu : une requête courte neuve fait des dizaines de jetons, une longue session avec historique en fait des centaines de milliers'},
@@ -759,6 +774,30 @@ function decisionPath(e){
     }
     if (e.difficulty_eff != null)
       parts.push('<span class="pdim" title="'+esc(t('t_diff'))+'">'+esc(t('p_diff'))+' '+(+e.difficulty_eff).toFixed(1)+'</span>');
+    // 模型打标（决策时点：能力+价位）+ 网关评分 + 难度↔能力匹配（用户裁决）
+    const mt = e.model_tags || {};
+    if (mt.capability) {
+      const capLabel = {basic:t('cap_basic'), standard:t('cap_standard'), powerful:t('cap_powerful')}[mt.capability] || mt.capability;
+      parts.push('<span class="pbadge" title="'+esc(t('p_cap'))+'">'+esc(capLabel)+'</span>');
+    }
+    if (mt.price_tier) {
+      const priceLabel = {cheap:t('price_cheap'), medium:t('price_medium'), premium:t('price_premium')}[mt.price_tier] || mt.price_tier;
+      parts.push('<span class="pbadge" title="'+esc(t('p_price'))+'">'+esc(priceLabel)+'</span>');
+    }
+    const chosenScore = e.scores ? e.scores[e.chosen] : null;
+    if (chosenScore != null)
+      parts.push('<span class="pdim" title="'+esc(t('p_score'))+'">'+esc(t('p_score'))+' '+(+chosenScore).toFixed(2)+'</span>');
+    // 难度↔能力匹配：L1/L2/L3（≤0.8/≤2.0/>2.0）对照 基础/标准/旗舰
+    const dEff = e.difficulty_eff;
+    const capIdx = {basic:0, standard:1, powerful:2}[mt.capability];
+    if (dEff != null && capIdx != null) {
+      const dIdx = dEff <= 0.8 ? 0 : dEff <= 2.0 ? 1 : 2;
+      const matchTxt = dIdx === capIdx ? esc(t('p_match'))
+                     : capIdx > dIdx ? esc(t('m_over'))
+                     : esc(t('m_under'));
+      const cls = dIdx === capIdx ? 'pbadge' : 'pbadge warn';
+      parts.push('<span class="'+cls+'" title="'+esc(t('p_match'))+'">'+matchTxt+'</span>');
+    }
   }
   const alts = (e.chain || []).filter(m => m !== e.chosen).slice(0, 2);
   if (alts.length) parts.push('<span class="pdim" title="'+esc(t('p_alt'))+'">'+esc(t('p_alt'))+' '+alts.map(a => esc(a.length>22?a.slice(0,21)+'…':a)).join(' ▸ ')+'</span>');

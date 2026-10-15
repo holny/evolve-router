@@ -675,6 +675,18 @@ pub async fn chat_completions(
                             .map(|c| (top.score - c.score) as f64)
                     }).unwrap_or(0.0),
                 });
+                // 决策时点的模型打标（能力+价位）：请求与标签同帧落库，
+                // 事后标签演进不影响历史请求的可解释性（用户裁决）
+                {
+                    let snap = st.engine.catalog_snapshot();
+                    let tags = crate::meta::tags_for_catalog(&st, &snap);
+                    ex["model_tags"] = match tags.get(&decision.chosen) {
+                        Some((cap, price)) => json!({
+                            "capability": cap.label(), "price_tier": price.label(),
+                        }),
+                        None => json!(null),
+                    };
+                }
                 if cross {
                     ex["translated"] = json!("anthropic->openai");
                 }

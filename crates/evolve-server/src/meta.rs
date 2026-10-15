@@ -2005,7 +2005,7 @@ static TAG_CACHE: std::sync::LazyLock<
     >,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-fn tags_for_catalog(
+pub(crate) fn tags_for_catalog(
     st: &AppState,
     snap: &[evolve_core::types::ModelRecord],
 ) -> std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)> {

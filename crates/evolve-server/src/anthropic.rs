@@ -371,6 +371,17 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         decision.upstream_model = record.upstream_model.clone();
         decision.id = format!("{}-{}", decision.id, skipped.len());
 
+        // 决策时点的模型打标（能力+价位）：与 Web 面板同源
+        let model_tags = {
+            let snap = st.engine.catalog_snapshot();
+            let tags = crate::meta::tags_for_catalog(&st, &snap);
+            match tags.get(&decision.chosen) {
+                Some((cap, price)) => json!({
+                    "capability": cap.label(), "price_tier": price.label(),
+                }),
+                None => json!(null),
+            }
+        };
         let telem = std::sync::Arc::new(std::sync::Mutex::new(crate::stream::Telemetry {
             decision_id: decision.id.clone(),
             session: session_key.clone(),
@@ -402,6 +413,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 "difficulty_eff": decision.difficulty_eff,
                 "filtered": decision.filtered,
                 "funnel": decision.funnel,
+                "model_tags": model_tags,
             })),
         }));
 
