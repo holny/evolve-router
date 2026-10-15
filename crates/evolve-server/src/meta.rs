@@ -532,7 +532,14 @@ pub async fn api_events(
     let dir = shellexpand_dir(&st.config.data.dir);
     let path = dir.join("events.jsonl");
     let mut events = Vec::new();
-    if let Ok(content) = tokio::fs::read_to_string(&path).await {
+    // 只读文件尾部：面板要的是"最近 limit 条"，全量读几十 MB 没有意义。
+    // 磁盘读放 spawn_blocking，别占用 async worker
+    let tail_path = path.clone();
+    let content = tokio::task::spawn_blocking(move || read_tail(&tail_path, 4 * 1024 * 1024))
+        .await
+        .ok()
+        .flatten();
+    if let Some(content) = content {
         for line in content.lines().rev() {
             if events.len() >= limit { break; }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
@@ -839,6 +846,57 @@ pub async fn api_providers_scan_progress(State(st): State<AppState>) -> Response
     }
 }
 
+/// 事件文件**尾部**读取：只读最后 `max_bytes`，丢掉首个残行（UTF-8 边界安全）。
+/// events.jsonl 会涨到几十 MB，全量 `read_to_string` 在面板 3s 轮询 + 每请求打标下
+/// 都是白白的 memcpy（用户裁决 2026-10：B8）。
+fn read_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(max_bytes);
+    if start > 0 {
+        f.seek(SeekFrom::Start(start)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let mut text = String::from_utf8_lossy(&buf).into_owned();
+    if start > 0 {
+        // 首行可能是半行（且可能截断在多字节中间）→ 丢弃到第一个换行
+        if let Some(i) = text.find('\n') {
+            text.drain(..=i);
+        } else {
+            text.clear();
+        }
+    }
+    Some(text)
+}
+
+/// 事件文件尾部窗口：从 `initial` 起按需翻倍，直到覆盖 `cutoff_ms` 之前的行
+/// 或到达文件头（`cap` 硬上限兜底）。返回可安全按行切分的尾部文本。
+fn read_tail_until(path: &std::path::Path, cutoff_ms: i64, initial: u64, cap: u64) -> Option<String> {
+    let mut size = initial.min(cap).max(64 * 1024);
+    loop {
+        let text = read_tail(path, size)?;
+        let file_len = std::fs::metadata(path).ok().map(|m| m.len()).unwrap_or(0);
+        let whole_file = size >= file_len;
+        let oldest_ts = text
+            .lines()
+            .next()
+            .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .and_then(|v| v.get("ts").and_then(|x| x.as_i64()))
+            .unwrap_or(0);
+        if whole_file || old_ts_before(oldest_ts, cutoff_ms) || size >= cap {
+            return Some(text);
+        }
+        size = (size * 2).min(cap);
+    }
+}
+
+/// 老于 cutoff 判定：解析不到 ts（0）视为"未达界"，继续扩大窗口
+fn old_ts_before(ts: i64, cutoff_ms: i64) -> bool {
+    ts > 0 && ts < cutoff_ms
+}
+
 /// Provider 实时状态（每 5s 轮询）：health、最后成功时间、当前使用率
 /// 近 5h 每 Provider 积分用量：事件回扫（plan_credits_used 折算，与配额执行
 /// 同口径）。plan_usage_sums 为内存账本、重启即清零——展示口径改走事件回扫，
@@ -852,8 +910,10 @@ fn usage_5h_by_provider(
     let prov_of_model: std::collections::HashMap<&str, &str> =
         snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
     let Some(path) = events.path() else { return out };
-    let Ok(content) = std::fs::read_to_string(path) else { return out };
     let cutoff = (now_ms as i64) - 5 * 3600 * 1000;
+    let Some(content) = read_tail_until(&path, cutoff, 2 * 1024 * 1024, 64 * 1024 * 1024) else {
+        return out;
+    };
     for line in content.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
@@ -876,7 +936,7 @@ fn usage_5h_by_provider(
 
 /// 近 24h 每 Provider token 用量：事件回扫（单文件倒序，越过 24h 界即停；
 /// events.jsonl.1 轮转历史不计——本地量级下单文件通常远超 24h 覆盖）。
-/// /api/providers 与 /api/providers/status 共用，保证两个消费端同源。
+/// 只读文件尾部（read_tail_until 按需扩大窗口），/api/providers 专用。
 /// 返回 (各 Provider 近 24h tokens, 各 Provider 最近一次使用 ts_ms)
 fn tokens_24h_by_provider(
     snap: &[evolve_core::types::ModelRecord],
@@ -888,8 +948,10 @@ fn tokens_24h_by_provider(
     let prov_of_model: std::collections::HashMap<&str, &str> =
         snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
     let Some(path) = events.path() else { return (out, last_used) };
-    let Ok(content) = std::fs::read_to_string(path) else { return (out, last_used) };
     let cutoff = (now_ms as i64) - 24 * 3600 * 1000;
+    let Some(content) = read_tail_until(&path, cutoff, 2 * 1024 * 1024, 64 * 1024 * 1024) else {
+        return (out, last_used);
+    };
     for line in content.lines().rev() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
         if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
@@ -914,9 +976,46 @@ fn tokens_24h_by_provider(
     (out, last_used)
 }
 
+/// provider 用量聚合缓存（5s TTL）：/api/providers 被面板 3s 轮询，
+/// 24h 窗口在繁忙文件上要读到 ~16MB 尾部——同一次轮询里把两个聚合都算一遍即可，
+/// 展示口径对 5s 滞后不敏感（用户裁决 2026-10：B8）
+#[allow(clippy::type_complexity)]
+static PROVIDER_USAGE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<
+        Option<(
+            std::time::Instant,
+            std::collections::HashMap<String, u64>,
+            std::collections::HashMap<String, i64>,
+            std::collections::HashMap<String, f64>,
+        )>,
+    >,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+fn provider_usage(
+    snap: &[evolve_core::types::ModelRecord],
+    events: &evolve_memory::events::EventLog,
+    now_ms: u64,
+) -> (
+    std::collections::HashMap<String, u64>,
+    std::collections::HashMap<String, i64>,
+    std::collections::HashMap<String, f64>,
+) {
+    if let Ok(g) = PROVIDER_USAGE_CACHE.lock()
+        && let Some((at, tok24, last_used, credits5h)) = g.as_ref()
+        && at.elapsed().as_secs() < 5
+    {
+        return (tok24.clone(), last_used.clone(), credits5h.clone());
+    }
+    let (tok24, last_used) = tokens_24h_by_provider(snap, events, now_ms);
+    let credits5h = usage_5h_by_provider(snap, events, now_ms);
+    if let Ok(mut g) = PROVIDER_USAGE_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), tok24.clone(), last_used.clone(), credits5h.clone()));
+    }
+    (tok24, last_used, credits5h)
+}
+
 /// 账号（provider）级健康聚合：返回 (最紧冷却项, 永久黑名单模型名列表)。
-/// 冷却项 = (剩余ms, model_id, kind, message)。`/api/providers` 与
-/// `/api/providers/status` 共用——单一事实源，避免两端各自聚合口径漂移。
+/// 冷却项 = (剩余ms, model_id, kind, message)。单一事实源，/api/providers 专用。
 #[allow(clippy::type_complexity)]
 fn provider_health(
     health_snap: &evolve_core::types::HealthMap,
@@ -1021,146 +1120,6 @@ fn derive_quota(observed: &Value, windows: &Value, used_5h: f64) -> (Value, Valu
     (Value::Object(per), binding)
 }
 
-pub async fn api_providers_status(State(st): State<AppState>) -> Response {
-    let now_ms = evolve_memory::health::now();
-    let health_snap = st.health.snapshot();
-    let sums = st.quota.plan_usage_sums(now_ms, 5 * 3600 * 1000);
-    let soft_pct = st.config.policy.plan_soft_pct;
-    let ov = crate::state::load_overrides(&st.config.data.dir);
-    let mut out: Vec<Value> = Vec::new();
-    let snap = st.engine.catalog_snapshot();
-    let (tok24, last_used) = tokens_24h_by_provider(&snap, &st.events, now_ms);
-    use std::hash::{Hash, Hasher};
-    let key_fp = |k: &str| {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        k.hash(&mut h);
-        format!("{:016x}", h.finish())
-    };
-    let group_fp = |provider: &str| -> String {
-        snap.iter()
-            .find(|x| x.provider == provider)
-            .and_then(|x| x.key_values().first().cloned())
-            .map(|k| key_fp(&k))
-            .unwrap_or_default()
-    };
-    // 身份遮蔽（与 /api/providers 同规则）：baseUrl+apiKey 指纹。
-    // 含 disabled 条目——禁用行仍要展示（可恢复），其发现型孪生必须继续被遮蔽
-    let manual_idents: std::collections::HashSet<(String, String)> = ov.providers.iter()
-        .map(|(k, p)| {
-            let fp = p.api_key.as_deref().map(|s| key_fp(s))
-                .or_else(|| p.key_fp.clone())
-                .unwrap_or_else(|| group_fp(k));
-            (p.base_url.clone(), fp)
-        })
-        .collect();
-    // 用量按账号（provider）归属：同端点多账号不互串
-    let mut used_by_provider: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    let mut used_by_url: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    for m in &snap {
-        if !m.plan { continue; }
-        if let Some((i, c, o)) = sums.get(&m.id) {
-            let credits = evolve_core::plans::plan_credits_used(&m.base_url, &m.id, *i, *c, *o);
-            *used_by_provider.entry(m.provider.clone()).or_insert(0.0) += credits;
-            *used_by_url.entry(m.base_url.clone()).or_insert(0.0) += credits;
-        }
-    }
-    for (key, pd) in &ov.providers {
-        // 禁用行仍展示（带 disabled 标记）——否则面板/网页的"恢复"入口永不出现
-        let has_named = snap.iter().any(|m| &m.provider == key);
-        let used = if has_named {
-            used_by_provider.get(key).copied().unwrap_or(0.0)
-        } else {
-            used_by_url.get(&pd.base_url).copied().unwrap_or(0.0)
-        };
-        let allowance = pd.window_5h.or_else(|| {
-            let pk = evolve_core::plans::plan_for(&pd.base_url).map(|p| p.key).unwrap_or("");
-            evolve_core::plans::tier_allowance_by_key(pk, &pd.tier, 0)
-        });
-        let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let (coolest, blocked) = provider_health(&health_snap, &snap, key, now_ms);
-        let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
-        let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
-        let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
-        let cool_kind = coolest.as_ref().map(|(_, _, kd, _)| kd.clone()).unwrap_or_default();
-        out.push(json!({
-            "key": key, "source": "manual",
-            "base_url": pd.base_url, "tier": pd.tier, "plan_kind": pd.plan_kind,
-            "disabled": pd.disabled,
-            "allowance_5h": allowance,
-            "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
-            "pressure": pressure,
-            "soft_pct": soft_pct,
-            "cooldown_remaining_ms": cool,
-            "cooldown_model": cool_model,
-            "message": cool_msg,
-            "kind": cool_kind,
-            "blocked_models": blocked,
-            "available": cool.is_none() && blocked.is_empty(),
-            "tokens_24h": tok24.get(key).copied().unwrap_or(0),
-            "last_used_ms": last_used.get(key).copied().unwrap_or(0),
-            "fetched_models_count": pd.fetched_models.len(),
-        }));
-    }
-    use std::collections::HashMap;
-    let mut grouped: HashMap<String, Value> = HashMap::new();
-    for m in &snap {
-        if manual_idents.contains(&(m.base_url.clone(), group_fp(&m.provider))) { continue; }
-        let profile = evolve_core::plans::plan_for(&m.base_url);
-        let plan_key = profile.map(|p| p.key.to_string()).unwrap_or_default();
-        let entry = grouped.entry(m.provider.clone()).or_insert_with(|| json!({
-            "key": m.provider.clone(),
-            "source": "scanned",
-            "disabled": false,
-            "plan_kind": profile.map(|p| p.plan_kind).unwrap_or("api"),
-            "docs_url": profile.map(|p| p.docs_url).unwrap_or(""),
-            "model_count": 0u64,
-            "models": Vec::<Value>::new(),
-            "allowance_5h": ov.providers.get(&plan_key).and_then(|p| p.window_5h),
-            "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
-            "last_used_ms": last_used.get(m.provider.as_str()).copied().unwrap_or(0),
-        }));
-        if let Some(arr) = entry.get_mut("models").and_then(|v| v.as_array_mut()) {
-            arr.push(serde_json::Value::String(m.id.clone()));
-        }
-        if let Some(o) = entry.as_object_mut() {
-            let cur = o.get("model_count").and_then(|v| v.as_u64()).unwrap_or(0);
-            o.insert("model_count".into(), serde_json::json!(cur + 1));
-        }
-    }
-    for (provider, mut e) in grouped {
-        let used: f64 = e.get("models").and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|id| id.as_str()).filter_map(|id| {
-                let mm = snap.iter().find(|m| m.id == id)?;
-                sums.get(id).map(|(i, c, o)| evolve_core::plans::plan_credits_used(&mm.base_url, &mm.id, *i, *c, *o))
-            }).sum())
-            .unwrap_or(0.0);
-        let allowance = e.get("allowance_5h").and_then(|v| v.as_f64());
-        let pressure = allowance.filter(|a| *a > 0.0).map(|a| used / a);
-        let (coolest, blocked) = provider_health(&health_snap, &snap, &provider, now_ms);
-        let cool = coolest.as_ref().map(|(r, _, _, _)| *r);
-        let cool_model = coolest.as_ref().map(|(_, m, _, _)| m.clone());
-        let cool_msg = coolest.as_ref().map(|(_, _, _, msg)| msg.clone()).unwrap_or_default();
-        let cool_kind = coolest.as_ref().map(|(_, _, kd, _)| kd.clone()).unwrap_or_default();
-        e.as_object_mut().map(|o| {
-            o.insert("used_5h".into(), json!((used * 100.0).round() / 100.0));
-            o.insert("pressure".into(), json!(pressure));
-            o.insert("cooldown_remaining_ms".into(), json!(cool));
-            o.insert("cooldown_model".into(), json!(cool_model));
-            o.insert("message".into(), json!(cool_msg));
-            o.insert("kind".into(), json!(cool_kind));
-            o.insert("blocked_models".into(), json!(blocked));
-            o.insert("available".into(), json!(cool.is_none() && blocked.is_empty()));
-        });
-        out.push(e);
-    }
-    // 契约：全接口统一 snake_case（与 /api/health、/api/stats、/api/model-tags 一致）
-    // ——web 面板与 macOS 面板共用同一字段名，禁止在此做 camelCase 重映射（曾因
-    // 重映射只改服务端、web 未跟随而整块 Provider 卡失效）。
-    (axum::Json(json!({"providers": out, "soft_pct": soft_pct, "now": now_ms})))
-        .into_response()
-}
-
-/// Provider 管理列表：内置注册表 + 扫描发现 + 手动定义，合并展示
 /// 按量 provider 余额刷新（deepseek /user/balance）：缓存 >60s 视为过期，后台拉。
 /// 面板轮询 `/api/providers` 与 90s watchdog 共用——**watchdog 让启动即预热**，
 /// 否则网关刚起来时面板取不到余额 → 回落到字面 "payg" 文案，几秒后又变回余额
@@ -1211,8 +1170,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     };
     // 1. 手动定义的（最优先——用户自己加的）
     let snap_all = st.engine.catalog_snapshot();
-    let (tok24, last_used) = tokens_24h_by_provider(&snap_all, &st.events, now_ms);
-    let credits5h = usage_5h_by_provider(&snap_all, &st.events, now_ms);
+    let (tok24, last_used, credits5h) = provider_usage(&snap_all, &st.events, now_ms);
     for (key, pd) in &ov.providers {
         // 禁用行仍展示（带 disabled 标记）——其发现型孪生已被身份遮蔽抑制，
         // 用户可在面板/网页一键恢复
@@ -1731,7 +1689,7 @@ fn last_used_cached(st: &AppState) -> std::collections::HashMap<String, u64> {
     }
     let mut last_used: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     if let Some(path) = st.events.path()
-        && let Ok(content) = std::fs::read_to_string(path)
+        && let Some(content) = read_tail(&path, 2 * 1024 * 1024)
     {
         for line in content.lines().rev().take(4000) {
             if let Ok(e) = serde_json::from_str::<Value>(line)
@@ -1993,14 +1951,18 @@ pub fn assign_tags_within(
     out
 }
 
-/// 标签分配缓存（分位分配需 O(n log n)，按目录规模 + 60s TTL 缓存）
+/// 标签分配缓存（分位分配需 O(n log n)，按目录规模 + 30s TTL 缓存）。
+/// 值用 Arc 共享：命中时不再克隆整个 map（每请求都会走这里）
 #[allow(clippy::type_complexity)]
 static TAG_CACHE: std::sync::LazyLock<
     std::sync::Mutex<
         Option<(
             usize,
             std::time::Instant,
-            (usize, std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)>),
+            (
+                usize,
+                std::sync::Arc<std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)>>,
+            ),
         )>,
     >,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
@@ -2008,17 +1970,23 @@ static TAG_CACHE: std::sync::LazyLock<
 pub(crate) fn tags_for_catalog(
     st: &AppState,
     snap: &[evolve_core::types::ModelRecord],
-) -> std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)> {
-    let usable = usable_model_ids(st);
+) -> std::sync::Arc<
+    std::collections::HashMap<String, (evolve_core::tags::Capability, evolve_core::tags::PriceTier)>,
+> {
+    // 快路径：30s 内且目录长度未变 → 直接复用缓存结果。
+    // ⚠ 可用性（usable_model_ids → overrides 磁盘读 + 目录克隆）必须放在缓存命中**之后**：
+    // 否则每次命中也要付一遍磁盘 IO（面板 3s 轮询 / 每个请求都走这里）。
+    // 代价是可用性变化最多滞后一个 TTL 窗口（30s），与旧实现同量级——旧实现的
+    // usable.len() 校验只比长度，成员变化同样感知不到（用户裁决 2026-10：perf）
     if let Ok(g) = TAG_CACHE.lock()
         && let Some((len, at, m)) = g.as_ref()
         && *len == snap.len()
         && at.elapsed().as_secs() < 30
-        && m.0 == usable.len()
     {
         return m.1.clone();
     }
-    let assigned = assign_tags_within(snap, &usable);
+    let usable = usable_model_ids(st);
+    let assigned = std::sync::Arc::new(assign_tags_within(snap, &usable));
     if let Ok(mut g) = TAG_CACHE.lock() {
         *g = Some((snap.len(), std::time::Instant::now(), (usable.len(), assigned.clone())));
     }

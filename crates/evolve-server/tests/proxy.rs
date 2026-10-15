@@ -956,13 +956,13 @@ async fn providers_payload_is_snake_case() {
 #[tokio::test]
 async fn providers_status_payload_is_snake_case() {
     let app = build_router(build_state(test_config(9101)));
-    let (status, _h, raw) = send(app, get("/api/providers/status")).await;
+    let (status, _h, raw) = send(app, get("/api/providers")).await;
     assert_eq!(status, StatusCode::OK);
     let j = json_body(&raw);
     let arr = j["providers"].as_array().expect("providers array");
     assert!(!arr.is_empty());
     for p in arr {
-        assert_no_camel(p, "/api/providers/status");
+        assert_no_camel(p, "/api/providers");
         assert!(p.get("key").is_some());
     }
 }

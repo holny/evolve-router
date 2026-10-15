@@ -574,7 +574,6 @@ pub fn build_router(state: AppState) -> axum::Router {
                 .post(crate::meta::api_providers_set))
         .route("/api/providers/delete", axum::routing::post(crate::meta::api_providers_delete))
         .route("/api/providers/refresh", axum::routing::post(crate::meta::api_providers_refresh))
-        .route("/api/providers/status", axum::routing::get(crate::meta::api_providers_status))
                 .route("/api/providers/scan", axum::routing::post(crate::meta::api_providers_scan))
         .route("/api/providers/scan-progress", axum::routing::get(crate::meta::api_providers_scan_progress))
         .route("/api/providers/restore", axum::routing::post(crate::meta::api_providers_restore))
