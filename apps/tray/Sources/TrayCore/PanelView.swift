@@ -289,13 +289,6 @@ public struct PanelView: View {
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                     }
-                    // 该行指标（tokens/hit/速率/TTFT）取自 /api/stats（跟随窗口切换：
-                    // 今天 / 昨天）——统一小字标注窗口，免得误读成累计值
-                    if p.tokensWin > 0 || p.cachePctWin != nil || (p.avgRate ?? 0) > 0 || p.avgTtftMs != nil {
-                        Text(state.statWindowToday ? "today" : "yesterday")
-                            .font(.system(size: 8.5, weight: .semibold))
-                            .foregroundStyle(.quaternary)
-                    }
                     if p.tokensWin > 0 {
                         Text(AppState.fmtTok(p.tokensWin))
                             .font(.system(size: 9.5))
