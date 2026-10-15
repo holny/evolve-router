@@ -542,7 +542,16 @@ pub async fn api_events(
     if let Some(content) = content {
         for line in content.lines().rev() {
             if events.len() >= limit { break; }
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+                // 部署前写入的老事件没有 tags → 读取时用同一份规则补算，
+                // 避免客户端在过渡期显示成"没有标签"（decision_tags 单一事实源）
+                if v.get("tags").is_none() {
+                    if let Some(t) = crate::decision_tags::derive_from_event(&v) {
+                        if let Some(o) = v.as_object_mut() {
+                            o.insert("tags".into(), t);
+                        }
+                    }
+                }
                 events.push(v);
             }
         }

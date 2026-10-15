@@ -179,3 +179,91 @@ mod tests {
         assert_eq!(flags(&x), vec!["trivial"]);
     }
 }
+
+/// 事件级派生（读取时补算）：老事件（部署前写入）没有 `tags` 字段，但输入齐全
+/// （`judgment` / `sticky` / `model_tags.capability`）——用**同一份**规则补出来，
+/// 免得面板/Web 在过渡期显示"没标签"的断档（用户 2026-10-15 观测到）
+pub fn derive_from_event(ev: &Value) -> Option<Value> {
+    let j = ev.get("judgment")?;
+    let f = |k: &str| -> f32 {
+        j.get(k)
+            .and_then(|x| x.as_f64().or_else(|| x.as_i64().map(|i| i as f64)))
+            .unwrap_or(0.0) as f32
+    };
+    let domain = match j.get("domain").and_then(|x| x.as_str()) {
+        Some("Code") => Domain::Code,
+        Some("MathLogic") => Domain::MathLogic,
+        Some("Data") => Domain::Data,
+        Some("AgentOps") => Domain::AgentOps,
+        Some("Writing") => Domain::Writing,
+        Some("Lookup") => Domain::Lookup,
+        Some("Chitchat") => Domain::Chitchat,
+        _ => Domain::Other,
+    };
+    let judge_source: &'static str = match ev.get("judge").and_then(|x| x.as_str()) {
+        Some("decision_model") => "decision_model",
+        Some("decision_model+rules") => "decision_model+rules",
+        Some("heuristic") => "heuristic",
+        Some("explicit") => "explicit",
+        Some("sticky") => "sticky",
+        _ => return None,
+    };
+    let mut set = JudgmentSet {
+        domain,
+        domain_confidence: 1.0,
+        difficulty: f("difficulty"),
+        difficulty_confidence: 1.0,
+        needs_vision: f("needs_vision"),
+        is_trivial: f("is_trivial"),
+        tool_heavy: f("tool_heavy"),
+        high_stakes: f("high_stakes"),
+        session_relevance: 0.0,
+        session_depth: 0.0,
+        route_recommendation: None,
+        route_recommendation_confidence: 0.0,
+        judge_source,
+    };
+    // 旧事件的 difficulty 可能是 difficulty_eff 之外唯一来源；缺失时退回顶层
+    if set.difficulty == 0.0 {
+        set.difficulty = ev
+            .get("difficulty_eff")
+            .and_then(|x| x.as_f64())
+            .unwrap_or(0.0) as f32;
+    }
+    let sticky = ev.get("sticky").and_then(|x| x.as_bool()).unwrap_or(false);
+    let cap = ev
+        .get("model_tags")
+        .and_then(|m| m.get("capability"))
+        .and_then(|x| x.as_str());
+    Some(derive(&set, cap, sticky))
+}
+
+    #[test]
+    fn legacy_event_gets_tags_backfilled() {
+        // 部署前写入的事件：只有 judgment/sticky/model_tags，没有 tags
+        let ev = json!({
+            "kind": "chat",
+            "judge": "decision_model+rules",
+            "sticky": false,
+            "difficulty_eff": 2.4,
+            "judgment": {"domain": "Code", "difficulty": 2.4, "is_trivial": 0.0,
+                          "tool_heavy": 0.7, "needs_vision": 0.0, "high_stakes": 0.9},
+            "model_tags": {"capability": "powerful", "price_tier": "premium"},
+        });
+        let t = derive_from_event(&ev).expect("legacy event must backfill tags");
+        assert_eq!(t["difficulty"], "hard");
+        assert_eq!(t["domain"], "code");
+        assert_eq!(t["mode"], "model+rules");
+        assert_eq!(t["fit"], "match");
+        assert_eq!(t["flags"], json!(["tools", "stakes"]));
+
+        // 粘性复用事件 → 只有 mode（占位判定不外显）
+        let sticky = json!({
+            "judge": "sticky", "sticky": true,
+            "judgment": {"domain": "Code", "difficulty": 0.0},
+        });
+        assert_eq!(derive_from_event(&sticky), Some(json!({"mode": "reused"})));
+
+        // 缺 judgment → 不补（老到没有判定字段的事件保持原样）
+        assert_eq!(derive_from_event(&json!({"kind": "chat"})), None);
+    }
