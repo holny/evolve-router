@@ -23,12 +23,19 @@ public struct PanelView: View {
             header
             decisionBanner
             metricsCard
-            if !state.providers.isEmpty { providersCard }
-            if !state.recent.isEmpty { decisionsCard }
+            // 中段（Providers + Recent）可滚动：打标行增加了内容高度，必须保证
+            // 底部控制按钮（Stop/Quit）始终在框内（用户裁决）
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 10) {
+                    if !state.providers.isEmpty { providersCard }
+                    if !state.recent.isEmpty { decisionsCard }
+                }
+            }
+            .frame(maxHeight: .infinity)
             controls
         }
         .padding(14)
-        .frame(width: 336)
+        .frame(width: 336, height: 620)
         .task {
             await state.pollLive()
             await state.pollData()
