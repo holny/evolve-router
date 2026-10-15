@@ -251,14 +251,14 @@ public struct PanelView: View {
                                         tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14), help: Self.tagHelpPrice)
                                     }
                                     if let sc = r.score {
-                                        tagPill(String(format: "score %.2f", sc), help: Self.tagHelpScore)
+                                        tagPill(String(format: "%.2f", sc), help: Self.tagHelpScore)
                                     }
                                     let capMap = ["basic": 0, "standard": 1, "powerful": 2]
                                     if let cap = r.capability, let d = r.difficulty,
                                        let cIdx = capMap[cap] {
                                         let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
                                         let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over" : "under")
-                                        tagPill("fit \(m)", tint: dIdx == cIdx ? .green : .orange, bg: (dIdx == cIdx ? Color.green : Color.orange).opacity(0.15), help: Self.tagHelpFit)
+                                        tagPill(m, tint: dIdx == cIdx ? .teal : .pink, bg: (dIdx == cIdx ? Color.teal : Color.pink).opacity(0.16), help: Self.tagHelpFit)
                                     }
                                 }
                                 .lineLimit(1)
@@ -647,28 +647,32 @@ public struct PanelView: View {
     }
 
     // 标签语义（色卡 + 悬停详解）——"什么难度/什么分/谁的价位"必须一眼可辨
-    static let tagHelpDiff = "task difficulty judged for this request (easy / medium / hard)"
+    static let tagHelpDiff = "task difficulty for this request: easy / medium / hard (green / orange / red)"
     static let tagHelpCap = "model capability tier (basic / standard / powerful)"
     static let tagHelpPrice = "model price tier (cheap / medium / premium)"
-    static let tagHelpScore = "router evaluation score for the chosen model (0-1)"
-    static let tagHelpFit = "difficulty ↔ capability fit: match (aligned) / over (capability above task) / under (capability below task)"
+    static let tagHelpScore = "router score for the chosen model on this request (0-1)"
+    static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
 
     /// 标签颜色说明（色卡 + 类别名；悬停给完整解释）
     private var tagLegend: some View {
-        HStack(spacing: 9) {
-            legendItem(.green, "difficulty", Self.tagHelpDiff)
-            legendItem(.blue, "capability", Self.tagHelpCap)
-            legendItem(.purple, "price", Self.tagHelpPrice)
-            legendItem(.secondary, "score", Self.tagHelpScore)
-            legendItem(.orange, "fit", Self.tagHelpFit)
+        HStack(spacing: 8) {
+            legendItem([.green, .orange, .red], "difficulty", Self.tagHelpDiff)
+            legendItem([.blue], "capability", Self.tagHelpCap)
+            legendItem([.purple], "price", Self.tagHelpPrice)
+            legendItem([.secondary], "score", Self.tagHelpScore)
+            legendItem([.teal, .pink], "fit", Self.tagHelpFit)
         }
         .font(.system(size: 8.5))
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func legendItem(_ c: Color, _ label: String, _ help: String) -> some View {
+    private func legendItem(_ cs: [Color], _ label: String, _ help: String) -> some View {
         HStack(spacing: 3) {
-            Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
+            HStack(spacing: 1.5) {
+                ForEach(Array(cs.enumerated()), id: \.offset) { _, c in
+                    Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
+                }
+            }
             Text(label).foregroundStyle(.tertiary)
         }
         .help(help)
