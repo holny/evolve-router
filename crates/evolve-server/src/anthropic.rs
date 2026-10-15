@@ -105,12 +105,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                     tools_sig,
                     domain: d.judgment.domain,
                     difficulty: d.difficulty_eff,
-                    flags: [
-                        d.judgment.is_trivial,
-                        d.judgment.tool_heavy,
-                        d.judgment.needs_vision,
-                        d.judgment.high_stakes,
-                    ],
+                    flags: evolve_core::types::JudgmentFlags::from_judgment(&d.judgment),
                     est_tokens: est,
                 },
             );
@@ -379,6 +374,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         decision.id = format!("{}-{}", decision.id, skipped.len());
 
         // 决策时点的模型打标（能力+价位）：与 Web 面板同源
+        let derived_explore_gate = decision.explore_gate;
         let (model_tags, derived_tags) = {
             let snap = st.engine.catalog_snapshot();
             let tags = crate::meta::tags_for_catalog(&st, &snap);
@@ -424,6 +420,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 "difficulty_eff": decision.difficulty_eff,
                 "filtered": decision.filtered,
                 "funnel": decision.funnel,
+                "explore_gate": derived_explore_gate,
                 "model_tags": model_tags,
                 "tags": derived_tags,
             })),
@@ -648,6 +645,7 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
             scored: vec![],
             weights: [0.35, 0.15, 0.25, 0.15, 0.10],
             judge_ms: 0,
+            explore_gate: None,
             sticky: false,
             est_input_tokens: 0,
             difficulty_eff: 0.0,

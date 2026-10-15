@@ -547,8 +547,12 @@ pub async fn api_events(
                 // 避免客户端在过渡期显示成"没有标签"（decision_tags 单一事实源）
                 if v.get("tags").is_none() {
                     if let Some(t) = crate::decision_tags::derive_from_event(&v) {
-                        if let Some(o) = v.as_object_mut() {
-                            o.insert("tags".into(), t);
+                        // None（判定字段缺失）时 derive_from_event 返回 Null：不落库，
+                        // 免得事件里出现 `"tags": null` 这种"有键没值"的怪状态
+                        if !t.is_null() {
+                            if let Some(o) = v.as_object_mut() {
+                                o.insert("tags".into(), t);
+                            }
                         }
                     }
                 }

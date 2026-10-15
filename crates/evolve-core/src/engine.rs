@@ -226,13 +226,7 @@ impl Engine {
             let tier_ok = if input.price_tier_of.is_empty() {
                 true
             } else {
-                let allowed: u8 = if sticky.difficulty <= 0.8 {
-                    0
-                } else if sticky.difficulty <= 2.0 {
-                    1
-                } else {
-                    2
-                };
+                let allowed: u8 = crate::thresholds::tier_index(sticky.difficulty) as u8;
                 input.price_tier_of.get(&sticky.chosen).copied().unwrap_or(1) <= allowed
             };
             if still_fits && size_ok && low_diff && tools_same && tier_ok && sticky.turns_left > 0 {
@@ -245,10 +239,10 @@ impl Engine {
                     domain_confidence: 1.0,
                     difficulty: sticky.difficulty,
                     difficulty_confidence: 1.0,
-                    needs_vision: sticky.flags[2],
-                    is_trivial: sticky.flags[0],
-                    tool_heavy: sticky.flags[1],
-                    high_stakes: sticky.flags[3],
+                    is_trivial: sticky.flags.is_trivial,
+                    tool_heavy: sticky.flags.tool_heavy,
+                    needs_vision: sticky.flags.needs_vision,
+                    high_stakes: sticky.flags.high_stakes,
                     session_relevance: 1.0,
                     session_depth: 0.0,
                     judge_source: "sticky",
@@ -394,7 +388,7 @@ impl Engine {
                 filtered.push(FilteredOut { model: m.id.clone(), cause: "no credential".into() });
                 continue;
             }
-            if j.needs_vision > 0.5 && m.tiers.vision < 0.5 {
+            if j.needs_vision > crate::thresholds::VISION && m.tiers.vision < crate::thresholds::VISION {
                 filtered.push(FilteredOut { model: m.id.clone(), cause: "no vision support".into() });
                 continue;
             }
@@ -507,13 +501,7 @@ impl Engine {
         // 放行（订阅内 mp≈0、活动价、官方定价倒挂都属此列）——只做上限不做下限，
         // 便宜层高能力模型不受影响。闸门清空则跳过（不让任务无模型可用）。
         if !input.price_tier_of.is_empty() {
-            let max_tier: u8 = if difficulty_eff <= 0.8 {
-                0
-            } else if difficulty_eff <= 2.0 {
-                1
-            } else {
-                2
-            };
+            let max_tier: u8 = crate::thresholds::tier_index(difficulty_eff) as u8;
             if max_tier < 2 {
                 // 成本代理：None = 不可知——**不参与倒挂判定**（此前 MAX≤MAX
                 // 会把"成本未知"当倒挂放行，贵模型照样进 L1）
@@ -781,7 +769,7 @@ impl Engine {
                 if input.price_tier_of.is_empty() {
                     return true;
                 }
-                let allowed: u8 = if difficulty_eff <= 0.8 { 0 } else if difficulty_eff <= 2.0 { 1 } else { 2 };
+                let allowed: u8 = crate::thresholds::tier_index(difficulty_eff) as u8;
                 input.price_tier_of.get(&m.id).copied().unwrap_or(1) <= allowed
             };
             let cost_gap = match (scoring::est_cost(prev_m, est, est.max(256), input.telemetry.get(&prev_m.id)),
@@ -805,11 +793,21 @@ impl Engine {
         // 样本多→后验窄→自动收敛。采样值相对后验均值的偏移做乘性扰动
         // （幅度上限 = explore_ratio），不推翻公式序，仍保留 confidence/stakes 门控。
         let mut explored = false;
+        let mut gate_facts: Option<ExploreGate> = None;
         {
-            let should_explore = scores.len() > 1
-                && j.high_stakes < 0.6
-                && difficulty_eff < 2.0
-                && j.domain_confidence >= self.policy.confidence_gate;
+            let stakes_ok = j.high_stakes < crate::thresholds::STAKES_HIGH;
+            let difficulty_ok = difficulty_eff < crate::thresholds::DIFF_HARD;
+            let confidence_ok = j.domain_confidence >= self.policy.confidence_gate;
+            if scores.len() > 1 {
+                gate_facts = Some(ExploreGate {
+                    stakes_ok,
+                    difficulty_ok,
+                    confidence_ok,
+                    confidence_gate: self.policy.confidence_gate,
+                    explored: false,
+                });
+            }
+            let should_explore = scores.len() > 1 && stakes_ok && difficulty_ok && confidence_ok;
             if should_explore {
                 let nanos = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -874,6 +872,9 @@ impl Engine {
                 if best_idx > 0 {
                     chosen = scores[best_idx].clone();
                     explored = true;
+                    if let Some(g) = gate_facts.as_mut() {
+                        g.explored = true;
+                    }
                 }
             }
         }
@@ -931,6 +932,8 @@ impl Engine {
         );
         decision.weights = eff_weights;
         decision.judge_ms = judge_ms;
+        // 探索门控实况（三条件 + 生效置信门限 + 采样是否改写首选）→ 事件/看板只渲染
+        decision.explore_gate = gate_facts;
         // S5 比例控制器观测：记录本次实际选用层级（cheap/medium/premium），
         // 供下一轮 penalties() 纠偏（此处有 tier 表，观测点唯一且准确）
         if self.ratio_enabled {
@@ -988,6 +991,7 @@ impl Engine {
             funnel,
             weights: [0.35, 0.15, 0.25, 0.15, 0.10],
             judge_ms: 0,
+            explore_gate: None,
         }
     }
 }
@@ -1368,7 +1372,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1391,7 +1395,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1403,6 +1407,55 @@ mod tests {
         let fresh = e.decide(input_with("你好", 620, &d, Some(mk()), &h, false));
         assert!(!fresh.sticky, "new user message must re-judge: {}", fresh.reason);
         assert!(fresh.difficulty_eff > 0.0, "fresh judge must carry difficulty");
+    }
+
+    /// 沿用特征必须按**字段名**落到对应位（review 2026-10-15：具名字段替代 [f32;4]，
+    /// 下标错位是静默的）——这里只给 tool_heavy 非零，断言只有它被继承
+    #[test]
+    fn sticky_inherits_flags_by_name() {
+        let e = engine();
+        let d = digest("你好");
+        let sticky = StickyState {
+            chosen: "mini".into(),
+            est_tokens_band: crate::tokens::tokens_band(600),
+            turns_left: 3,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 0.5,
+            flags: JudgmentFlags {
+                tool_heavy: 0.9,
+                ..JudgmentFlags::default()
+            },
+            est_tokens: 600,
+        };
+        let h = HealthMap::new();
+        let dec = e.decide(input("你好", 620, &d, Some(sticky), &h));
+        assert!(dec.sticky, "reason: {}", dec.reason);
+        assert_eq!(dec.judgment.tool_heavy, 0.9, "tool_heavy must be inherited");
+        assert_eq!(dec.judgment.is_trivial, 0.0);
+        assert_eq!(dec.judgment.needs_vision, 0.0);
+        assert_eq!(dec.judgment.high_stakes, 0.0);
+        assert_eq!(dec.judgment.domain, Domain::Chitchat);
+    }
+
+    /// 探索门控实况随决策下发（Web 不再自己重算阈值）：三条件 + 生效 Confidence 门限
+    #[test]
+    fn decision_exposes_explore_gate_facts() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let dec = e.decide(input("你好", 620, &d, None, &h));
+        let g = dec.explore_gate.expect("non-sticky decision must expose explore gate");
+        // det_policy() 的置信门限（与引擎实际使用的一致）
+        assert_eq!(g.confidence_gate, det_policy().confidence_gate);
+        assert_eq!(
+            g.stakes_ok,
+            dec.judgment.high_stakes < crate::thresholds::STAKES_HIGH
+        );
+        assert_eq!(
+            g.difficulty_ok,
+            dec.difficulty_eff < crate::thresholds::DIFF_HARD
+        );
     }
 
     /// 短消息的工具续跑：工具调用/返回会让 est 成倍增长（5 → 14），
@@ -1418,7 +1471,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 5,
         };
         let h = HealthMap::new();
@@ -1439,7 +1492,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 1.4,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1463,7 +1516,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 1_000,
         };
         let h = HealthMap::new();
@@ -1528,7 +1581,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Code,
             difficulty: 1.2,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 12_000,
         };
         // 注入热缓存遥测：standard 命中率 90%
@@ -1563,7 +1616,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
-            flags: [0.0; 4],
+            flags: JudgmentFlags::default(),
             est_tokens: 200,
         };
         let tiers: HashMap<String, u8> = HashMap::from([

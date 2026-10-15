@@ -213,6 +213,26 @@ pub trait Judge: Send + Sync {
     fn judge(&self, features: &RequestFeatures, digest: &DigestSignals, candidates_hint: &str) -> JudgmentSet;
 }
 
+/// 判定器给出的请求特征（0-1 置信度）——粘性复用时按字段名照搬，避免下标错位
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct JudgmentFlags {
+    pub is_trivial: f32,
+    pub tool_heavy: f32,
+    pub needs_vision: f32,
+    pub high_stakes: f32,
+}
+
+impl JudgmentFlags {
+    pub fn from_judgment(j: &JudgmentSet) -> Self {
+        Self {
+            is_trivial: j.is_trivial,
+            tool_heavy: j.tool_heavy,
+            needs_vision: j.needs_vision,
+            high_stakes: j.high_stakes,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StickyState {
     pub chosen: String,
@@ -222,10 +242,10 @@ pub struct StickyState {
     pub domain: Domain,
     /// 上次判定的有效难度：粘性只对低难度任务延续（L2 上限）
     pub difficulty: f32,
-    /// 上次判定的请求特征 [is_trivial, tool_heavy, needs_vision, high_stakes]：
-    /// 与 difficulty/domain 一起沿用（同一次工具流程的续跑，特征不变）；
-    /// 不存的话占位判定只能是 0，面板/Web 会把"沿用"误读成"没有特征"
-    pub flags: [f32; 4],
+    /// 上次判定的请求特征：与 difficulty/domain 一起沿用（同一次工具流程的续跑，
+    /// 特征不变）；不存的话占位判定只能是 0，面板/Web 会把"沿用"误读成"没有特征"。
+    /// 用具名字段而不是 [f32;4]——按下标取值的错位是静默的（review 2026-10-15）
+    pub flags: JudgmentFlags,
     /// 上次请求的估算输入 tokens：粘性量级保护上限（2 倍暴增/减半即断）
     pub est_tokens: u64,
 }
@@ -276,6 +296,23 @@ pub struct Decision {
     pub difficulty_eff: f32,
     /// 任务判定阶段耗时（决策模型 LLM 调用 + 规则融合）；粘性路径为 0
     pub judge_ms: u64,
+    /// 探索门控实况（三条件 + 生效的置信门限 + 采样是否真的改写了首选）——
+    /// 服务端算好，Web/面板只渲染；此前 Web 自己重算三条件、还把 config 里可配的
+    /// `confidence_gate` 硬编码成 0.35（2026-10-15 review 指出的漂移）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explore_gate: Option<ExploreGate>,
+}
+
+/// 探索门控实况（Thompson Sampling 前的三道闸）
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct ExploreGate {
+    pub stakes_ok: bool,
+    pub difficulty_ok: bool,
+    pub confidence_ok: bool,
+    /// 本次生效的置信门限（来自 policy.confidence_gate，不是硬编码）
+    pub confidence_gate: f32,
+    /// 门开着 + 采样后确实改写了首选（reason 里的 `[exploring]` 同源）
+    pub explored: bool,
 }
 
 impl Decision {

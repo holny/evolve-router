@@ -7,23 +7,11 @@
 use evolve_core::types::{Domain, JudgmentSet};
 use serde_json::{json, Value};
 
-/// 特征阈值：与路由自身判定口径对齐——vision 0.5（engine 硬约束）、
-/// stakes 0.6（engine 探索抑制 / scoring 高价值加成）；trivial/tools 路由不设闸，
-/// 取 0.5 作为"判定器说有"的展示口径。
+/// 阈值与难度分档**统一取自 evolve-core::thresholds**（单一事实源）：
+/// vision/stakes 与路由闸门同值，trivial/tools 路由不设闸、取 0.5 作展示口径。
+pub use evolve_core::thresholds::{difficulty_label, tier_index, VISION as VISION_THRESHOLD};
 pub const FLAG_THRESHOLD: f32 = 0.5;
-pub const VISION_THRESHOLD: f32 = 0.5;
-pub const STAKES_THRESHOLD: f32 = 0.6;
-
-/// 难度档位：边界与 engine 的价位层映射（sticky tier_ok / S5 比例控制器）同源
-pub fn difficulty_label(difficulty: f32) -> &'static str {
-    if difficulty <= 0.8 {
-        "easy"
-    } else if difficulty <= 2.0 {
-        "medium"
-    } else {
-        "hard"
-    }
-}
+pub const STAKES_THRESHOLD: f32 = evolve_core::thresholds::STAKES_HIGH;
 
 /// 任务域短词（面板与 Web 共用一套）——比枚举名好读、比长描述短
 pub fn domain_label(domain: Domain) -> &'static str {
@@ -65,13 +53,7 @@ fn capability_index(capability: &str) -> Option<usize> {
 /// 难度↔能力档位对齐（决策级结论：match / over / under）
 pub fn fit_label(difficulty: f32, capability: Option<&str>) -> Option<&'static str> {
     let c = capability_index(capability?)?;
-    let d = if difficulty <= 0.8 {
-        0
-    } else if difficulty <= 2.0 {
-        1
-    } else {
-        2
-    };
+    let d = tier_index(difficulty);
     Some(if d == c {
         "match"
     } else if c > d {

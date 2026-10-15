@@ -22,7 +22,7 @@ pub fn quality(m: &ModelRecord, j: &JudgmentSet, difficulty_eff: f32) -> f32 {
     let steep = 1.0 + 2.0 * requirement;
     let tier_st = tier.powf(steep);
     let q = 1.0 - requirement * (1.0 - tier_st);
-    if j.high_stakes > 0.6 {
+    if j.high_stakes > crate::thresholds::STAKES_HIGH {
         q * (0.6 + 0.4 * tier.max(m.tiers.reasoning))
     } else {
         q

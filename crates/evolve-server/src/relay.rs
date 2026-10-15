@@ -214,12 +214,7 @@ pub async fn chat_completions(
                     tools_sig,
                     domain: d.judgment.domain,
                     difficulty: d.difficulty_eff,
-                    flags: [
-                        d.judgment.is_trivial,
-                        d.judgment.tool_heavy,
-                        d.judgment.needs_vision,
-                        d.judgment.high_stakes,
-                    ],
+                    flags: evolve_core::types::JudgmentFlags::from_judgment(&d.judgment),
                     est_tokens: est,
                 },
             );
@@ -674,6 +669,7 @@ pub async fn chat_completions(
                     "difficulty_eff": decision.difficulty_eff,
                     "filtered": decision.filtered,
                     "funnel": decision.funnel,
+                    "explore_gate": decision.explore_gate,
                     // ⑥ regret proxy（ACRouter regret-style metrics）：
                     // 公式最优分 − 实际选择分 = 本次路由的代价（0 = 无悔）
                     "regret": decision.scored.first().and_then(|top| {
@@ -1109,6 +1105,7 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
             scored: vec![],
             weights: [0.35, 0.15, 0.25, 0.15, 0.10],
             judge_ms: 0,
+            explore_gate: None,
             sticky: false,
             est_input_tokens: 0,
             difficulty_eff: 0.0,

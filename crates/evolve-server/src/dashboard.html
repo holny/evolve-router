@@ -772,10 +772,8 @@ function tagBadges(e){
   const tg = e.tags;
   if (!tg) return [];
   const parts = [];
-  if (tg.mode) {
-    const tip = tg.mode === 'reused' ? t('p_sticky_hint') : t('t_tag_mode');
-    parts.push('<span class="pbadge" title="'+esc(tip)+'">'+esc(wordOf(MODE_LABEL, tg.mode, tg.mode))+'</span>');
-  }
+  // 顺序与 macOS 面板一致（difficulty → domain → flags → fit → mode），
+  // 面板是子级、Web 是父级：同源同序便于两边对照
   if (tg.difficulty)
     parts.push('<span class="pbadge" title="'+esc(t('t_tag_diff'))+'">'+esc(wordOf(DIFF_LABEL, tg.difficulty, tg.difficulty))+'</span>');
   if (tg.domain)
@@ -787,6 +785,10 @@ function tagBadges(e){
   if (tg.fit) {
     const cls = tg.fit === 'match' ? 'pbadge' : 'pbadge warn';
     parts.push('<span class="'+cls+'" title="'+esc(t('t_tag_fit'))+'">'+esc(wordOf(FIT_LABEL, tg.fit, tg.fit))+'</span>');
+  }
+  if (tg.mode) {
+    const tip = tg.mode === 'reused' ? t('p_sticky_hint') : t('t_tag_mode');
+    parts.push('<span class="pbadge" title="'+esc(tip)+'">'+esc(wordOf(MODE_LABEL, tg.mode, tg.mode))+'</span>');
   }
   return parts;
 }
@@ -1228,12 +1230,18 @@ function renderAutopsy(e){
   }
   if (!turned) {
     // review：无转折时展示探索门控三条件实况——门开着但采样未改写排名
-    const g1 = jg.high_stakes < 0.6, g2 = deffSafe(e) < 2.0, g3 = jg.domain_confidence >= (0.35);
+    // 门控实况由服务端下发（explore_gate：三条件 + 生效的 confidence_gate）——
+    // 客户端不再重算阈值（confidence_gate 是 config 可配的，曾在此被硬编码 0.35）
+    const eg = e.explore_gate || null;
+    const g1 = eg ? !!eg.stakes_ok : jg.high_stakes < 0.6;
+    const g2 = eg ? !!eg.difficulty_ok : deffSafe(e) < 2.0;
+    const g3 = eg ? !!eg.confidence_ok : jg.domain_confidence >= 0.35;
+    const cg = eg ? (+eg.confidence_gate||0) : 0.35;
     L.push('<div class="au-calc">' +
       '<div>'+esc(t('au_gate_head'))+'</div>' +
       '<div>'+esc(t('au_gate_stakes'))+'：'+(+jg.high_stakes).toFixed(2)+' < 0.6 '+(g1?'✓':'✗')+'</div>' +
       '<div>'+esc(t('au_gate_diff'))+'：'+deffSafe(e).toFixed(2)+' < 2.0 '+(g2?'✓':'✗')+'</div>' +
-      '<div>'+esc(t('au_gate_conf'))+'：'+(+jg.domain_confidence).toFixed(2)+' ≥ 0.35 '+(g3?'✓':'✗')+'</div>' +
+      '<div>'+esc(t('au_gate_conf'))+'：'+(+jg.domain_confidence).toFixed(2)+' ≥ '+cg+' '+(g3?'✓':'✗')+'</div>' +
       '<div class="dim2" style="margin-top:3px">'+(g1&&g2&&g3 ? esc(t('au_gate_open')) : esc(t('au_gate_closed')))+'</div>' +
       '</div>');
   }

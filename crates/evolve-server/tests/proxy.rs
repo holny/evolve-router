@@ -1099,4 +1099,13 @@ async fn event_carries_derived_tags() {
         matches!(tg["fit"].as_str(), Some("match" | "over" | "under") | None),
         "unexpected fit: {tg}"
     );
+    // 探索门控实况（三条件 + 生效置信门限）也必须随事件下发：
+    // 客户端不得自己重算阈值（confidence_gate 是 config 可配的）
+    let eg = ev.get("explore_gate").expect("event must carry explore_gate");
+    if !eg.is_null() {
+        for k in ["stakes_ok", "difficulty_ok", "confidence_ok", "confidence_gate", "explored"] {
+            assert!(eg.get(k).is_some(), "explore_gate missing `{k}`: {eg}");
+        }
+        assert!(eg["confidence_gate"].as_f64().unwrap_or(-1.0) > 0.0);
+    }
 }
