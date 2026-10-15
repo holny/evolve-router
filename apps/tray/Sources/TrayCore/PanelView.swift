@@ -244,10 +244,10 @@ public struct PanelView: View {
                                             .foregroundStyle(col)
                                     }
                                     if let cap = r.capability {
-                                        tagPill("cap " + cap, tint: .blue, bg: Color.blue.opacity(0.14))
+                                        tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14))
                                     }
                                     if let pt = r.priceTier {
-                                        tagPill("price " + pt, tint: .purple, bg: Color.purple.opacity(0.14))
+                                        tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14))
                                     }
                                     if let sc = r.score {
                                         tagPill(String(format: "score %.2f", sc))
@@ -355,10 +355,10 @@ public struct PanelView: View {
                     // 当前态标签对历史无意义（用户裁决）→ 不展示
                     if state.statWindowToday {
                         if let cap = m.capability, !cap.isEmpty {
-                            tagPill("cap " + cap, tint: .blue, bg: Color.blue.opacity(0.14))
+                            tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14))
                         }
                         if let pt = m.priceTier, !pt.isEmpty {
-                            tagPill("price " + pt, tint: .purple, bg: Color.purple.opacity(0.14))
+                            tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14))
                         }
                     }
                     if m.tok > 0 {
