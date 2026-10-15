@@ -91,15 +91,36 @@ fn windowed_view(
         return None;
     }
     let now = evolve_memory::health::now();
-    let cutoff_ms: Option<u64> = match window {
-        "7d" => Some(7 * 24 * 3600 * 1000),
-        "24h" => Some(24 * 3600 * 1000),
-        // 5h = 订阅配额窗口（Coding/Go/Agent plan）；macOS 面板按此窗口取数并标注
-        // "last 5h"，此前未支持 → 落 None 分支退化为"最近 300 条样本"，口径与标注不符
-        "5h" => Some(5 * 3600 * 1000),
-        "1h" => Some(3600 * 1000),
-        "10m" => Some(10 * 60 * 1000),
-        _ => None,
+    // (cutoff, before)：cutoff = 起始回溯量（含），before = 结束回溯量（**不含**，
+    // 用于"昨天"这类有上下界的日历窗口——只给起点会把今天的流量也算进昨天）
+    let (cutoff_ms, before_ms): (Option<u64>, Option<u64>) = match window {
+        "7d" => (Some(7 * 24 * 3600 * 1000), None),
+        "24h" => (Some(24 * 3600 * 1000), None),
+        // 5h = 订阅配额窗口（Coding/Go/Agent plan）
+        "5h" => (Some(5 * 3600 * 1000), None),
+        "1h" => (Some(3600 * 1000), None),
+        "10m" => (Some(10 * 60 * 1000), None),
+        // `since:<epoch_ms>`：绝对起点（无上界）。见 apps/tray 的窗口切换。
+        w if w.starts_with("since:") => (
+            w.trim_start_matches("since:")
+                .parse::<u64>()
+                .ok()
+                .map(|ts| now.saturating_sub(ts)),
+            None,
+        ),
+        // `range:<start_ms>-<end_ms>`：有上下界的绝对窗口——日历口径（今天/昨天）
+        // 依赖本地时区，服务端不引 TZ 库，由客户端算好两端 epoch 传入。
+        w if w.starts_with("range:") => {
+            let rest = w.trim_start_matches("range:");
+            let mut it = rest.split('-');
+            let s = it.next().and_then(|v| v.parse::<u64>().ok());
+            let e = it.next().and_then(|v| v.parse::<u64>().ok());
+            match (s, e) {
+                (Some(s), Some(e)) => (Some(now.saturating_sub(s)), Some(now.saturating_sub(e))),
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
     };
     let take_n: Option<usize> = match window {
         "last30" => Some(30),
@@ -109,9 +130,17 @@ fn windowed_view(
     let mut sel: Vec<ReqSample> = samples
         .iter()
         .copied()
-        .filter(|r| match cutoff_ms {
-            Some(ms) => now.saturating_sub(r.ts) <= ms,
-            None => true,
+        .filter(|r| {
+            let age = now.saturating_sub(r.ts);
+            match cutoff_ms {
+                Some(ms) if age > ms => return false,
+                _ => {}
+            }
+            match before_ms {
+                Some(ms) if age <= ms => return false,
+                _ => {}
+            }
+            true
         })
         .collect();
     if let Some(n) = take_n {
@@ -157,17 +186,30 @@ fn apply_windowed(s: &mut evolve_memory::flywheel::ModelStats, view: &serde_json
     let g = |k: &str| view.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
     s.requests = g("requests");
     s.success = g("success");
-    if let Some(v) = view.get("avg_ttft_ms").and_then(|v| v.as_u64()) {
-        s.ttft_ms_sum = v;
-        s.ttft_n = 1;
+    // 窗口内无样本 → view 为空对象 → 全部归零。**不得保留累计值充数**：否则
+    // "今日/5h 内 0 次"的模型会显示成历史累计（此前 5h=1229 vs 24h=107 的自相
+    // 矛盾即源于此：5h 窗口空 → 保留累计，24h 有样本 → 覆盖成窗口值）
+    match view.get("avg_ttft_ms").and_then(|v| v.as_u64()) {
+        Some(v) => {
+            s.ttft_ms_sum = v;
+            s.ttft_n = 1;
+        }
+        None => {
+            s.ttft_ms_sum = 0;
+            s.ttft_n = 0;
+        }
     }
-    if let Some(v) = view.get("avg_total_ms").and_then(|v| v.as_u64()) {
-        s.total_ms_sum = v;
-        s.total_ms_n = 1;
+    match view.get("avg_total_ms").and_then(|v| v.as_u64()) {
+        Some(v) => {
+            s.total_ms_sum = v;
+            s.total_ms_n = 1;
+        }
+        None => {
+            s.total_ms_sum = 0;
+            s.total_ms_n = 0;
+        }
     }
-    if let Some(v) = view.get("avg_rate_tok_s").and_then(|v| v.as_u64()) {
-        s.last_rate_tok_s = v;
-    }
+    s.last_rate_tok_s = g("avg_rate_tok_s");
     s.cached_tokens = g("cached_tok");
     s.prompt_tokens = g("in_tok");
     // review 修复：此处原错映射为 avg_rate_tok_s（tok/s 速率）——24h 视图
@@ -232,14 +274,13 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
     // 难度分布观测（2026-10）：raw vs 校准后三档占比 + 目标——验证 7:2:1 收敛
     let (dsnap, dtarget, dcal) = st.engine.difficulty_snapshot();
     let telemetry = st.flywheel.telemetry_snapshot();
-    // 窗口模式：用近期样本环折算聚合，覆盖累计口径（总览保持原样）
+    // 窗口模式：用近期样本环折算聚合，覆盖累计口径（总览保持原样）。
+    // 窗口内**无样本的模型一律归零**（否则会保留累计值充数——曾出现同一模型
+    // 5h=1229 而 24h=107 的自相矛盾）。
     if window != "overview" {
-        for (id, tm) in telemetry.iter() {
-            if let Some(view) = windowed_view(tm, window)
-                && let Some(s) = stats.get_mut(id)
-            {
-                apply_windowed(s, &view);
-            }
+        for (id, s) in stats.iter_mut() {
+            let view = telemetry.get(id).and_then(|tm| windowed_view(tm, window));
+            apply_windowed(s, &view.unwrap_or_else(|| json!({})));
         }
     }
     let overlays = st.engine.tier_overrides();
@@ -942,7 +983,8 @@ fn derive_quota(observed: &Value, windows: &Value, used_5h: f64) -> (Value, Valu
         }
     }
     let binding = json!({
-        "scope": b_scope, "used_pct": b_used, "exhausted": exhausted,
+        // 无任何窗口时 b_used 停在初值 -1（用于"有窗就选一个"），对外必须归零
+        "scope": b_scope, "used_pct": b_used.max(0.0), "exhausted": exhausted,
         "reset_epoch_ms": b_reset,
     });
     (Value::Object(per), binding)
@@ -1088,33 +1130,42 @@ pub async fn api_providers_status(State(st): State<AppState>) -> Response {
 }
 
 /// Provider 管理列表：内置注册表 + 扫描发现 + 手动定义，合并展示
+/// 按量 provider 余额刷新（deepseek /user/balance）：缓存 >60s 视为过期，后台拉。
+/// 面板轮询 `/api/providers` 与 90s watchdog 共用——**watchdog 让启动即预热**，
+/// 否则网关刚起来时面板取不到余额 → 回落到字面 "payg" 文案，几秒后又变回余额
+/// （用户观测到的"余额/payg 闪烁"）。
+fn refresh_payg_balances_if_stale(st: &AppState) {
+    let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
+    let now0 = evolve_memory::health::now();
+    let stale = |k: &str| {
+        pb.get(k)
+            .and_then(|v| v["ts"].as_u64())
+            .map(|t| now0.saturating_sub(t) > 60 * 1000)
+            .unwrap_or(true)
+    };
+    if stale("deepseek") {
+        let st2 = st.clone();
+        tokio::spawn(async move {
+            let now_ms = evolve_memory::health::now();
+            if let Some(mut bal) = deepseek_balance(&st2, "deepseek", None).await {
+                bal["ts"] = json!(now_ms);
+                if let Ok(mut pb) = st2.payg_balance.lock() {
+                    pb.insert("deepseek".into(), bal);
+                }
+            }
+        });
+    }
+}
+
 pub async fn api_providers(State(st): State<AppState>) -> Response {
     let ov = crate::state::load_overrides(&st.config.data.dir);
     // 积分制官方配额刷新：observed 过期（>60s）后台并行拉取（面板轮询自然驱动；
     // 另有 90s watchdog 兜底——面板不开也在刷）。配额指纹源自官方 API，
     // 无官方端点的 provider 用响应头/估算，消费侧按 quota_source 标注
     tokio::spawn(quota_refresh_tick(st.clone(), 60 * 1000));
-    // 按量 provider 余额（deepseek）：缓存过期（>60s）→ 后台拉
-    {
-        let pb = st.payg_balance.lock().map(|b| b.clone()).unwrap_or_default();
-        let now0 = evolve_memory::health::now();
-        let ds_stale = !pb.contains_key("deepseek")
-            || pb.get("deepseek").and_then(|v| v["ts"].as_u64())
-                .map(|t| now0.saturating_sub(t) > 60 * 1000)
-                .unwrap_or(true);
-        if ds_stale {
-            let st2 = st.clone();
-            tokio::spawn(async move {
-                let now_ms = evolve_memory::health::now();
-                if let Some(mut bal) = deepseek_balance(&st2, "deepseek", None).await {
-                    bal["ts"] = json!(now_ms);
-                    if let Ok(mut pb) = st2.payg_balance.lock() {
-                        pb.insert("deepseek".into(), bal);
-                    }
-                }
-            });
-        }
-    }
+    // 按量 provider 余额（deepseek）：缓存过期（>60s）→ 后台拉。启动即预热，
+    // 免得网关刚起来时面板取不到余额而回落到字面 "payg"（随后又变回余额=闪烁）
+    refresh_payg_balances_if_stale(&st);
     let budgets = st.plan_budgets.lock().map(|b| b.clone()).unwrap_or_default();
     let soft_pct = st.config.policy.plan_soft_pct;
     let health_snap = st.health.snapshot();
@@ -2257,6 +2308,9 @@ pub fn spawn_quota_watchdog(st: AppState) {
 /// 一轮官方配额刷新：observed 过期（>max_age）的积分制 provider 逐一拉取；
 /// 与 api_providers 面板轮询共用（面板用 60s 新鲜度）
 pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
+    // 顺带预热/保活按量余额（deepseek）：watchdog 常驻 → 面板不开也在刷，
+    // 且启动首跳即填缓存（消除"重启后余额↔payg 闪烁"）
+    refresh_payg_balances_if_stale(&st);
     let now0 = evolve_memory::health::now();
     let mut due: Vec<(String, String, String, Option<String>)> = Vec::new();
     // w3 按账号去重（provider 名 = 账号）：同 baseURL 多 key 各自刷新自己的

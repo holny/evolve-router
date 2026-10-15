@@ -42,11 +42,11 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokens5h: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePct5h: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
-        self.tokens5h = tokens5h; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePct5h = cachePct5h
+        self.tokensWin = tokensWin; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePctWin = cachePctWin
         self.paygBalance = paygBalance
         self.quotaUsed = quotaUsed; self.quotaScope = quotaScope
         self.quotaExhausted = quotaExhausted; self.quotaReset = quotaReset
@@ -68,10 +68,10 @@ public struct ProviderRow: Identifiable {
     public let pct: Int?
     public let tokens24h: Int
     public let planKind: String
-    public let tokens5h: Int
+    public let tokensWin: Int
     public let avgTtftMs: Int?
     public let avgRate: Double?
-    public let cachePct5h: Int?
+    public let cachePctWin: Int?
     public let paygBalance: PaygBalance?
     public let quotaUsed: Int?
     public let quotaScope: String?
@@ -103,6 +103,8 @@ public final class AppState: ObservableObject {
     @Published public var version = ""
     /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
     @Published public var softPct = 60
+    /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
+    @Published public var statWindowToday = true
     @Published public var pulse = false
     @Published public var requests = 0
     @Published public var successRate = 0
@@ -155,7 +157,21 @@ public final class AppState: ObservableObject {
     public func pollData() async {
         guard healthy else { return }
         var models: [String: Any] = [:]
-        if case (200, let data)? = try? await get("/api/stats?window=5h"),
+        // 指标窗口（用户裁决）：**今天 / 昨天**（日历口径，各自有上下界），可点击切换。
+        // 服务端不引时区库 → 面板按本地时区算好两端 epoch，用 `window=range:<s>-<e>` 传。
+        let cal = Calendar.current
+        let dayStart = cal.startOfDay(for: Date())
+        let startMs: Int64
+        let endMs: Int64
+        if statWindowToday {
+            startMs = Int64(dayStart.timeIntervalSince1970 * 1000)
+            endMs = Int64(Date().timeIntervalSince1970 * 1000)
+        } else {
+            let yStart = cal.date(byAdding: .day, value: -1, to: dayStart) ?? dayStart
+            startMs = Int64(yStart.timeIntervalSince1970 * 1000)
+            endMs = Int64(dayStart.timeIntervalSince1970 * 1000)
+        }
+        if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             models = (obj["models"] as? [String: Any]) ?? obj
             var reqs = 0, ok = 0, toks = 0
@@ -216,10 +232,6 @@ public final class AppState: ObservableObject {
                                         blockedModels: blockedModels))
             }
         }
-        rows.sort {
-            if $0.enabled != $1.enabled { return $0.enabled }
-            return $0.tokens24h > $1.tokens24h
-        }
         // per-provider 5h 指标：stats 的 model key 形如 "provider/model"，按前缀聚合
         var agg: [String: (tok: Int, ttftW: Double, ttftN: Int, rateW: Double, rateN: Int, cacheSum: Int, promptSum: Int)] = [:]
         for (mid, msAny) in models {
@@ -247,16 +259,24 @@ public final class AppState: ObservableObject {
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
                                pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
-                               tokens5h: e.tok,
+                               tokensWin: e.tok,
                                avgTtftMs: e.ttftN > 0 ? Int(e.ttftW / Double(e.ttftN)) : nil,
                                avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,
-                               cachePct5h: cachePct,
+                               cachePctWin: cachePct,
                                paygBalance: r.paygBalance,
                                quotaUsed: r.quotaUsed, quotaScope: r.quotaScope,
                                quotaExhausted: r.quotaExhausted, quotaReset: r.quotaReset,
                                cooldownModel: r.cooldownModel,
                                quotaSource: r.quotaSource,
                                blockedModels: r.blockedModels)
+        }
+        // 按**当前窗口的 token 用量降序**（用户裁决）——须在窗口指标聚合后排序
+        // （此前用 24h 累计字段、且在聚合前排，与面板显示口径不一致）；
+        // 用量并列时启用者优先、再按名字稳定排序
+        rows.sort {
+            if $0.tokensWin != $1.tokensWin { return $0.tokensWin > $1.tokensWin }
+            if $0.enabled != $1.enabled { return $0.enabled }
+            return $0.key < $1.key
         }
         providers = Array(rows.prefix(8))
         if case (200, let data)? = try? await get("/api/events?limit=30"),

@@ -152,9 +152,20 @@ public struct PanelView: View {
             metric("arrow.up.right", label: t("success_rate"), value: "\(state.successRate)%")
             metric("number", label: t("tokens"), value: state.tokensK)
             Spacer(minLength: 0)
-            Text(t("last_24h"))
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+            // 窗口标签本身即切换钮（用户裁决）：今天 ⇄ 昨天；点一下立即重取
+            Button {
+                state.statWindowToday.toggle()
+                Task { await state.pollData() }
+            } label: {
+                Text(state.statWindowToday ? "today" : "yesterday")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.primary.opacity(0.07)))
+            }
+            .buttonStyle(.plain)
+            .help("Metrics window — click to switch between today and yesterday")
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -276,13 +287,20 @@ public struct PanelView: View {
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                     }
-                    if p.tokens5h > 0 {
-                        Text("\(AppState.fmtTok(p.tokens5h))·5h")
+                    // 该行指标（tokens/hit/速率/TTFT）取自 /api/stats（跟随窗口切换：
+                    // 今天 / 昨天）——统一小字标注窗口，免得误读成累计值
+                    if p.tokensWin > 0 || p.cachePctWin != nil || (p.avgRate ?? 0) > 0 || p.avgTtftMs != nil {
+                        Text(state.statWindowToday ? "today" : "yesterday")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundStyle(.quaternary)
+                    }
+                    if p.tokensWin > 0 {
+                        Text(AppState.fmtTok(p.tokensWin))
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
                     }
-                    if let cp = p.cachePct5h {
+                    if let cp = p.cachePctWin {
                         Text("hit \(cp)%")
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
@@ -360,10 +378,13 @@ public struct PanelView: View {
             } else {
                 HStack(spacing: 5) {
                     quotaBar(used).frame(width: 46)
+                    // 固定宽度+右对齐：否则 "1%" 比 "77%" 少一位，整块 HStack 变窄
+                    // → 进度条被推向右侧，各行的条不对齐
                     Text("\(used)%")
                         .font(.system(size: 10, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
+                        .frame(width: 34, alignment: .trailing)
                 }
                 .help("\(scope) quota usage · \(Self.srcTip(p.quotaSource))")
             }
@@ -492,9 +513,11 @@ public struct PanelView: View {
     }
 
     private func quotaBar(_ pct: Int) -> some View {
-        // 三档配色与 Web 同源（阈值 90 / soft_pct，不再硬编码 85）
+        // 三档配色与 Web 同源（阈值 90 / soft_pct）
         let tint: Color = pct >= 90 ? .red : (pct >= state.softPct ? .orange : .accentColor)
-        return ProgressView(value: Double(min(max(pct, 0), 100)))
+        // ⚠ 必须显式给 total：`ProgressView(value:)` 的 total 默认 1.0，
+        // 于是任何 ≥1 的百分数都被画成满格（1% 也显示满格）——曾因此"看着满了还是 1%"
+        return ProgressView(value: Double(min(max(pct, 0), 100)), total: 100)
             .tint(tint)
             .progressViewStyle(.linear)
             .accessibilityValue("\(pct)%")
