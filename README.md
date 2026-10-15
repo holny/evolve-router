@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-155%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#development)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -98,7 +98,7 @@ Quality cascade: a *successful* response that is degenerate / empty / has broken
 
 ## Three pillars
 
-1. **Intelligent decisions, not prefix rules.** Every request is judged by a pluggable **decision model** on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion, covering the decision model's CJK blind spots); if the decision model is unreachable, the heuristic takes over and **routing never blocks**. Backends are swappable by config — cloud (TypeSafe Jev) or self-hosted open-source decision models (Intern-Decision, StartLux-Decision) behind the same protocol.
+1. **Intelligent decisions, not prefix rules.** Every request is judged by a pluggable **decision model** on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion, covering the decision model's CJK blind spots); if the decision model is unreachable, the heuristic takes over and **routing never blocks**. Backends are swappable by config — cloud (TypeSafe Jev) or self-hosted open-source decision models (Intern-Decision, StartLux-Decision) behind the same protocol. Re-judging is skipped only inside a **tool loop** (the request continues a tool call of the same turn) and only while the previous judgment stays low-difficulty, the size band holds, the toolset is unchanged, and the service healthy — a new user message always triggers a full re-judgment.
 2. **Budget-aware routing.** Every candidate is priced in its plan's own currency — credits (zhipu / Z.ai / MiniMax), dollars (opencode zen Go), AFP (volces) — before it is scored. Quota budget protection runs at three levels: **>60%** of your allowance deprioritizes the plan, **>85%** breaks session stickiness, **>95%** filters it out entirely — preserving headroom for the tasks that actually need it.
 3. **Managed plans in one dashboard.** Vendor subscription plans are first-class citizens: tiers, allowances, credit multipliers and per-model dollar limits are built in; the dashboard shows live provider-reported quotas per window with one-click reconciliation.
 
@@ -128,6 +128,7 @@ Plans are auto-detected from base URLs, and every window (5h / weekly / monthly)
 - **Self-distilling capability cards** — Every 50 gated successes per model, the decision model re-estimates that model's capability tiers from observed statistics (conservatively merged, shift ≤ 0.15 per step) — so silently-updated upstream models can't leave the catalog stale. Users' explicit tier declarations are never overridden; delete `distilled.json` to roll back.
 - **Any Agent, any Provider** — opencode / Claude Code / Codex / Pi, openclaw / hermes / dsh (local harnesses), and any OpenAI- or Anthropic-compatible client. No code changes to your stack. Routes to any OpenAI-compatible **or** Anthropic upstream; Switchyard handles bidirectional streaming translation (event mapping + deterministic IDs) so Claude Code works out of the box. Subscription plans (zhipu coding, Z.ai, opencode zen, volces, MiniMax) and pay-as-you-go APIs share one endpoint.
 - **Fast decisions, zero-deps deployment** — Single Rust binary, 6.7 MB; cold start <30 ms; one request adds <300 ms (a decision-model call + heuristic fallback). Multi-key pool rotation, provider- and endpoint-level circuit breaking, and an out-of-chain last-resort sweep keep routing alive through single-vendor outages.
+- **Every request is tagged with its own decision** — difficulty, domain, hit flags (trivial / tools / vision / stakes), difficulty↔capability fit and decision path (`model` / `model+rules` / `reused` / `rules` / `pinned`) are derived **once, server-side**, written into the event, and rendered identically by the dashboard and the macOS panel. The tag vocabulary and thresholds live in one place (`decision_tags.rs` + `thresholds.rs`), so the two surfaces cannot drift.
 - **Full dashboard control, every decision visible** — Zero-build dashboard at `http://127.0.0.1:8787`: live decision stream with plain-language reasons, scoring matrix, fallback chains with per-hop causes, latency waterfall, model trends, provider & quota management, flywheel learning state. Every response carries `x-ev-model / x-ev-reason / x-ev-decision-id`; `/api/events` exposes the JSONL decision log for query and replay.
 
 ## Quick Start
@@ -215,6 +216,19 @@ On macOS, EvolveRouter lives in your **menu bar** as a native SwiftUI panel. The
 
 The panel streams live decisions, per-provider 5-hour quotas, cache-hit rates, tok/s, TTFT, cooldown countdowns with causes, and one-tap wiring-config copy — all without opening the dashboard.
 
+Every request and every model row is **tagged with the decision itself**, rendered from the same server-derived values the dashboard uses:
+
+| Category | Values | What it answers |
+|---|---|---|
+| `difficulty` | easy / medium / hard | how hard the gateway judged this request (drives the quality floor and cost weight) |
+| `domain` | code / math / data / agent / writing / lookup / chat | which capability tiers the request is scored against |
+| `flags` | trivial / tools / vision / stakes | request traits the judge flagged (thresholds match the routing gates) |
+| `fit` | match / over / under | task difficulty ↔ chosen model's capability tier |
+| `mode` | model / model+rules / reused / rules / pinned | who decided the route — the last three skipped the decision model |
+| `capability` · `price` | basic / standard / powerful · cheap / medium / premium | the chosen model's tier (Model tab) |
+
+Top metrics switch between **today** and **yesterday** (calendar windows, persisted in hourly buckets), and the Providers card toggles between provider and per-model views.
+
 ![EvolveRouter macOS menu bar panel — light & dark](docs/assets/panel.png)
 
 
@@ -276,7 +290,7 @@ Deep dives: [Architecture](docs/ARCHITECTURE.md) · [Decision flow](docs/DECISIO
 
 ```bash
 cargo build --release
-cargo test          # 111 tests
+cargo test          # 197 tests
 cargo clippy        # zero warnings policy
 ```
 

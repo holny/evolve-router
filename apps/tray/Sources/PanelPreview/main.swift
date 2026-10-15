@@ -11,18 +11,27 @@ enum PanelPreview {
         state.requests = 1691
         state.successRate = 99
         state.tokensK = "780.4k"
+        // 文档截图用的稳定种子（EV_PREVIEW_SEED=1）：覆盖五类标签的各种组合，
+        // 不依赖本机实时流量（否则 README 图会随环境漂移）
         state.recent = [
             RecentDecision(model: "opencode-go-github/glm-5.3", status: 200, totalMs: 13_540, ttftMs: 5_012, tokS: 92.4, agent: "opencode", time: "22:58",
-                           capability: "powerful",
+                           totalTokens: 48_210, cachePct: 62, capability: "powerful",
                            tags: DecisionTags(difficulty: "hard", domain: "code", flags: ["tools", "stakes"], mode: "model+rules", fit: "match")),
+            RecentDecision(model: "deepseek/deepseek-v4-pro", status: 200, totalMs: 9_180, ttftMs: 3_240, tokS: 71.2, agent: "claude-code", time: "22:51",
+                           totalTokens: 21_450, cachePct: 45, capability: "powerful",
+                           tags: DecisionTags(difficulty: "medium", domain: "agent", flags: ["tools"], mode: "model", fit: "over")),
+            RecentDecision(model: "minimax-coding/minimax-m3.1", status: 200, totalMs: 3_905, ttftMs: 1_180, tokS: 128.6, agent: "opencode", time: "22:44",
+                           totalTokens: 4_120, cachePct: 18, capability: "basic",
+                           tags: DecisionTags(difficulty: "easy", domain: "chat", flags: [], mode: "reused", fit: "match")),
             RecentDecision(model: "zhipuai-coding-plan/glm-5.3", status: 500, totalMs: 8_214, ttftMs: 4_410, tokS: nil, agent: "pi", time: "22:41",
-                           capability: "basic",
-                           tags: DecisionTags(difficulty: nil, domain: nil, flags: [], mode: "reused", fit: nil)),
+                           failReason: "quota exhausted (api-backed)", capability: "powerful",
+                           tags: DecisionTags(difficulty: "medium", domain: "lookup", flags: ["trivial"], mode: "rules", fit: "under")),
         ]
         state.providers = [
             ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, tokens24h: 92_000, planKind: "go"),
+            ProviderRow(key: "deepseek", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 26, tokens24h: 51_000, planKind: "api"),
+            ProviderRow(key: "MiniMax", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(6_720), cooldownCause: "quota window exhausted (5h)", pct: 100, tokens24h: 12_400, planKind: "coding"),
             ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, tokens24h: 51_000, planKind: "coding"),
-            ProviderRow(key: "minimax-coding", enabled: false, available: true, cooldownUntil: nil, cooldownCause: nil, pct: nil, tokens24h: 0, planKind: "coding"),
         ]
         state.lastSync = Date()
 
@@ -36,8 +45,9 @@ enum PanelPreview {
         win.backgroundColor = scheme == .dark
             ? NSColor(deviceWhite: 0.08, alpha: 0.96)
             : NSColor(deviceWhite: 0.94, alpha: 0.96)
+        let seeded = ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil
         let host = NSHostingView(
-            rootView: PanelView(state: state, gateway: .shared)
+            rootView: PanelView(state: state, gateway: .shared, previewSeed: seeded)
                 .environment(\.colorScheme, scheme)
         )
         win.contentView = host
@@ -57,7 +67,9 @@ enum PanelPreview {
             }
         }
         // 预览 harness 轮询循环：等真实网关就绪即覆盖种子数据（app 的循环在
-        // AppDelegate 里，harness 只跑一次会错过就绪窗口）
+        // AppDelegate 里，harness 只跑一次会错过就绪窗口）。
+        // EV_PREVIEW_SEED=1 = 只渲染种子（README 截图用，保证图稳定可复现）
+        if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil { return }
         Task { [weak state] in
             guard let state else { return }
             while !Task.isCancelled {

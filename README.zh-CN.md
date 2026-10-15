@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-111%20passing-brightgreen.svg)](#开发)
+[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#开发)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -97,7 +97,7 @@ $$B(m) = \text{clamp}\big(1 + (\mathrm{reward}_m - \text{median}_{m'}\mathrm{rew
 
 ## 三大支柱
 
-1. **智能决策，而非前缀规则。** 每个请求都由可插拔决策模型（云端或自托管开源后端，同协议）——判定 8 维信号（领域、难度、视觉、trivial、工具密度、高风险、会话深度、体量）。内置多语言启发式判官作为独立第二意见（取严融合，补决策模型的中文短板）；决策模型不可达时启发式接管，**路由永不阻塞**。可选 `laya` 后端插入同一接口。
+1. **智能决策，而非前缀规则。** 每个请求都由可插拔决策模型（云端或自托管开源后端，同协议）——判定 8 维信号（领域、难度、视觉、trivial、工具密度、高风险、会话深度、体量）。内置多语言启发式判官作为独立第二意见（取严融合，补决策模型的中文短板）；决策模型不可达时启发式接管，**路由永不阻塞**。 重新判定只在**工具循环**内被跳过（本轮是同一轮工具调用的延续），且要求上轮判定仍是低难度、量级不失控、工具集未变、服务健康——用户**新发一条消息**一定触发完整重判。可选 `laya` 后端插入同一接口。
 2. **资金感知路由。** 每个候选先用其方案自己的货币计价——积分（智谱 / Z.ai / MiniMax）、美元（opencode zen Go）、AFP（火山）——再进入评分。配额预算三层保护：额度消耗 **>60%** 降权、**>85%** 断开会话粘性、**>95%** 直接出局——把余量留给真正需要的任务。
 3. **大模型方案，一个面板管控。** 厂商订阅方案是一等公民：档位、额度、积分系数、每模型美元限额全部内置；面板按窗口展示 Provider 实测配额，一键对账。
 
@@ -128,6 +128,7 @@ $$B(m) = \text{clamp}\big(1 + (\mathrm{reward}_m - \text{median}_{m'}\mathrm{rew
 - **能力卡自蒸馏** — 每模型每积累 50 个成功，决策模型基于观测统计重估其能力 tiers（保守收缩，单步偏移 ≤ 0.15）——Provider 静默换模型不再导致目录过期。用户显式声明永不覆盖；删除 `distilled.json` 即回滚。
 - **多 Agent + 多 Provider 适配** — opencode / Claude Code / Codex / Pi（编码 Agent），openclaw / hermes / dsh（本地 Harness），任何 OpenAI / Anthropic 兼容客户端都**无需改代码**接入。路由到任何 OpenAI 兼容**或** Anthropic 上游；Switchyard 双向流式翻译（含事件映射与确定性 ID），Claude Code 开箱即用。订阅方案（zhipu coding / Z.ai / opencode zen / volces / MiniMax）与按量 API 共用同一端点。
 - **极速决策，零依赖部署** — 单 Rust 二进制 6.7 MB；冷启动 <30 ms；单请求仅多 <300 ms（一次决策模型评分 + 启发式兜底）。多 key 池化轮换、provider / 端点双层熔断、链外兜底扫描——单家 Provider 全挂也不会整体哑掉。
+- **每条请求都带着自己的决策标签** — 难度、任务域、命中特征（trivial / tools / vision / stakes）、难度↔能力匹配、判定来源（`model` / `model+rules` / `reused` / `rules` / `pinned`）由**服务端一次算好**写进事件，网页与 macOS 面板渲染完全一致；词表与阈值只有一份（`decision_tags.rs` + `thresholds.rs`），两端不可能漂移。
 - **本地面板管控，全程决策可见** — 零构建面板 `http://127.0.0.1:8787` 暴露：实时决策流（每行附大白话归因）、评分矩阵、降级链与每跳剔除原因、耗时瀑布、模型趋势、Provider 与配额管理、飞轮学习状态。所有响应携带 `x-ev-model / x-ev-reason / x-ev-decision-id` 头；`/api/events` 暴露 JSONL 决策日志可查询可回放。
 
 ## 快速开始
@@ -215,6 +216,19 @@ evo-router service install   # 另有：start / stop / restart / status
 
 面板实时推送最近决策、每家 Provider 的 5 小时配额、缓存命中率、吐字速率、TTFT、冷却倒计时与原因，接入配置一键复制——无需打开完整面板。
 
+每条请求、每行模型都**带着这次决策本身的标签**，取值与网页面板同源（服务端一次算好）：
+
+| 类别 | 取值 | 回答什么 |
+|---|---|---|
+| `difficulty` | easy / medium / hard | 网关判定的任务难度（决定质量底线与成本权重） |
+| `domain` | code / math / data / agent / writing / lookup / chat | 用哪套能力档位给这道请求打分 |
+| `flags` | trivial / tools / vision / stakes | 命中哪些请求特征（阈值与路由闸门同值） |
+| `fit` | match / over / under | 任务难度 ↔ 所选模型能力档位是否对齐 |
+| `mode` | model / model+rules / reused / rules / pinned | 谁做的判定；后三种**没有调用决策模型** |
+| `capability` · `price` | basic / standard / powerful · cheap / medium / premium | 所选模型的档位（Model 标签页） |
+
+顶部指标可在**今天 / 昨天**之间切换（本地日历窗口，小时桶持久化），Providers 卡可在 Provider / 逐模型两个维度间切换。
+
 ![EvolveRouter macOS 菜单栏面板 —— 亮/暗双主题](docs/assets/panel.png)
 
 
@@ -273,7 +287,7 @@ evo-router backtest              # 在 events.jsonl 上 A/B 回放两套策略�
 
 ```bash
 cargo build --release
-cargo test          # 111 个测试
+cargo test          # 197 个测试
 cargo clippy        # 零警告策略
 ```
 

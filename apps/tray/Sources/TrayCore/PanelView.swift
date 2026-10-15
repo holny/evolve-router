@@ -10,9 +10,13 @@ public struct PanelView: View {
         : UserDefaults.standard.bool(forKey: "ev-autostart")
     @State private var showExitConfirm = false
 
-    public init(state: AppState, gateway: GatewayProcess) {
+    /// 预览/截图模式：不触发首帧实时轮询，保证种子数据稳定渲染（README 图可复现）
+    public var previewSeed: Bool
+
+    public init(state: AppState, gateway: GatewayProcess, previewSeed: Bool = false) {
         _state = ObservedObject(wrappedValue: state)
         _gateway = ObservedObject(wrappedValue: gateway)
+        self.previewSeed = previewSeed
         _autostart = State(initialValue: UserDefaults.standard.object(forKey: "ev-autostart") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "ev-autostart"))
@@ -36,6 +40,7 @@ public struct PanelView: View {
         .padding(.bottom, 20)
         .frame(width: 336)
         .task {
+            if previewSeed { return }
             await state.pollLive()
             await state.pollData()
         }
