@@ -648,25 +648,45 @@ public struct PanelView: View {
     static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
 
-    /// 标签颜色说明（色卡 = 类别名，悬停给完整解释）
+    /// 标签颜色说明：色卡 = 类别（左：request 标签 / 右：model 标签），括号内 = 该类别的取值
+    /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 释义必须直接可见
     private var tagLegend: some View {
-        HStack(spacing: 9) {
-            legendItem(Self.tagColorDiff, "difficulty", Self.tagHelpDiff)
-            legendItem(Self.tagColorCap, "capability", Self.tagHelpCap)
-            legendItem(Self.tagColorPrice, "price", Self.tagHelpPrice)
-            legendItem(Self.tagColorScore, "score", Self.tagHelpScore)
-            legendItem(Self.tagColorFit, "fit", Self.tagHelpFit)
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 8) {
+                legendItem(Self.tagColorDiff, "difficulty", "easy/medium/hard")
+                legendItem(Self.tagColorScore, "score", "0-1")
+                legendItem(Self.tagColorFit, "fit", "match/over/under")
+            }
+            HStack(spacing: 8) {
+                Spacer(minLength: 0)
+                legendItem(Self.tagColorCap, "capability", "basic/standard/powerful")
+                legendItem(Self.tagColorPrice, "price", "cheap/medium/premium")
+            }
         }
         .font(.system(size: 8.5))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func legendItem(_ c: Color, _ label: String, _ help: String) -> some View {
+    private func legendItem(_ c: Color, _ label: String, _ values: String) -> some View {
         HStack(spacing: 3) {
-            Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
-            Text(label).foregroundStyle(.tertiary)
+            Circle().fill(c.opacity(0.6)).frame(width: 6, height: 6)
+            Text(label).foregroundStyle(.secondary)
+            Text(values).foregroundStyle(.tertiary)
         }
-        .help(help)
+        .help(Self.tagHelp(label))
+    }
+
+    /// 悬停详解（部分宿主不触发，仅作补充）
+    static func tagHelp(_ label: String) -> String {
+        switch label {
+        case "difficulty": return tagHelpDiff
+        case "capability": return tagHelpCap
+        case "price": return tagHelpPrice
+        case "score": return tagHelpScore
+        default: return tagHelpFit
+        }
     }
 
     private func quotaBar(_ pct: Int) -> some View {
