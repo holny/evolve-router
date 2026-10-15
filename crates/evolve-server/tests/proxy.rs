@@ -180,15 +180,49 @@ async fn code_refactor_does_not_land_on_mini() {
     assert_ne!(headers["x-ev-model"], "mini");
 }
 
+/// 粘性只延续**工具流程**（用户裁决 2026-10-15）：同一会话里连发两条用户消息
+/// 是新任务 → 必须重新判定，不得继承上一条的判定与选型
 #[tokio::test]
-async fn sticky_session_reuses_model() {
+async fn new_user_message_in_same_session_is_not_sticky() {
     let port = spawn_mock_upstream().await;
     let app = build_router(build_state(test_config(port)));
     let (_, h1, _) = send(app.clone(), chat_request("auto", json!("你好"), json!({}))).await;
     let (_, h2, _) = send(app, chat_request("auto", json!("谢谢"), json!({}))).await;
     assert_eq!(h1["x-ev-model"], "mini");
+    assert_eq!(
+        h2["x-ev-sticky"], "false",
+        "两条独立用户消息 = 两个任务，不能复用上一条的判定"
+    );
+    // 但选型仍应落在同一档（简单任务 → 便宜模型），只是走了完整判定
     assert_eq!(h2["x-ev-model"], "mini");
-    assert_eq!(h2["x-ev-sticky"], "true", "second trivial turn in same session should reuse");
+}
+
+/// 工具延续（末条是工具返回）→ 粘性复用（真正的快路径）
+#[tokio::test]
+async fn tool_continuation_in_same_session_is_sticky() {
+    let port = spawn_mock_upstream().await;
+    let app = build_router(build_state(test_config(port)));
+    let (_, h1, _) = send(app.clone(), chat_request("auto", json!("你好"), json!({}))).await;
+    assert_eq!(h1["x-ev-model"], "mini");
+    // 第二轮：assistant 发起工具调用 + 工具返回内容（OpenAI 形态末条 role=tool）
+    let body = json!({
+        "model": "auto",
+        "messages": [
+            {"role": "user", "content": "你好"},
+            {"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+        ]
+    });
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("x-ev-session", "test-session-1")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let (_, h2, _) = send(app, req).await;
+    assert_eq!(h2["x-ev-sticky"], "true", "工具延续应走粘性快路径");
+    assert_eq!(h2["x-ev-model"], "mini");
 }
 
 #[tokio::test]

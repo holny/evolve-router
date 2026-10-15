@@ -12,6 +12,9 @@ pub struct RoutingInput<'a> {
     pub max_output_req: Option<u64>,
     pub policy: Option<PolicyProfile>,
     pub sticky: Option<StickyState>,
+    /// 本轮是否工具流程延续（末条是工具返回）——粘性复用的**必要条件**：
+    /// 同会话里用户再发新消息 = 新任务，必须重新判定（用户裁决 2026-10-15）
+    pub continues_tools: bool,
     pub health: &'a HealthMap,
     pub telemetry: &'a TelemetrySnapshot,
     pub quota: &'a QuotaView,
@@ -188,7 +191,9 @@ impl Engine {
             (nanos % 10_000) as f32 / 10_000.0 < explore_ratio
         };
 
-        if let Some(sticky) = &input.sticky {
+        // 只有"工具流程延续"才允许粘性复用：新用户消息（末条是纯文本 user）走完整重判定。
+        // 注意 sticky 状态里的 difficulty 是**该会话上一轮判定的难度**，闸门据此收窄
+        if let Some(sticky) = input.sticky.as_ref().filter(|_| input.continues_tools) {
             let now = now_epoch_ms();
             // 预算压力保护：所选方案消耗超过软阈值时粘性立即断开，
             // 把宝贵配额留给硬任务（用户裁决）
@@ -207,10 +212,13 @@ impl Engine {
                         && input.quota.get(&sticky.chosen).map(|r| *r >= est).unwrap_or(true)
                 })
                 .unwrap_or(false) && pressure_ok;
-            // 粘性收窄（用户裁决）：量级相近是伪条件（相邻消息天然同量级），
-            // 只作保护上限；粘性仅延续低难度任务（L2 上限）且暴增/骤减即断
+            // 量级闸门（2026-10-15 调整）：语义已由 continues_tools（工具延续）承担，
+            // 这里只当**失控/换会话**保护——工具流程里 est 天然单调增长（工具输出越大越多），
+            // 旧的 2 倍上限会把短消息的工具续跑全挡掉（est 5 → 14 就被判"量级暴增"）。
+            // 故：上限放宽到 8 倍（暴增兜底，真正的窗口/配额约束由 still_fits 负责），
+            // 下限保留 2 倍（骤减 = 会话被压缩/换上下文 → 断）
             let size_ok = sticky.est_tokens > 0
-                && est <= sticky.est_tokens.saturating_mul(2)
+                && est <= sticky.est_tokens.saturating_mul(8)
                 && est.saturating_mul(2) >= sticky.est_tokens;
             let low_diff = sticky.difficulty <= 1.6;
             let tools_same = sticky.tools_sig == input.tools_sig;
@@ -255,7 +263,10 @@ impl Engine {
                     vec![],
                     true,
                     est,
-                    0.0,
+                    // 继承难度必须透传：此前写 0.0 → 回写到 StickyState 后难度闸门
+                    // （low_diff ≤1.6 / 价格层档位）被抹平，中高价模型还会因
+                    // "难度 0 只许 cheap" 莫名断粘（用户裁决 2026-10-15）
+                    sticky.difficulty,
                     input.session_key,
                     Some(sticky),
                     [0, 0, 0, 0],
@@ -1215,6 +1226,9 @@ mod tests {
             max_output_req: None,
             policy: None,
             sticky,
+            // 测试默认按"工具延续"构造（粘性用例）；专门验证新用户消息的用例
+            // 用 input_with(...) 覆盖
+            continues_tools: true,
             health,
             telemetry: &EMPTY_TELEM,
             quota: &EMPTY_QUOTA,
@@ -1231,6 +1245,20 @@ mod tests {
         std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_PRESSURE: std::sync::LazyLock<HashMap<String, f32>> =
         std::sync::LazyLock::new(HashMap::new);
+
+    /// 与 `input` 相同，但可指定 continues_tools（新用户消息 = false）
+    pub(super) fn input_with<'a>(
+        text: &'a str,
+        est: u64,
+        digest: &'a DigestSignals,
+        sticky: Option<StickyState>,
+        health: &'a HealthMap,
+        continues_tools: bool,
+    ) -> RoutingInput<'a> {
+        let mut i = input(text, est, digest, sticky, health);
+        i.continues_tools = continues_tools;
+        i
+    }
 
     pub(super) fn digest(text: &str) -> DigestSignals {
         DigestSignals {
@@ -1345,6 +1373,77 @@ mod tests {
         assert!(dec.sticky, "reason: {}", dec.reason);
         assert_eq!(dec.chosen, "mini");
         assert_eq!(dec.scores.len(), 1);
+    }
+
+    /// 用户裁决 2026-10-15：粘性只延续**工具流程**——同一会话里用户再发一条新消息
+    /// 是新任务，必须重新判定（否则继承上一条低难任务的判定与选型）
+    #[test]
+    fn sticky_requires_tool_continuation() {
+        let e = engine();
+        let d = digest("你好");
+        let mk = || StickyState {
+            chosen: "mini".into(),
+            est_tokens_band: crate::tokens::tokens_band(600),
+            turns_left: 3,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 0.5,
+            est_tokens: 600,
+        };
+        let h = HealthMap::new();
+        // 工具延续 → 复用
+        let reused = e.decide(input_with("你好", 620, &d, Some(mk()), &h, true));
+        assert!(reused.sticky, "tool continuation must reuse: {}", reused.reason);
+        assert_eq!(reused.chosen, "mini");
+        // 新的用户消息 → 不得复用（走完整判定，且带回真实难度）
+        let fresh = e.decide(input_with("你好", 620, &d, Some(mk()), &h, false));
+        assert!(!fresh.sticky, "new user message must re-judge: {}", fresh.reason);
+        assert!(fresh.difficulty_eff > 0.0, "fresh judge must carry difficulty");
+    }
+
+    /// 短消息的工具续跑：工具调用/返回会让 est 成倍增长（5 → 14），
+    /// 旧 2 倍上限会误判为"量级暴增"而断粘（真实代理场景实测踩到）
+    #[test]
+    fn sticky_survives_small_tool_growth() {
+        let e = engine();
+        let d = digest("你好");
+        let sticky = StickyState {
+            chosen: "mini".into(),
+            est_tokens_band: crate::tokens::tokens_band(5),
+            turns_left: 2,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 0.5,
+            est_tokens: 5,
+        };
+        let h = HealthMap::new();
+        let dec = e.decide(input("你好", 14, &d, Some(sticky), &h));
+        assert!(dec.sticky, "small tool growth must stay sticky: {}", dec.reason);
+    }
+
+    /// 继承难度必须透传：粘性决策的 difficulty_eff 是**沿用**的上一轮难度，
+    /// 不能写 0.0（否则回写 StickyState 后难度闸门被抹平/中高价模型莫名断粘）
+    #[test]
+    fn sticky_decision_carries_inherited_difficulty() {
+        let e = engine();
+        let d = digest("你好");
+        let sticky = StickyState {
+            chosen: "mini".into(),
+            est_tokens_band: crate::tokens::tokens_band(600),
+            turns_left: 3,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 1.4,
+            est_tokens: 600,
+        };
+        let h = HealthMap::new();
+        let dec = e.decide(input("你好", 620, &d, Some(sticky), &h));
+        assert!(dec.sticky, "reason: {}", dec.reason);
+        assert!(
+            (dec.difficulty_eff - 1.4).abs() < 1e-6,
+            "inherited difficulty must be passed through, got {}",
+            dec.difficulty_eff
+        );
     }
 
     #[test]

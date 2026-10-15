@@ -93,3 +93,66 @@ pub fn features(extracted: &Extracted, est_input_tokens: u64) -> RequestFeatures
         cjk_ratio: (cjk / total).min(1.0),
     }
 }
+
+/// 这一轮请求是不是**工具流程的延续**（上一轮的工具调用返回后继续跑），
+/// 而不是一条新的用户输入。粘性复用只在这里成立（用户裁决 2026-10-15）：
+/// 同一会话里用户再发一条新消息 = 新任务，必须重新判定——否则会继承上一条
+/// 低难任务的判定与选型（质量风险）。
+///
+/// 兼容两种协议形态：
+/// - OpenAI：末条 `{role:"tool", ...}`
+/// - Anthropic：末条 `{role:"user", content:[{type:"tool_result",...}]}`
+///   （工具返回在 Anthropic 里就是 user 角色，靠 content part 区分）
+/// 末条若是纯文本 user = 用户新输入 → 不是延续；assistant（prefill/续写）也不算。
+pub fn continues_tool_flow(messages: &[Value]) -> bool {
+    let Some(last) = messages.last() else { return false };
+    match last.get("role").and_then(|r| r.as_str()) {
+        Some("tool") | Some("function") => true,
+        Some("user") => match last.get("content") {
+            Some(Value::Array(parts)) => parts.iter().any(|p| {
+                p.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+            }),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tool_flow_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detects_openai_tool_continuation() {
+        let msgs = vec![
+            json!({"role":"user","content":"跑个测试"}),
+            json!({"role":"assistant","content":null,"tool_calls":[{"id":"1"}]}),
+            json!({"role":"tool","tool_call_id":"1","content":"ok"}),
+        ];
+        assert!(continues_tool_flow(&msgs));
+    }
+
+    #[test]
+    fn detects_anthropic_tool_result() {
+        let msgs = vec![
+            json!({"role":"user","content":"跑个测试"}),
+            json!({"role":"assistant","content":[{"type":"tool_use","id":"1","name":"bash"}]}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"1","content":"ok"}]}),
+        ];
+        assert!(continues_tool_flow(&msgs));
+    }
+
+    #[test]
+    fn new_user_message_is_not_a_continuation() {
+        let msgs = vec![
+            json!({"role":"assistant","content":"done"}),
+            json!({"role":"user","content":"再帮我做一件完全不同的事"}),
+        ];
+        assert!(!continues_tool_flow(&msgs));
+        // 空消息列表 / assistant 结尾 / Anthropic 纯文本 user 同样不算
+        assert!(!continues_tool_flow(&[]));
+        assert!(!continues_tool_flow(&[json!({"role":"assistant","content":"x"})]));
+        assert!(!continues_tool_flow(&[json!({"role":"user","content":"纯文本"})]));
+    }
+}

@@ -182,6 +182,7 @@ pub async fn chat_completions(
                 features,
                 digest: &digest,
                 tools_sig,
+                continues_tools: evolve_core::features::continues_tool_flow(&extracted.messages),
                 max_output_req: parsed.get("max_tokens").and_then(|v| v.as_u64()),
                 policy: header_policy.or(*alias_policy),
                 sticky,

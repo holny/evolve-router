@@ -73,6 +73,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 features,
                 digest: &digest,
                 tools_sig,
+                continues_tools: continue_tool_flow(&parsed),
                 max_output_req,
                 policy: header_policy.or(*alias_policy),
                 sticky,
@@ -703,6 +704,18 @@ fn session_key_of(st: &AppState, headers: &HeaderMap, parsed: &Value) -> String 
             hasher.update(first.to_string().as_bytes());
         }
     format!("h{}", hex::encode(&hasher.finalize()[..8]))
+}
+
+/// 本轮是否工具流程延续（Anthropic Messages 形态：末条 user 带 tool_result part）。
+/// 直接复用 core 的判定——同一函数同时认 OpenAI 的 role:tool 与 Anthropic 的 tool_result，
+/// 免得两个协议各写一套（用户裁决 2026-10-15）
+fn continue_tool_flow(parsed: &Value) -> bool {
+    let msgs = parsed
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    evolve_core::features::continues_tool_flow(&msgs)
 }
 
 fn tools_signature(parsed: &Value) -> u64 {
