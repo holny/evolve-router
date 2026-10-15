@@ -650,10 +650,11 @@ public struct PanelView: View {
     }
 
     // 标签语义（色卡 + 悬停详解）：颜色 = 类别，胶囊里的字 = 该类别的具体取值
+    // 配色避开红/黄系（用户裁决：别像报错/警告）→ 全用冷色 + 中性灰
     static let tagColorDiff: Color = .green
     static let tagColorDomain: Color = .teal
-    static let tagColorFlag: Color = .orange
-    static let tagColorFit: Color = .pink
+    static let tagColorFlag: Color = .indigo
+    static let tagColorFit: Color = .cyan
     static let tagColorMode: Color = .secondary
     static let tagColorCap: Color = .blue
     static let tagColorPrice: Color = .purple
@@ -663,7 +664,7 @@ public struct PanelView: View {
     static let tagHelpDomain = "request domain classified by the gateway: code / math / data / agent / writing / lookup / chat"
     static let tagHelpFlag = "request traits detected by the gateway: trivial (nothing to route) / tools (tool-heavy turn) / vision (has images) / stakes (high-stakes)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
-    static let tagHelpMode = "decision path actually taken: reused (session stickiness) / rules (rule-engine fallback when the decision model was unavailable) / pinned (you named the model explicitly) — all three skip the decision model. Nothing shown = normal model-based decision"
+    static let tagHelpMode = "who decided the route: model (decision model) / model+rules (decision model + rule judge, conservative on conflict) / reused (session stickiness — no decision call) / rules (rule-engine fallback, decision model unavailable) / pinned (you named the model explicitly). Last three skipped the decision model"
     static let tagHelpCap = "model capability tier: basic / standard / powerful"
     static let tagHelpPrice = "model price tier: cheap / medium / premium"
     static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"

@@ -432,12 +432,15 @@ public final class AppState: ObservableObject {
                 if f("tool_heavy") { flags.append("tools") }
                 if f("needs_vision") { flags.append("vision") }
                 if f("high_stakes") { flags.append("stakes") }
-                // 决策来源（非默认路径才标）：reused=粘性复用 / rules=规则兜底 /
-                // pinned=请求里显式指定模型。三条都**没走**决策模型
+                // 决策来源（互斥，5 条都标；短词好懂）：model / model+rules 走了决策模型，
+                // reused（粘性复用）/ rules（规则兜底）/ pinned（显式指定）则没有
                 let sticky = (ev["sticky"] as? Bool) ?? false
                 let judgeSrc = (ev["judge"] as? String) ?? ""
                 let mode: String? = sticky ? "reused"
-                    : (judgeSrc == "heuristic" ? "rules" : (judgeSrc == "explicit" ? "pinned" : nil))
+                    : (judgeSrc == "heuristic" ? "rules"
+                    : (judgeSrc == "explicit" ? "pinned"
+                    : (judgeSrc == "decision_model" ? "model"
+                    : (judgeSrc == "decision_model+rules" ? "model+rules" : nil))))
                 let modelTags = ev["model_tags"] as? [String: Any]
                 let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
                     ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
