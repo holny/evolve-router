@@ -261,15 +261,92 @@ public struct PanelView: View {
 
     private var providersCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("server.rack", t("providers"))
-            let provs = state.providers
-            ForEach(provs, id: \.id) { p in
-                providerRow(p)
+            HStack(spacing: 6) {
+                sectionLabel("server.rack", t("providers"))
+                Spacer(minLength: 0)
+                dimTabs
+            }
+            if state.modelDim {
+                ForEach(state.modelRows) { m in
+                    modelRow(m)
+                }
+            } else {
+                let provs = state.providers
+                ForEach(provs, id: \.id) { p in
+                    providerRow(p)
+                }
             }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(groupBackground)
+    }
+
+    /// 维度切换 tab（用户裁决）：Provider / Model —— 两维度同布局同位置，
+    /// 切换零学习成本；窗口切换钮（today/yesterday）在顶部指标卡，两维度共用
+    private var dimTabs: some View {
+        HStack(spacing: 0) {
+            dimTab("Provider", selected: !state.modelDim) { state.modelDim = false }
+            dimTab("Model", selected: state.modelDim) { state.modelDim = true }
+        }
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .clipShape(Capsule())
+    }
+
+    private func dimTab(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 9, weight: selected ? .semibold : .medium))
+                .foregroundStyle(selected ? Color.primary : .secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(selected ? Capsule().fill(Color.primary.opacity(0.10)) : nil)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Model 维度行：与 Provider 行同布局（dot + 名称 + 指标 subline），
+    /// 右侧不放配额/状态（那是 provider 级信息）
+    private func modelRow(_ m: ModelRow) -> some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 5, height: 5)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(m.id)
+                    .font(.system(size: 11, weight: .medium))
+                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    if m.tok > 0 {
+                        Text(AppState.fmtTok(m.tok))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let hit = m.hit {
+                        Text("hit \(hit)%")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let rt = m.rate, rt > 0 {
+                        Text(String(format: "%.0f t/s", rt))
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                    if let tt = m.ttft {
+                        Text("TTFT \(Self.fmtMs(tt))")
+                            .font(.system(size: 9.5))
+                            .foregroundStyle(.tertiary)
+                            .monospacedDigit()
+                    }
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            }
+            Spacer(minLength: 0)
+        }
     }
 
 
@@ -319,9 +396,12 @@ public struct PanelView: View {
                 .minimumScaleFactor(0.75)
             }
             Spacer(minLength: 0)
-            // 固定宽度列：进度条/百分比位置稳定，也不会盖住左侧数据
-            trailingCell(p)
-                .frame(width: 88, alignment: .trailing)
+            // 昨天/历史视图：配额进度与冷却状态都是**当前态**，对历史无意义
+            // （用户裁决）→ 不展示，行内只留窗口指标（tokens/hit/速率/TTFT）
+            if state.statWindowToday {
+                trailingCell(p)
+                    .frame(width: 88, alignment: .trailing)
+            }
         }
     }
 

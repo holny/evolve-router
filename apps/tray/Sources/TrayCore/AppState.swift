@@ -85,6 +85,22 @@ public struct ProviderRow: Identifiable {
 
 public enum IconState { case idle, busy, success, fail, stopped, starting }
 
+/// 模型维度行（Providers 卡切到 Model 标签）：同一窗口的逐模型指标，
+/// 与 Provider 行同布局（dot + 名称 + tokens/hit/速率/TTFT）
+public struct ModelRow: Identifiable {
+    public let id: String
+    public let tok: Int
+    public let hit: Int?
+    public let rate: Double?
+    public let ttft: Int?
+    public let requests: Int
+
+    public init(id: String, tok: Int, hit: Int?, rate: Double?, ttft: Int?, requests: Int) {
+        self.id = id; self.tok = tok; self.hit = hit
+        self.rate = rate; self.ttft = ttft; self.requests = requests
+    }
+}
+
 @MainActor
 public final class AppState: ObservableObject {
     public init() {}
@@ -108,6 +124,10 @@ public final class AppState: ObservableObject {
     @Published public var softPct = 60
     /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
     @Published public var statWindowToday = true
+    /// Providers 卡维度：false = Provider（默认），true = Model（逐模型统计）
+    @Published public var modelDim = false
+    /// Model 维度行（当前窗口、按 tokens 降序、top 8）
+    @Published public var modelRows: [ModelRow] = []
 
     @Published public var pulse = false
     @Published public var requests = 0
@@ -191,6 +211,25 @@ public final class AppState: ObservableObject {
             successRate = reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0
             tokensK = Self.fmtTok(toks)
         }
+        // Model 维度行（Providers 卡 Model 标签）：同一窗口的逐模型指标，
+        // 与 Provider 行同布局，按 tokens 降序 top 8
+        var mrows: [ModelRow] = []
+        for (mid, msAny) in models {
+            guard let ms = msAny as? [String: Any] else { continue }
+            let req = (ms["requests"] as? Int) ?? Int((ms["requests"] as? Double) ?? 0)
+            let pin = (ms["prompt_tokens"] as? Int) ?? Int((ms["prompt_tokens"] as? Double) ?? 0)
+            let cached = (ms["cached_tokens"] as? Int) ?? Int((ms["cached_tokens"] as? Double) ?? 0)
+            let out = (ms["completion_tokens"] as? Int) ?? Int((ms["completion_tokens"] as? Double) ?? 0)
+            let tok = pin + out
+            if tok <= 0 && req <= 0 { continue }
+            let hit = pin > 0 ? Int(round(100.0 * Double(cached) / Double(pin))) : nil
+            let ttft = (ms["avg_ttft_ms"] as? Int) ?? (ms["avg_ttft_ms"] as? Double).map(Int.init)
+            let rate = (ms["avg_rate_tok_s"] as? Double) ?? (ms["avg_rate_tok_s"] as? Int).map(Double.init)
+            mrows.append(ModelRow(id: mid, tok: tok, hit: hit, rate: rate, ttft: ttft, requests: req))
+        }
+        mrows.sort { if $0.tok != $1.tok { return $0.tok > $1.tok } ; return $0.id < $1.id }
+        modelRows = Array(mrows.prefix(8))
+
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
         // 面板与 web 面板同源，客户端只渲染（消除两端各自计算的口径漂移）
