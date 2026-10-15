@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 public struct RecentDecision: Identifiable {
-    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil, domain: String? = nil, flags: [String] = []) {
+    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil, domain: String? = nil, flags: [String] = [], decisionMode: String? = nil) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
         self.preprocessMs = preprocessMs; self.decisionMs = decisionMs
@@ -10,6 +10,7 @@ public struct RecentDecision: Identifiable {
         self.difficulty = difficulty; self.capability = capability
         self.priceTier = priceTier; self.score = score
         self.domain = domain; self.flags = flags
+        self.decisionMode = decisionMode
     }
     public let id = UUID()
     public let model: String
@@ -32,6 +33,8 @@ public struct RecentDecision: Identifiable {
     /// 网关对请求本身的判定：任务域 + 命中特征（trivial/tools/vision/stakes）
     public let domain: String?
     public let flags: [String]
+    /// 决策来源（非默认路径才标）：reused=会话粘性复用（无决策调用）/ rules=规则引擎兜底
+    public let decisionMode: String?
 }
 
 public struct PaygBalance: Equatable {
@@ -429,6 +432,11 @@ public final class AppState: ObservableObject {
                 if f("tool_heavy") { flags.append("tools") }
                 if f("needs_vision") { flags.append("vision") }
                 if f("high_stakes") { flags.append("stakes") }
+                // 决策来源：粘性复用（跳过判定调用）/ 规则兜底（决策模型不可用）
+                // 默认路径（决策模型 / 决策模型+规则）不标，避免每行都是噪声
+                let sticky = (ev["sticky"] as? Bool) ?? false
+                let judgeSrc = (ev["judge"] as? String) ?? ""
+                let mode: String? = sticky ? "reused" : (judgeSrc == "heuristic" ? "rules" : nil)
                 let modelTags = ev["model_tags"] as? [String: Any]
                 let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
                     ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
@@ -443,7 +451,8 @@ public final class AppState: ObservableObject {
                     priceTier: modelTags?["price_tier"] as? String,
                     score: score,
                     domain: domain,
-                    flags: flags))
+                    flags: flags,
+                    decisionMode: mode))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 4 { break }
