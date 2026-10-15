@@ -270,9 +270,80 @@ impl Inner {
     }
 
     /// Must be called inside the tokio runtime.
+    /// 榜单快照读取（/api/benchmarks 展示 + 拉取失败时保留旧值）
+    pub(crate) fn bench_snapshot(&self) -> evolve_discovery::benchmarks::BenchSnapshot {
+        let dir = crate::meta::shellexpand_dir(&self.config.data.dir);
+        std::fs::read_to_string(dir.join("benchmarks.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    /// 榜单快照写入
+    pub(crate) fn save_bench_snapshot(
+        &self,
+        sources: &[(String, Vec<evolve_discovery::benchmarks::BenchScore>)],
+    ) {
+        let dir = crate::meta::shellexpand_dir(&self.config.data.dir);
+        let snapshot = evolve_discovery::benchmarks::BenchSnapshot {
+            sources: sources
+                .iter()
+                .map(|(name, scores)| {
+                    (
+                        name.clone(),
+                        evolve_discovery::benchmarks::SourceState {
+                            fetched_at_ms: evolve_memory::health::now(),
+                            scores: scores.clone(),
+                            error: None,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
+            let _ = std::fs::write(dir.join("benchmarks.json"), text);
+        }
+    }
+
     pub fn start_background(self: &AppState) {
         if self.modelsdev_refresh_due {
             evolve_discovery::modelsdev::spawn_refresh(self.config.data.dir.clone());
+        }
+        // 榜单管线（决策 #23 + 用户裁决 2026-10）：启动拉一次 + 每 interval_hours
+        // 刷新——外部榜单（默认 LMArena 镜像，用户盲测）→ 混合 tiers → 引擎叠加；
+        // 单源拉取失败保留该源旧值（快照），永不影响路由主链路
+        if self.config.benchmarks.enabled {
+            let b_state = self.clone();
+            let interval_h = self.config.benchmarks.interval_hours.max(1) as u64;
+            tokio::spawn(async move {
+                loop {
+                    let mut sources: Vec<(String, Vec<evolve_discovery::benchmarks::BenchScore>)> =
+                        vec![(
+                            "seed".into(),
+                            evolve_discovery::benchmarks::load_seed(),
+                        )];
+                    // 上次快照：拉取失败的源保留旧值
+                    let prev = b_state.bench_snapshot();
+                    for cfg in &b_state.config.benchmarks.sources {
+                        match evolve_discovery::benchmarks::fetch_source(&b_state.http, cfg).await {
+                            Ok(scores) if !scores.is_empty() => {
+                                sources.push((cfg.name.clone(), scores));
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(source = %cfg.name, error = %e, "benchmark source fetch failed, keeping last-good");
+                                if let Some(prev_src) = prev.sources.get(&cfg.name) {
+                                    sources.push((cfg.name.clone(), prev_src.scores.clone()));
+                                }
+                            }
+                        }
+                    }
+                    let n = evolve_discovery::benchmarks::apply_to_engine(&b_state.engine, &sources);
+                    b_state.save_bench_snapshot(&sources);
+                    tracing::info!(applied = n, sources = sources.len(), "benchmark tiers refreshed");
+                    tokio::time::sleep(Duration::from_secs(interval_h * 3600)).await;
+                }
+            });
         }
         let flywheel = self.flywheel.clone();
         tokio::spawn(async move {

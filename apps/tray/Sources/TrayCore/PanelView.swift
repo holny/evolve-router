@@ -23,8 +23,8 @@ public struct PanelView: View {
             header
             decisionBanner
             metricsCard
-            if !state.recent.isEmpty { decisionsCard }
             if !state.providers.isEmpty { providersCard }
+            if !state.recent.isEmpty { decisionsCard }
             controls
         }
         .padding(14)
@@ -161,6 +161,8 @@ public struct PanelView: View {
             } label: {
                 Text(state.statWindowToday ? "today" : "yesterday")
                     .font(.system(size: 9, weight: .medium))
+                    .lineLimit(1)
+                    .fixedSize()
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)

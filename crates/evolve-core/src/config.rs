@@ -95,8 +95,23 @@ pub struct BenchmarksCfg {
 impl Default for BenchmarksCfg {
     fn default() -> Self {
         // enabled by default: the embedded curated seed applies cold-start
-        // tiers offline; configured HTTP sources layer on top
-        Self { enabled: true, interval_hours: 24, sources: Vec::new() }
+        // tiers offline; configured HTTP sources layer on top.
+        // LMArena 镜像（用户盲测榜）为默认源——官方 lmarena.ai 国内不可达，
+        // 镜像页内嵌同源榜单数据；失败保留旧值（fetch 失败不清 tiers）
+        Self {
+            enabled: true,
+            interval_hours: 24,
+            sources: vec![BenchSourceCfg {
+                name: "lmarena".into(),
+                url: "https://arena.atease.dev/text/".into(),
+                format: "lmarena_mirror".into(),
+                interval_hours: Some(24),
+                headers: None,
+                alias_key: None,
+                score_key: None,
+                max_score: None,
+            }],
+        }
     }
 }
 

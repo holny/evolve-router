@@ -58,6 +58,33 @@ pub fn normalize_alias(name: &str) -> String {
     s.trim_matches('-').to_string()
 }
 
+/// 变体词（采样配置/规模后缀）：同族 = 去掉这些词后的基名。
+/// 用户裁决：同一基名的家族共享能力评估——无后缀介于强化与轻量变体之间。
+const VARIANT_TOKENS: [&str; 15] = [
+    "max", "pro", "flash", "air", "mini", "lite", "turbo", "high", "xhigh",
+    "ultra", "thinking", "instant", "preview", "exp", "plus",
+];
+
+/// 家族键：normalize_alias 后从尾部剥变体词。"glm-5.3-max"/"glm-5.3-flash"
+/// → "glm-5.3"（与目录里的 glm-5.3 同族）；无变体词则等于自身。
+pub fn family_of(name: &str) -> String {
+    let mut s = normalize_alias(name);
+    loop {
+        let mut changed = false;
+        for t in VARIANT_TOKENS {
+            let suffix = format!("-{t}");
+            if s.ends_with(&suffix) {
+                s.truncate(s.len() - suffix.len());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    s.trim_matches('-').to_string()
+}
+
 /// Min-max normalize into [0.3, 1.0]: order preserved, but the weakest
 /// model on a board stays viable (0.0 would nuke its tier outright).
 fn min_max(values: &mut [(usize, f32)]) {
@@ -247,8 +274,122 @@ pub fn parse_source(cfg: &BenchSourceCfg, payload: &Value) -> anyhow::Result<Vec
             }
             Ok(out)
         }
+        "lmarena_mirror" => {
+            let html = payload
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("lmarena_mirror expects the raw HTML body"))?;
+            Ok(parse_lmarena_mirror(html))
+        }
         other => Err(anyhow::anyhow!("unknown benchmark format '{other}'")),
     }
+}
+
+/// 解析 LMArena 镜像站（arena.atease.dev/text/）页面：Next.js flight 数据
+/// 内嵌完整榜单（{"rank":N,"model":"...","score_val":N,...}，414 行）。
+/// 官方 lmarena.ai 国内不可达——镜像页与官方同源同数据。
+pub fn parse_lmarena_mirror(html: &str) -> Vec<BenchScore> {
+    // 实际页面为无空格形式：push([1,"..."])
+    const MARKER: &str = "self.__next_f.push([1,\"";
+    let mut blob = String::new();
+    let mut idx = 0usize;
+    while let Some(off) = html[idx..].find(MARKER) {
+        let start = idx + off + MARKER.len();
+        // 内容含大量 \" 转义——必须逐字符扫描找到**未转义**的收尾引号
+        // （ naive 的 find("]") 会命中 \""] 里的转义引号，把每个 chunk 截成几十字节）
+        let bytes = html.as_bytes();
+        let mut j = start;
+        let mut chunk_end = None;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' => j += 2, // 跳过转义对（\" \\ \n …）
+                b'"' => {
+                    chunk_end = Some(j); // 未转义引号 = chunk 收尾（其后是 ] )）
+                    break;
+                }
+                _ => j += 1,
+            }
+        }
+        let Some(chunk_end) = chunk_end else { break };
+        blob.push_str(&unescape_js_string(&html[start..chunk_end]));
+        idx = chunk_end;
+    }
+    // 平衡括号扫描所有 {"rank":N,...} 对象（字段顺序在不同行可能不同）
+    let bytes = blob.as_bytes();
+    let mut rows: Vec<Value> = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(rel) = blob[cursor..].find("{\"rank\":") {
+        let i = cursor + rel;
+        let mut depth = 0usize;
+        let mut end = None;
+        for (j, &c) in bytes[i..].iter().enumerate() {
+            match c {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i + j + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(end) = end else { break };
+        if let Ok(v) = serde_json::from_str::<Value>(&blob[i..end])
+            && v.get("model").and_then(|m| m.as_str()).is_some()
+        {
+            rows.push(v);
+        }
+        cursor = end;
+    }
+    // Elo 分数 → 0~1（1000~1500 覆盖主要区间），三维同值（盲测综合能力）
+    let mut scored: Vec<(usize, f32)> = Vec::new();
+    let mut out: Vec<BenchScore> = Vec::new();
+    for (k, row) in rows.iter().enumerate() {
+        let Some(alias) = row.get("model").and_then(|m| m.as_str()) else { continue };
+        let Some(score) = row.get("score_val").and_then(|v| v.as_f64()) else { continue };
+        let norm = ((score as f32 - 1000.0) / 500.0).clamp(0.0, 1.0);
+        out.push(BenchScore {
+            alias: normalize_alias(alias),
+            coding: Some(norm),
+            reasoning: Some(norm),
+            agentic: Some(norm),
+            raw: serde_json::json!({
+                "rank": row.get("rank"), "score": row.get("score_val"),
+                "votes": row.get("votes"), "vendor": row.get("vendor"),
+            }),
+            fetched_at_ms: now_ms(),
+        });
+        scored.push((k, norm));
+    }
+    min_max(&mut scored);
+    for (idx, norm) in scored {
+        if let Some(b) = out.get_mut(idx) {
+            b.reasoning = Some(norm);
+            b.coding = Some(norm);
+            b.agentic = Some(norm);
+        }
+    }
+    out
+}
+
+fn unescape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some(other) => out.push(other),
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Merge per-source scores into per-alias blended tiers (mean of sources).
@@ -358,6 +499,36 @@ pub fn tier_updates_for_catalog(
             }
         }
 
+        // 家族兜底（用户裁决 2026-10）：glm-5.3 这类模型在榜单上只有
+        // glm-5.3-max / glm-5.3-flash 变体条目（不是同一 SKU，不可精确匹配）——
+        // 按**同族变体的均值**评估其能力（无后缀介于强化与轻量之间）。
+        // 置信度取家族聚合档（CONF_UMBRELLA）：是推定值，不是实测。
+        if conf.is_none() {
+            let fam = family_of(&r.upstream_model);
+            let members: Vec<&BenchScore> = blended
+                .iter()
+                .filter(|(a, _)| family_of(a) == fam)
+                .map(|(_, b)| b)
+                .collect();
+            let avg = |get: fn(&BenchScore) -> Option<f32>| -> Option<f32> {
+                let vs: Vec<f32> = members.iter().filter_map(|b| get(b)).collect();
+                (!vs.is_empty()).then(|| vs.iter().sum::<f32>() / vs.len() as f32)
+            };
+            let coding = avg(|b| b.coding);
+            let reasoning = avg(|b| b.reasoning);
+            let agentic = avg(|b| b.agentic);
+            if coding.is_some() || reasoning.is_some() || agentic.is_some() {
+                conf = Some(alias::CONF_UMBRELLA);
+                bench_owned = Some(BenchScore {
+                    alias: fam,
+                    coding,
+                    reasoning,
+                    agentic,
+                    ..Default::default()
+                });
+            }
+        }
+
         let Some(bench) = bench_owned else { continue };
         let Some(conf) = conf else { continue };
         let conf = if r.tiers_explicit {
@@ -394,6 +565,11 @@ pub async fn fetch_source(
         for (k, v) in hs {
             req = req.header(k.as_str(), v.as_str());
         }
+    }
+    // lmarena_mirror 返回 HTML 页面（榜单内嵌在 flight 数据里），非 JSON
+    if cfg.format == "lmarena_mirror" {
+        let text = req.send().await?.error_for_status()?.text().await?;
+        return parse_source(cfg, &Value::String(text));
     }
     let payload: Value = req.send().await?.error_for_status()?.json().await?;
     parse_source(cfg, &payload)
@@ -587,5 +763,69 @@ mod seed_tests {
         }];
         let updates = tier_updates_for_catalog(&blended, &records);
         assert_eq!(updates.len(), 1, "seed must match upstream_model exactly");
+    }
+}
+
+#[cfg(test)]
+mod lmarena_tests {
+    use super::*;
+    use crate::alias;
+    use evolve_core::types::ModelRecord;
+    use serde_json::json;
+
+    #[test]
+    fn family_strips_variant_suffixes() {
+        assert_eq!(family_of("glm-5.3-max"), "glm-5.3");
+        assert_eq!(family_of("glm-5.3-flash"), "glm-5.3");
+        assert_eq!(family_of("glm-5.3"), "glm-5.3");
+        assert_eq!(family_of("minimax-m3.1-flash-preview"), "minimax-m3.1");
+        assert_eq!(family_of("kimi-k3-max"), "kimi-k3");
+        assert_eq!(family_of("qwen3.8-max"), "qwen3.8");
+    }
+
+    #[test]
+    fn mirror_parse_parses_flight_rows() {
+        // 镜像页 flight 数据的最小复刻（转义后的内嵌 JSON）
+        let html = r#"<html><script>self.__next_f.push([1,"3:{\"rank\":27,\"sortRank\":27,\"model\":\"glm-5.3-max\",\"score_val\":1478,\"votes\":\"20,049\"}"])</script>
+        <script>self.__next_f.push([1,"5:{\"rank\":38,\"sortRank\":38,\"model\":\"glm-5.3-flash\",\"score_val\":1475}"])</script>"#;
+        let scores = parse_lmarena_mirror(html);
+        assert_eq!(scores.len(), 2, "rows: {scores:?}");
+        let max = scores.iter().find(|s| s.alias == "glm-5.3-max").unwrap();
+        assert!(max.coding.unwrap() > 0.0);
+        let flash = scores.iter().find(|s| s.alias == "glm-5.3-flash").unwrap();
+        assert!(flash.coding.unwrap() < max.coding.unwrap(), "higher elo => higher norm");
+    }
+
+    /// 用户裁决：glm-5.3（无后缀）没有竞技场条目 → 按**同族均值**评估，
+    /// 能力介于 glm-5.3-max 与 glm-5.3-flash 之间（不得高估成 max）
+    #[test]
+    fn family_fallback_sits_between_variants() {
+        let blended: HashMap<String, BenchScore> = [
+            ("glm-5.3-max", 0.95f32),
+            ("glm-5.3-flash", 0.75f32),
+        ]
+        .into_iter()
+        .map(|(a, v)| {
+            (
+                a.to_string(),
+                BenchScore { alias: a.into(), coding: Some(v), reasoning: Some(v), agentic: Some(v), ..Default::default() },
+            )
+        })
+        .collect();
+        // 目录里的 glm-5.3（zhipu 官方 API，非 max/flash SKU）
+        let mut r = ModelRecord {
+            id: "zhipuai-coding-plan/glm-5.3".into(),
+            upstream_model: "glm-5.3".into(),
+            ..Default::default()
+        };
+        r.tiers.coding = 0.5;
+        let updates = tier_updates_for_catalog(&blended, &[r.clone()]);
+        let (_, t, conf) = updates.iter().find(|(id, _, _)| id.contains("glm-5.3")).unwrap();
+        assert!(
+            t.coding > 0.75 && t.coding < 0.95,
+            "family mean must sit between flash(0.75) and max(0.95): {t:?}"
+        );
+        assert_eq!(*conf, alias::CONF_UMBRELLA, "family inference is umbrella-grade");
+        let _ = &r;
     }
 }

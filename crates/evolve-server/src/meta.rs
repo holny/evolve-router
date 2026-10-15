@@ -534,7 +534,7 @@ pub async fn api_events(
     (axum::Json(serde_json::Value::Array(events))).into_response()
 }
 
-fn shellexpand_dir(dir: &str) -> std::path::PathBuf {
+pub(crate) fn shellexpand_dir(dir: &str) -> std::path::PathBuf {
     if dir.starts_with("~/") {
         std::env::var("HOME")
             .map(|h| std::path::PathBuf::from(h).join(&dir[2..]))
