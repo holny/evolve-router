@@ -655,9 +655,9 @@ public struct PanelView: View {
     static let tagColorDomain: Color = .teal
     static let tagColorFlag: Color = .indigo
     static let tagColorFit: Color = .cyan
-    static let tagColorMode: Color = .secondary
+    static let tagColorMode: Color = .purple
     static let tagColorCap: Color = .blue
-    static let tagColorPrice: Color = .purple
+    static let tagColorPrice: Color = .mint
     static let tagColorScore: Color = .secondary
 
     static let tagHelpDiff = "task difficulty of this request: easy / medium / hard"
