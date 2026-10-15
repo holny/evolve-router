@@ -229,6 +229,27 @@ public struct PanelView: View {
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
+                            // 决策打标微缩行（用户裁决）：任务难度 + 模型能力/价位
+                            // + 网关评分 + 难度↔能力匹配
+                            if r.difficulty != nil || r.capability != nil || r.score != nil {
+                                HStack(spacing: 4) {
+                                    if let d = r.difficulty {
+                                        let (label, col) = AppState.diffBadge(d)
+                                        Text(label).foregroundStyle(col)
+                                    }
+                                    if let cap = r.capability {
+                                        Text(cap).foregroundStyle(.quaternary)
+                                    }
+                                    if let pt = r.priceTier {
+                                        Text(pt).foregroundStyle(.quaternary)
+                                    }
+                                    if let sc = r.score {
+                                        Text(String(format: "评 %.2f", sc)).foregroundStyle(.quaternary)
+                                    }
+                                }
+                                .font(.system(size: 8.5))
+                                .lineLimit(1)
+                            }
                             if r.status != 200, let reason = r.failReason {
                                 Text("Fail: \(reason)")
                                     .font(.system(size: 9.5))
@@ -317,6 +338,16 @@ public struct PanelView: View {
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
                 HStack(spacing: 5) {
+                    // today 视图：展示模型实时打标（能力/价位）；yesterday 是
+                    // 当前态标签对历史无意义（用户裁决）→ 不展示
+                    if state.statWindowToday {
+                        if let cap = m.capability, !cap.isEmpty {
+                            Text(cap).foregroundStyle(.quaternary)
+                        }
+                        if let pt = m.priceTier, !pt.isEmpty {
+                            Text(pt).foregroundStyle(.quaternary)
+                        }
+                    }
                     if m.tok > 0 {
                         Text(AppState.fmtTok(m.tok))
                             .font(.system(size: 9.5))

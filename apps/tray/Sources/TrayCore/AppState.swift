@@ -2,11 +2,13 @@ import Foundation
 import SwiftUI
 
 public struct RecentDecision: Identifiable {
-    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil) {
+    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
         self.preprocessMs = preprocessMs; self.decisionMs = decisionMs
         self.totalTokens = totalTokens; self.cachePct = cachePct; self.failReason = failReason
+        self.difficulty = difficulty; self.capability = capability
+        self.priceTier = priceTier; self.score = score
     }
     public let id = UUID()
     public let model: String
@@ -21,6 +23,11 @@ public struct RecentDecision: Identifiable {
     public let totalTokens: Int
     public let cachePct: Int?
     public let failReason: String?
+    /// 决策时点打标：任务难度（0-3）/ 模型能力 / 价位 / 网关评分
+    public let difficulty: Double?
+    public let capability: String?
+    public let priceTier: String?
+    public let score: Double?
 }
 
 public struct PaygBalance: Equatable {
@@ -94,10 +101,15 @@ public struct ModelRow: Identifiable {
     public let rate: Double?
     public let ttft: Int?
     public let requests: Int
+    /// 模型打标（能力/价位，实时口径）——仅 today 视图展示（yesterday 的标签是当前态，无意义）
+    public let capability: String?
+    public let priceTier: String?
 
-    public init(id: String, tok: Int, hit: Int?, rate: Double?, ttft: Int?, requests: Int) {
+    public init(id: String, tok: Int, hit: Int?, rate: Double?, ttft: Int?, requests: Int,
+                capability: String? = nil, priceTier: String? = nil) {
         self.id = id; self.tok = tok; self.hit = hit
         self.rate = rate; self.ttft = ttft; self.requests = requests
+        self.capability = capability; self.priceTier = priceTier
     }
 }
 
@@ -128,6 +140,8 @@ public final class AppState: ObservableObject {
     @Published public var modelDim = false
     /// Model 维度行（当前窗口、按 tokens 降序、top 8）
     @Published public var modelRows: [ModelRow] = []
+    /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
+    @Published public var modelTagMap: [String: (String, String)] = [:]
 
     @Published public var pulse = false
     @Published public var requests = 0
@@ -199,6 +213,17 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             models = (obj["models"] as? [String: Any]) ?? obj
+            // 模型实时打标（能力/价位）：Providers 卡 Model 标签展示用
+            if case (200, let mtData)? = try? await get("/api/model-tags"),
+               let mtObj = try? JSONSerialization.jsonObject(with: mtData) as? [String: Any],
+               let mtArr = mtObj["models"] as? [[String: Any]] {
+                var tm: [String: (String, String)] = [:]
+                for m in mtArr {
+                    guard let id = m["model"] as? String else { continue }
+                    tm[id] = ((m["capability"] as? String) ?? "", (m["price_tier"] as? String) ?? "")
+                }
+                modelTagMap = tm
+            }
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
                 guard let s = s as? [String: Any] else { continue }
@@ -228,7 +253,12 @@ public final class AppState: ObservableObject {
             mrows.append(ModelRow(id: mid, tok: tok, hit: hit, rate: rate, ttft: ttft, requests: req))
         }
         mrows.sort { if $0.tok != $1.tok { return $0.tok > $1.tok } ; return $0.id < $1.id }
-        modelRows = Array(mrows.prefix(8))
+        // 模型打标（实时口径）：仅 today 视图挂到行上（yesterday 的标签是当前态，无意义）
+        modelRows = mrows.prefix(8).map { m in
+            let tag = statWindowToday ? modelTagMap[m.id] : nil
+            return ModelRow(id: m.id, tok: m.tok, hit: m.hit, rate: m.rate, ttft: m.ttft,
+                            requests: m.requests, capability: tag?.0, priceTier: tag?.1)
+        }
 
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
@@ -380,12 +410,23 @@ public final class AppState: ObservableObject {
                         failReason = causes.prefix(2).joined(separator: " / ")
                     }
                 }
+                // 决策时点打标：难度 / 模型能力 / 价位 / 网关评分（事件同帧落库）
+                let judgment = ev["judgment"] as? [String: Any]
+                let difficulty = (judgment?["difficulty"] as? Double)
+                    ?? ((judgment?["difficulty"] as? Int).map(Double.init))
+                let modelTags = ev["model_tags"] as? [String: Any]
+                let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
+                    ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
                 decRows.append(RecentDecision(
                     model: model, status: status, totalMs: total,
                     ttftMs: ttft > 0 ? ttft : nil, tokS: tokS,
                     agent: agent, time: time,
                     preprocessMs: pre, decisionMs: dec,
-                    totalTokens: totalTok, cachePct: cachePct, failReason: failReason))
+                    totalTokens: totalTok, cachePct: cachePct, failReason: failReason,
+                    difficulty: difficulty,
+                    capability: modelTags?["capability"] as? String,
+                    priceTier: modelTags?["price_tier"] as? String,
+                    score: score))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 5 { break }
@@ -416,6 +457,13 @@ public final class AppState: ObservableObject {
         let ms = ((ts as? Double) ?? 0) / 1000
         guard ms > 0 else { return "--:--:--" }
         return Self.tsFmt.string(from: Date(timeIntervalSince1970: ms))
+    }
+
+    /// 难度徽章（难度 0-3 → 简单/普通/高难，绿/橙/红）
+    static func diffBadge(_ d: Double) -> (String, Color) {
+        d <= 0.8 ? ("难·简单", .green)
+          : d <= 2.0 ? ("难·普通", .orange)
+          : ("难·高难", .red)
     }
 
     /// 速率缩写（t/s 数值部分）：30000 → "30.0k"，1.2M → "1.2M"，92 → "92"
