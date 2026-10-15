@@ -455,9 +455,23 @@ const T = {
   price_cheap:   {zh:'低价', en:'budget', ko:'저가', ja:'低価格', es:'económico', fr:'économique'},
   price_medium:  {zh:'中价', en:'mid', ko:'중간', ja:'ミディアム', es:'medio', fr:'moyen'},
   price_premium: {zh:'高价', en:'premium', ko:'프리미엄', ja:'プレミアム', es:'premium', fr:'premium'},
-  diff_easy: {zh:'简单', en:'easy', ko:'쉬움', ja:'簡単', es:'fácil', fr:'facile'},
-  diff_mid:  {zh:'普通', en:'medium', ko:'보통', ja:'普通', es:'medio', fr:'moyen'},
-  diff_hard: {zh:'高难', en:'hard', ko:'어려움', ja:'高難度', es:'difícil', fr:'difficile'},
+  // 请求判定标签词表（服务端 tags 派生 → 两端只渲染，用户裁决 2026-10）
+  tagdiff_easy: {zh:'简单', en:'easy', ko:'쉬움', ja:'簡単', es:'fácil', fr:'facile'},
+  tagdiff_mid:  {zh:'普通', en:'medium', ko:'보통', ja:'普通', es:'medio', fr:'moyen'},
+  tagdiff_hard: {zh:'高难', en:'hard', ko:'어려움', ja:'高難度', es:'difícil', fr:'difficile'},
+  fl_trivial: {zh:'琐碎', en:'trivial', ko:'사소', ja:'瑣末', es:'trivial', fr:'trivial'},
+  fl_tools:   {zh:'工具密集', en:'tools', ko:'도구 중심', ja:'ツール重視', es:'herramientas', fr:'outils'},
+  fl_vision:  {zh:'含图', en:'vision', ko:'이미지', ja:'画像あり', es:'con imagen', fr:'images'},
+  fl_stakes:  {zh:'高风险', en:'stakes', ko:'고위험', ja:'高リスク', es:'alto riesgo', fr:'enjeu élevé'},
+  t_tag_diff: {zh:'网关判定的任务难度（0-3 分桶）：easy ≤0.8 / medium ≤2.0 / hard >2.0', en:'task difficulty judged by the gateway (0-3 banded): easy ≤0.8 / medium ≤2.0 / hard >2.0', ko:'게이트웨이가 판정한 작업 난이도(0-3 구간): easy ≤0.8 / medium ≤2.0 / hard >2.0', ja:'ゲートウェイが判定したタスク難度（0-3 区分）：easy ≤0.8 / medium ≤2.0 / hard >2.0', es:'dificultad estimada por el gateway (0-3 por tramos): easy ≤0.8 / medium ≤2.0 / hard >2.0', fr:'difficulté jugée par la passerelle (0-3 par paliers) : easy ≤0.8 / medium ≤2.0 / hard >2.0'},
+  t_tag_dom:  {zh:'网关判定的任务域（决定用哪套能力档位打分）', en:'request domain judged by the gateway (decides which capability tiers are scored)', ko:'게이트웨이가 판정한 작업 영역(어떤 능력 티어로 채점할지 결정)', ja:'ゲートウェイが判定したタスク領域（どの能力ティアで採点するかを決める）', es:'dominio juzgado por el gateway (decide qué niveles de capacidad se puntúan)', fr:'domaine jugé par la passerelle (détermine les paliers de capacité notés)'},
+  t_tag_flags:{zh:'判定器命中的请求特征（阈值与路由判定一致：vision>0.5、stakes>0.6、trivial/tools>0.5）', en:'request traits flagged by the judge (thresholds match routing: vision>0.5, stakes>0.6, trivial/tools>0.5)', ko:'판정기가 표시한 요청 특성(라우팅과 동일 기준: vision>0.5, stakes>0.6, trivial/tools>0.5)', ja:'判定器が検出したリクエスト特性（しきい値はルーティングと同一：vision>0.5、stakes>0.6、trivial/tools>0.5）', es:'rasgos detectados por el juez (umbrales iguales al enrutado: vision>0.5, stakes>0.6, trivial/tools>0.5)', fr:'traits détectés par le juge (seuils identiques au routage : vision>0.5, stakes>0.6, trivial/tools>0.5)'},
+  t_tag_mode: {zh:'判定来源，五条互斥路径：model / model+rules 走了决策模型；reused（粘性复用）/ rules（规则兜底）/ pinned（显式指定）没走', en:'who judged the route — five mutually exclusive paths: model / model+rules used the decision model; reused (sticky) / rules (fallback) / pinned (explicit) did not', ko:'판정 출처, 상호 배타 5경로: model / model+rules는 결정 모델 사용, reused(스티키)/rules(폴백)/pinned(지정)는 미사용', ja:'判定元は相互排他的な5経路：model / model+rules は判断モデル使用、reused（粘性）/rules（フォールバック）/pinned（明示）は未使用', es:'quién decidió la ruta — cinco vías excluyentes: model / model+rules usaron el modelo de decisión; reused (sticky) / rules (respaldo) / pinned (explícito) no', fr:'qui a décidé la route — cinq voies exclusives : model / model+rules ont utilisé le modèle de décision ; reused (sticky) / rules (secours) / pinned (explicite) non'},
+  t_tag_fit:  {zh:'任务难度↔模型能力档位是否对齐：match 对齐 / over 能力过剩 / under 能力不足', en:'task difficulty ↔ model capability tier: match (aligned) / over (capability above task) / under (capability below task)', ko:'작업 난이도 ↔ 모델 능력 티어: match 정렬 / over 능력 과잉 / under 능력 부족', ja:'タスク難度 ↔ モデル能力ティア：match 一致 / over 能力過剰 / under 能力不足', es:'dificultad ↔ nivel de capacidad del modelo: match (alineado) / over (capacidad sobra) / under (capacidad falta)', fr:'difficulté ↔ palier de capacité du modèle : match (aligné) / over (capacité en trop) / under (capacité insuffisante)'},
+  t_fl_trivial:{zh:'判定器认为一句话即可回答、无需工具', en:'judged answerable in one short sentence with no tools', ko:'한 문장으로 답변 가능, 도구 불필요', ja:'一文で回答可能・ツール不要', es:'respondible en una frase corta sin herramientas', fr:'répondable en une phrase, sans outils'},
+  t_fl_tools:{zh:'本轮请求工具调用密集', en:'tool-intensive turn', ko:'도구 호출이 많은 턴', ja:'ツール呼び出しが多いターン', es:'turno con muchas herramientas', fr:'tour riche en outils'},
+  t_fl_vision:{zh:'请求带图片（无视觉能力的模型会被挡掉）', en:'the request carries images (non-vision models are filtered out)', ko:'요청에 이미지 포함(비전 미지원 모델은 제외)', ja:'画像あり（視覚非対応モデルは除外）', es:'la solicitud trae imágenes (los modelos sin visión se descartan)', fr:'la requête contient des images (les modèles sans vision sont écartés)'},
+  t_fl_stakes:{zh:'高风险请求（涉及支付/生产/数据删除等）：抑制探索、提高质量底线', en:'high-stakes request (payments / production / data deletion …): exploration suppressed, quality floor raised', ko:'고위험 요청(결제/운영/데이터 삭제 등): 탐색 억제, 품질 하한 상향', ja:'高リスク要求（決済・本番・データ削除など）：探索抑制と品質下限の引き上げ', es:'solicitud de alto riesgo (pagos / producción / borrado de datos…): sin exploración y con piso de calidad más alto', fr:'requête à enjeu élevé (paiements / production / suppression de données…) : exploration supprimée, plancher de qualité relevé'},
   p_est:     {zh:'预估入', en:'est in', ko:'추정 입', ja:'推定入', es:'ent est.', fr:'entr est.'},
   t_est:     {zh:'请求发出前的输入 tokens 估算（用于窗口/配额/粘性检查）；行内「入」是上游实报用量，两者可能不同', en:'input-token estimate made before the request (drives window/quota/sticky checks); the in/out in the row are actual usage reported by upstream and may differ', ko:'요청 전 입력 토큰 추정(윈도우/쿼터/스티키 검사용); 행의 입/출은 업스트림 실제 사용량으로 다를 수 있음', ja:'リクエスト前の入力トークン推定（窓/クォータ/スティキー検査用）；行内の入/出は上流の実使用量で異なり得る', es:'estimación de tokens de entrada antes de la solicitud (ventana/cuota/sticky); lo in/out de la fila es uso real reportado por el upstream', fr:'estimation des jetons d\'entrée avant la requête (fenêtre/quota/sticky) ; le entr/sort de la ligne est l\'usage réel remonté, qui peut différer'},
   t_actual:  {zh:'入=上游实报的总输入 tokens（读是其中命中缓存、按折扣计价的部分；写=新增缓存计费；出=补全）。入的大小由发送内容决定：全新短请求几十 token、带全部历史的长会话几十万都正常', en:'in = total input tokens reported by upstream (r = the cached subset, billed at discount; w = new cache written, billed; out = completion). Size follows content: a fresh short request is tens of tokens, a long session with full history is hundreds of thousands', ko:'입=업스트림이 보고한 총 입력 토큰(읽=그중 캐시 적중 부분, 할인 과금; 쓰=신규 캐시 기록, 과금; 출=보완). 크기는 내용에 비례: 새 짧은 요청은 수십 토큰, 전체 히스토리를 실Long 세션은 수십만', ja:'入=上流が報告する総入力トークン（読=うちキャッシュ適中部分、割引課金；書=新規キャッシュ書き込み、課金；出=補完）。大きさは内容次第：全新の短いリクエストは数十トークン、全履歴を含む長いセッションは数十万', es:'ent = total de tokens de entrada reportados por el upstream (lee = parte en caché, con descuento; esc = caché nueva, facturada; sal = complementación). El tamaño sigue al contenido: una petición corta nueva son decenas de tokens, una sesión larga con historial son cientos de miles', fr:'entr = total des jetons d\'entrée remontés (lect = partie en cache, facturée au rabais ; éc = cache nouvelle, facturée ; sor = complétion). La taille suit le contenu : une requête courte neuve fait des dizaines de jetons, une longue session avec historique en fait des centaines de milliers'},
@@ -758,45 +772,81 @@ function judgeBadge(e){
   const k = map[e.judge];
   return k ? '<span class="pbadge" title="'+esc(t('t_'+k))+'">'+esc(t(k))+'</span>' : '';
 }
+// ── 请求判定标签：取值全部来自服务端 tags（evolve-server/src/decision_tags.rs），
+//    这里只做本地化 + 上色，不再重算阈值/边界（两端漂移的根因）
+const MODE_LABEL = {model:'bj_model', 'model+rules':'bj_hybrid', reused:'p_sticky', rules:'bj_heur', pinned:'bj_explicit'};
+const DOM_LABEL = {code:'dom_Code', math:'dom_MathLogic', data:'dom_Data', agent:'dom_AgentOps',
+                   writing:'dom_Writing', lookup:'dom_Lookup', chat:'dom_Chitchat', other:'dom_Other'};
+const DIFF_LABEL = {easy:'tagdiff_easy', medium:'tagdiff_mid', hard:'tagdiff_hard'};
+const FIT_LABEL = {match:'p_match', over:'m_over', under:'m_under'};
+function wordOf(map, key, fallback){
+  const k = map[key];
+  return k ? t(k) : (key || fallback || '');
+}
+function tagBadges(e){
+  const tg = e.tags;
+  if (!tg) return [];
+  const parts = [];
+  if (tg.mode) {
+    const tip = tg.mode === 'reused' ? t('p_sticky_hint') : t('t_tag_mode');
+    parts.push('<span class="pbadge" title="'+esc(tip)+'">'+esc(wordOf(MODE_LABEL, tg.mode, tg.mode))+'</span>');
+  }
+  if (tg.difficulty)
+    parts.push('<span class="pbadge" title="'+esc(t('t_tag_diff'))+'">'+esc(wordOf(DIFF_LABEL, tg.difficulty, tg.difficulty))+'</span>');
+  if (tg.domain)
+    parts.push('<span class="pbadge" title="'+esc(t('t_tag_dom'))+'">'+esc(wordOf(DOM_LABEL, tg.domain, tg.domain))+'</span>');
+  (tg.flags || []).forEach(fl => {
+    const w = t('fl_'+fl), tip = t('t_fl_'+fl);
+    parts.push('<span class="pbadge" title="'+esc(tip)+'">'+esc(w)+'</span>');
+  });
+  if (tg.fit) {
+    const cls = tg.fit === 'match' ? 'pbadge' : 'pbadge warn';
+    parts.push('<span class="'+cls+'" title="'+esc(t('t_tag_fit'))+'">'+esc(wordOf(FIT_LABEL, tg.fit, tg.fit))+'</span>');
+  }
+  return parts;
+}
 function decisionPath(e){
   const parts = [];
   if (e.skipped) parts.push('<span class="pbadge warn" title="'+t('skipped')+'">↩ '+esc(e.skipped)+'</span>');
-  if (e.sticky) {
-    parts.push('<span class="pbadge" title="'+esc(t('p_sticky_hint'))+'">'+esc(t('p_sticky'))+'</span>');
+  if (e.tags) {
+    // 判定标签（来源/难度/域/特征/匹配）全部来自服务端派生，见 tagBadges
+    parts.push.apply(parts, tagBadges(e));
   } else {
-    parts.push(judgeBadge(e));
-    if ((e.reason||'').includes('[exploring]'))
-      parts.push('<span class="pbadge explore" title="'+esc(t('t_explore'))+'">'+esc(t('p_explore'))+'</span>');
-    const f = e.funnel || [];
-    if (f.length === 4 && f.some(x => x > 0)) {
-      const tip = t('t_funnel').replace('{a}',f[0]).replace('{b}',f[1]).replace('{c}',f[2]).replace('{d}',f[3]);
-      parts.push('<span class="pdim" title="'+esc(tip)+'">'+esc(t('p_funnel'))+' '+f.join('→')+'</span>');
+    // 旧事件（无 tags 字段）：沿用原本地渲染，避免历史行变空
+    if (e.sticky) {
+      parts.push('<span class="pbadge" title="'+esc(t('p_sticky_hint'))+'">'+esc(t('p_sticky'))+'</span>');
+    } else {
+      parts.push(judgeBadge(e));
+      if (e.difficulty_eff != null)
+        parts.push('<span class="pdim" title="'+esc(t('t_diff'))+'">'+esc(t('p_diff'))+' '+(+e.difficulty_eff).toFixed(1)+'</span>');
+      const mt = e.model_tags || {};
+      if (mt.capability) {
+        const capLabel = {basic:t('cap_basic'), standard:t('cap_standard'), powerful:t('cap_powerful')}[mt.capability] || mt.capability;
+        parts.push('<span class="pbadge" title="'+esc(t('p_cap'))+'">'+esc(capLabel)+'</span>');
+      }
+      if (mt.price_tier) {
+        const priceLabel = {cheap:t('price_cheap'), medium:t('price_medium'), premium:t('price_premium')}[mt.price_tier] || mt.price_tier;
+        parts.push('<span class="pbadge" title="'+esc(t('p_price'))+'">'+esc(priceLabel)+'</span>');
+      }
+      const chosenScore = e.scores ? e.scores[e.chosen] : null;
+      if (chosenScore != null)
+        parts.push('<span class="pdim" title="'+esc(t('p_score'))+'">'+esc(t('p_score'))+' '+(+chosenScore).toFixed(2)+'</span>');
     }
-    if (e.difficulty_eff != null)
-      parts.push('<span class="pdim" title="'+esc(t('t_diff'))+'">'+esc(t('p_diff'))+' '+(+e.difficulty_eff).toFixed(1)+'</span>');
-    // 模型打标（决策时点：能力+价位）+ 网关评分 + 难度↔能力匹配（用户裁决）
-    const mt = e.model_tags || {};
-    if (mt.capability) {
-      const capLabel = {basic:t('cap_basic'), standard:t('cap_standard'), powerful:t('cap_powerful')}[mt.capability] || mt.capability;
-      parts.push('<span class="pbadge" title="'+esc(t('p_cap'))+'">'+esc(capLabel)+'</span>');
-    }
-    if (mt.price_tier) {
-      const priceLabel = {cheap:t('price_cheap'), medium:t('price_medium'), premium:t('price_premium')}[mt.price_tier] || mt.price_tier;
+  }
+  if ((e.reason||'').includes('[exploring]'))
+    parts.push('<span class="pbadge explore" title="'+esc(t('t_explore'))+'">'+esc(t('p_explore'))+'</span>');
+  const f = e.funnel || [];
+  if (f.length === 4 && f.some(x => x > 0)) {
+    const tip = t('t_funnel').replace('{a}',f[0]).replace('{b}',f[1]).replace('{c}',f[2]).replace('{d}',f[3]);
+    parts.push('<span class="pdim" title="'+esc(tip)+'">'+esc(t('p_funnel'))+' '+f.join('→')+'</span>');
+  }
+  if (e.tags && e.model_tags && e.model_tags.capability) {
+    const mt2 = e.model_tags;
+    const capLabel = {basic:t('cap_basic'), standard:t('cap_standard'), powerful:t('cap_powerful')}[mt2.capability] || mt2.capability;
+    parts.push('<span class="pbadge" title="'+esc(t('p_cap'))+'">'+esc(capLabel)+'</span>');
+    if (mt2.price_tier) {
+      const priceLabel = {cheap:t('price_cheap'), medium:t('price_medium'), premium:t('price_premium')}[mt2.price_tier] || mt2.price_tier;
       parts.push('<span class="pbadge" title="'+esc(t('p_price'))+'">'+esc(priceLabel)+'</span>');
-    }
-    const chosenScore = e.scores ? e.scores[e.chosen] : null;
-    if (chosenScore != null)
-      parts.push('<span class="pdim" title="'+esc(t('p_score'))+'">'+esc(t('p_score'))+' '+(+chosenScore).toFixed(2)+'</span>');
-    // 难度↔能力匹配：L1/L2/L3（≤0.8/≤2.0/>2.0）对照 基础/标准/旗舰
-    const dEff = e.difficulty_eff;
-    const capIdx = {basic:0, standard:1, powerful:2}[mt.capability];
-    if (dEff != null && capIdx != null) {
-      const dIdx = dEff <= 0.8 ? 0 : dEff <= 2.0 ? 1 : 2;
-      const matchTxt = dIdx === capIdx ? esc(t('p_match'))
-                     : capIdx > dIdx ? esc(t('m_over'))
-                     : esc(t('m_under'));
-      const cls = dIdx === capIdx ? 'pbadge' : 'pbadge warn';
-      parts.push('<span class="'+cls+'" title="'+esc(t('p_match'))+'">'+matchTxt+'</span>');
     }
   }
   const alts = (e.chain || []).filter(m => m !== e.chosen).slice(0, 2);
@@ -1040,13 +1090,16 @@ function renderAutopsy(e){
   // ① 任务画像（域中文化 + 徽章 tooltip）
   const jg = e.judgment || {};
   L.push('<div class="au-sec au-sec-t">'+esc(t('au_req'))+'</div>');
+  const tg = e.tags || null;
   const dk = T['dom_'+(jg.domain||'Other')];
-  const domLabel = dk ? (dk[lang] ?? dk.zh) : (jg.domain||'-');
+  const domLabel = tg && tg.domain ? wordOf(DOM_LABEL, tg.domain, tg.domain)
+                 : dk ? (dk[lang] ?? dk.zh) : (jg.domain||'-');
   L.push('<div>' +
     '<span class="au-badge hl" title="'+esc(t('au_tip_domain'))+'">'+esc(domLabel)+'</span>' +
-    '<span class="au-badge" title="'+esc(t('au_tip_diff'))+'">'+esc(t('p_diff'))+' '+(+(e.difficulty_eff||0)).toFixed(1)+'/3 · '+esc(diffLevel(+e.difficulty_eff||0))+'</span>' +
+    '<span class="au-badge" title="'+esc(t('t_tag_diff'))+'">'+esc(t('p_diff'))+' '+(+(e.difficulty_eff||0)).toFixed(1)+'/3 · '+esc(tg && tg.difficulty ? wordOf(DIFF_LABEL, tg.difficulty, '') : diffLevel(+e.difficulty_eff||0))+'</span>' +
     (e.est_tokens ? '<span class="au-badge" title="'+esc(t('au_tip_est'))+'">'+esc(t('p_est'))+' '+fmtK(e.est_tokens)+' tok</span>' : '') +
-    (jg.is_trivial >= 0.5 ? '<span class="au-badge" title="'+esc(t('au_tip_sticky'))+'">'+esc(t('p_sticky'))+'</span>' : '') +
+    ((tg ? (tg.flags||[]) : (jg.is_trivial >= 0.5 ? ['trivial'] : [])).map(fl =>
+      '<span class="au-badge" title="'+esc(t('t_fl_'+fl))+'">'+esc(t('fl_'+fl))+'</span>').join('')) +
     '</div>');
 
   // ② 双判官（来源 + 置信度 + 叙事）

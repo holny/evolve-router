@@ -1008,3 +1008,61 @@ async fn disabled_manual_provider_is_listed_for_restore() {
     assert!(row.get("quota").is_some());
     assert_eq!(row["available"], false, "disabled provider is not available");
 }
+
+// 派生标签契约（面板/网页单一事实源）：决策事件必须带 `tags`，键名 snake_case，
+// 取值由服务端 decision_tags 派生——客户端（Swift/JS）不再各自推导阈值与词表
+#[tokio::test]
+async fn event_carries_derived_tags() {
+    let port = spawn_mock_upstream().await;
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir()
+        .join(format!("mr-test-tags-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let app = build_router(build_state(cfg));
+
+    let (status, _h, raw) = send(
+        app.clone(),
+        chat_request("auto", json!("写一个快速排序"), json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {}", String::from_utf8_lossy(&raw));
+
+    // 事件落盘异步：轮询 /api/events 直到出现带 tags 的 chat 事件
+    let mut found: Option<Value> = None;
+    for _ in 0..40 {
+        let (s, _, ev_raw) = send(app.clone(), get("/api/events?limit=20")).await;
+        assert_eq!(s, StatusCode::OK);
+        let arr = json_body(&ev_raw);
+        if let Some(ev) = arr
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["kind"] == "chat" && e.get("tags").is_some()))
+        {
+            found = Some(ev.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let ev = found.expect("chat event carrying derived `tags` must be written");
+    let tg = &ev["tags"];
+    assert_no_camel(tg, "event.tags");
+    for k in ["difficulty", "domain", "flags", "mode", "fit"] {
+        assert!(tg.get(k).is_some(), "event.tags missing `{k}`: {tg}");
+    }
+    assert!(
+        matches!(
+            tg["mode"].as_str(),
+            Some("model" | "model+rules" | "reused" | "rules" | "pinned")
+        ),
+        "unexpected mode: {tg}"
+    );
+    assert!(
+        matches!(tg["difficulty"].as_str(), Some("easy" | "medium" | "hard")),
+        "unexpected difficulty: {tg}"
+    );
+    assert!(tg["flags"].is_array(), "flags must be an array: {tg}");
+    assert!(
+        matches!(tg["fit"].as_str(), Some("match" | "over" | "under") | None),
+        "unexpected fit: {tg}"
+    );
+}

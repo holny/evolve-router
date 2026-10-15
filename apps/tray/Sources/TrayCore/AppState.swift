@@ -2,15 +2,12 @@ import Foundation
 import SwiftUI
 
 public struct RecentDecision: Identifiable {
-    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil, domain: String? = nil, flags: [String] = [], decisionMode: String? = nil) {
+    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, capability: String? = nil, tags: DecisionTags? = nil) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
         self.preprocessMs = preprocessMs; self.decisionMs = decisionMs
         self.totalTokens = totalTokens; self.cachePct = cachePct; self.failReason = failReason
-        self.difficulty = difficulty; self.capability = capability
-        self.priceTier = priceTier; self.score = score
-        self.domain = domain; self.flags = flags
-        self.decisionMode = decisionMode
+        self.capability = capability; self.tags = tags
     }
     public let id = UUID()
     public let model: String
@@ -25,16 +22,36 @@ public struct RecentDecision: Identifiable {
     public let totalTokens: Int
     public let cachePct: Int?
     public let failReason: String?
-    /// 决策时点打标：任务难度（0-3）/ 模型能力 / 价位 / 网关评分
-    public let difficulty: Double?
+    /// 模型能力档位（服务端 model_tags，决策时点快照）
     public let capability: String?
-    public let priceTier: String?
-    public let score: Double?
-    /// 网关对请求本身的判定：任务域 + 命中特征（trivial/tools/vision/stakes）
+    /// 服务端派生判定标签（难度/域/特征/来源/匹配）——单一事实源
+    public let tags: DecisionTags?
+}
+
+/// 事件里的 `tags`（evo-server/src/decision_tags.rs 派生）：面板只渲染，不重算
+public struct DecisionTags: Equatable {
+    public let difficulty: String?
     public let domain: String?
     public let flags: [String]
-    /// 决策来源（非默认路径才标）：reused=会话粘性复用（无决策调用）/ rules=规则引擎兜底
-    public let decisionMode: String?
+    public let mode: String?
+    public let fit: String?
+    public init(difficulty: String?, domain: String?, flags: [String], mode: String?, fit: String?) {
+        self.difficulty = difficulty; self.domain = domain
+        self.flags = flags; self.mode = mode; self.fit = fit
+    }
+    public init?(json: [String: Any]?) {
+        guard let json else { return nil }
+        let mode = json["mode"] as? String
+        let diff = json["difficulty"] as? String
+        let dom = json["domain"] as? String
+        let fit = json["fit"] as? String
+        if mode == nil && diff == nil && dom == nil { return nil }
+        self.difficulty = diff
+        self.domain = dom
+        self.flags = (json["flags"] as? [String]) ?? []
+        self.mode = mode
+        self.fit = fit
+    }
 }
 
 public struct PaygBalance: Equatable {
@@ -145,7 +162,7 @@ public final class AppState: ObservableObject {
     @Published public var statWindowToday = true
     /// Providers 卡维度：false = Provider（默认），true = Model（逐模型统计）
     @Published public var modelDim = false
-    /// Model 维度行（当前窗口、按 tokens 降序、top 8）
+    /// Model 维度行（当前窗口、按 tokens 降序、前 6 行）
     @Published public var modelRows: [ModelRow] = []
     /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
     @Published public var modelTagMap: [String: (String, String)] = [:]
@@ -244,7 +261,7 @@ public final class AppState: ObservableObject {
             tokensK = Self.fmtTok(toks)
         }
         // Model 维度行（Providers 卡 Model 标签）：同一窗口的逐模型指标，
-        // 与 Provider 行同布局，按 tokens 降序 top 8
+        // 与 Provider 行同布局，按 tokens 降序前 6 行
         var mrows: [ModelRow] = []
         for (mid, msAny) in models {
             guard let ms = msAny as? [String: Any] else { continue }
@@ -417,61 +434,24 @@ public final class AppState: ObservableObject {
                         failReason = causes.prefix(2).joined(separator: " / ")
                     }
                 }
-                // 决策时点打标：难度 / 模型能力 / 价位 / 网关评分（事件同帧落库）
-                let judgment = ev["judgment"] as? [String: Any]
-                var difficulty = (judgment?["difficulty"] as? Double)
-                    ?? ((judgment?["difficulty"] as? Int).map(Double.init))
-                // 对请求本身的判定：任务域 + 命中特征（阈值 0.6，与评分口径一致）
-                var domain = Self.shortDomain(judgment?["domain"] as? String)
-                let f = { (k: String) -> Bool in
-                    let v = (judgment?[k] as? Double) ?? ((judgment?[k] as? Int).map(Double.init)) ?? 0
-                    return v > 0.6
-                }
-                var flags: [String] = []
-                if f("is_trivial") { flags.append("trivial") }
-                if f("tool_heavy") { flags.append("tools") }
-                if f("needs_vision") { flags.append("vision") }
-                if f("high_stakes") { flags.append("stakes") }
-                // 决策来源（互斥，5 条都标；短词好懂）：model / model+rules 走了决策模型，
-                // reused（粘性复用）/ rules（规则兜底）/ pinned（显式指定）则没有
-                let sticky = (ev["sticky"] as? Bool) ?? false
-                let judgeSrc = (ev["judge"] as? String) ?? ""
-                let mode: String? = sticky ? "reused"
-                    : (judgeSrc == "heuristic" ? "rules"
-                    : (judgeSrc == "explicit" ? "pinned"
-                    : (judgeSrc == "decision_model" ? "model"
-                    : (judgeSrc == "decision_model+rules" ? "model+rules" : nil))))
-                // ⚠ 粘性复用/显式指定是**空判定**（服务端占位：difficulty=0、flags=0，
-                // sticky 的 domain 直接沿用上轮）→ 展示会变成"easy/code"这种没判过的结论。
-                // Web 端同口径：这类请求只出 mode 徽章，判定标签整块不出
-                if mode == "reused" || mode == "pinned" {
-                    difficulty = nil; domain = nil; flags = []
-                }
+                // 判定标签全部由服务端派生（decision_tags.rs）——面板不做阈值/词表推导，
+                // 避免与 Web（父级）各算一套导致口径漂移（用户裁决 2026-10）
                 let modelTags = ev["model_tags"] as? [String: Any]
-                let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
-                    ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
+                let tags = DecisionTags(json: ev["tags"] as? [String: Any])
                 decRows.append(RecentDecision(
                     model: model, status: status, totalMs: total,
                     ttftMs: ttft > 0 ? ttft : nil, tokS: tokS,
                     agent: agent, time: time,
                     preprocessMs: pre, decisionMs: dec,
                     totalTokens: totalTok, cachePct: cachePct, failReason: failReason,
-                    difficulty: difficulty,
                     capability: modelTags?["capability"] as? String,
-                    priceTier: modelTags?["price_tier"] as? String,
-                    score: score,
-                    domain: domain,
-                    flags: flags,
-                    decisionMode: mode))
+                    tags: tags))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 4 { break }
             }
             recent = decRows
-            if let newest = arr.last(where: { ($0["kind"] as? String) == "chat" }) {
-                let status = (newest["status"] as? Int) ?? Int((newest["status"] as? Double) ?? 0)
-                // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
-            }
+            // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
         }
         lastSync = Date()
     }
@@ -493,26 +473,6 @@ public final class AppState: ObservableObject {
         let ms = ((ts as? Double) ?? 0) / 1000
         guard ms > 0 else { return "--:--:--" }
         return Self.tsFmt.string(from: Date(timeIntervalSince1970: ms))
-    }
-
-    /// 难度标签（难度 0-3 → easy/medium/hard；具体档位靠文字，颜色只表示类别=难度）
-    static func diffLabel(_ d: Double) -> String {
-        d <= 0.8 ? "easy" : d <= 2.0 ? "medium" : "hard"
-    }
-
-    /// 任务域 → 面板短词（judgment.domain 是 snake_case 枚举名）
-    static func shortDomain(_ raw: String?) -> String? {
-        switch raw {
-        case "code": return "code"
-        case "math_logic": return "math"
-        case "data": return "data"
-        case "agent_ops": return "agent"
-        case "writing": return "writing"
-        case "lookup": return "lookup"
-        case "chitchat": return "chat"
-        case "other": return "other"
-        default: return nil
-        }
     }
 
     /// 速率缩写（t/s 数值部分）：30000 → "30.0k"，1.2M → "1.2M"，92 → "92"

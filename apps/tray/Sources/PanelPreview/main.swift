@@ -13,9 +13,11 @@ enum PanelPreview {
         state.tokensK = "780.4k"
         state.recent = [
             RecentDecision(model: "opencode-go-github/glm-5.3", status: 200, totalMs: 13_540, ttftMs: 5_012, tokS: 92.4, agent: "opencode", time: "22:58",
-                           difficulty: 2.4, capability: "powerful", domain: "code", flags: ["tools", "stakes"], decisionMode: "reused"),
+                           capability: "powerful",
+                           tags: DecisionTags(difficulty: "hard", domain: "code", flags: ["tools", "stakes"], mode: "model+rules", fit: "match")),
             RecentDecision(model: "zhipuai-coding-plan/glm-5.3", status: 500, totalMs: 8_214, ttftMs: 4_410, tokS: nil, agent: "pi", time: "22:41",
-                           difficulty: 0.4, capability: "basic", domain: "chat", flags: [], decisionMode: "model+rules"),
+                           capability: "basic",
+                           tags: DecisionTags(difficulty: nil, domain: nil, flags: [], mode: "reused", fit: nil)),
         ]
         state.providers = [
             ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, tokens24h: 92_000, planKind: "go"),

@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod config;
+pub mod decision_tags;
 pub mod identity;
 pub mod meta;
 pub mod quality;

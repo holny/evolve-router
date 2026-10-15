@@ -680,12 +680,19 @@ pub async fn chat_completions(
                 {
                     let snap = st.engine.catalog_snapshot();
                     let tags = crate::meta::tags_for_catalog(&st, &snap);
+                    let cap_label = tags.get(&decision.chosen).map(|(cap, _)| cap.label());
                     ex["model_tags"] = match tags.get(&decision.chosen) {
                         Some((cap, price)) => json!({
                             "capability": cap.label(), "price_tier": price.label(),
                         }),
                         None => json!(null),
                     };
+                    // 派生标签（难度/域/特征/判定来源/匹配）单一事实源：面板与 Web 只渲染
+                    ex["tags"] = crate::decision_tags::derive(
+                        &decision.judgment,
+                        cap_label,
+                        decision.sticky,
+                    );
                 }
                 if cross {
                     ex["translated"] = json!("anthropic->openai");

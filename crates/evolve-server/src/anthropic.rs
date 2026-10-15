@@ -372,15 +372,19 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         decision.id = format!("{}-{}", decision.id, skipped.len());
 
         // 决策时点的模型打标（能力+价位）：与 Web 面板同源
-        let model_tags = {
+        let (model_tags, derived_tags) = {
             let snap = st.engine.catalog_snapshot();
             let tags = crate::meta::tags_for_catalog(&st, &snap);
-            match tags.get(&decision.chosen) {
+            let cap_label = tags.get(&decision.chosen).map(|(cap, _)| cap.label());
+            let mt = match tags.get(&decision.chosen) {
                 Some((cap, price)) => json!({
                     "capability": cap.label(), "price_tier": price.label(),
                 }),
                 None => json!(null),
-            }
+            };
+            // 派生标签（难度/域/特征/判定来源/匹配）单一事实源：面板与 Web 只渲染
+            let dt = crate::decision_tags::derive(&decision.judgment, cap_label, decision.sticky);
+            (mt, dt)
         };
         let telem = std::sync::Arc::new(std::sync::Mutex::new(crate::stream::Telemetry {
             decision_id: decision.id.clone(),
@@ -414,6 +418,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 "filtered": decision.filtered,
                 "funnel": decision.funnel,
                 "model_tags": model_tags,
+                "tags": derived_tags,
             })),
         }));
 
