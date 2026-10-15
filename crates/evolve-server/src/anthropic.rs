@@ -124,7 +124,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     // 胜出队列（与 relay 同规则）：chain 按序尝试，失败顺延；不可重试错误当场剔除；
     // 队列上限 min(fallback_depth, 5)，整体失败或为空后才走队列外 sweep 段。
     const WINNER_QUEUE_MAX: usize = 5;
-    let (attempts, sweep_from): (Vec<String>, usize) = match &target {
+    let (mut attempts, sweep_from): (Vec<String>, usize) = match &target {
         Target::Auto(_) => {
             let queue_max =
                 (st.config.policy.fallback_depth.max(3) as usize).min(WINNER_QUEUE_MAX);
@@ -150,6 +150,26 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         }
         Target::Direct(_) => (vec![decision.chosen.clone()], usize::MAX),
     };
+
+    // 全灭兜底（用户裁决 2026-10）：配额被硬滤（剩余不足/耗尽）的模型排
+    // 最后——主链+清扫全灭后再试一轮（学习到的配额可能过期/已重置，
+    // 死马当活马医，延迟换成功率）。去重、上限 6。
+    if !attempts.is_empty() {
+        let mut retry: Vec<String> = Vec::new();
+        for f in &decision.filtered {
+            if f.cause.starts_with("quota remaining")
+                && !attempts.iter().any(|a| a == &f.model)
+                && !retry.contains(&f.model)
+                && retry.len() < 6
+            {
+                retry.push(f.model.clone());
+            }
+        }
+        if !retry.is_empty() {
+            tracing::info!(models = ?retry, "quota-filtered models appended as last-resort");
+            attempts.extend(retry);
+        }
+    }
 
     let mut skipped: Vec<String> = Vec::new();
     let mut last_error: Option<(StatusCode, Bytes)> = None;

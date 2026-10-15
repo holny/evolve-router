@@ -9,6 +9,7 @@ pub struct HealthRegistry {
     inner: Mutex<HashMap<String, HealthEntry>>,
 }
 
+#[derive(Clone)]
 pub struct Failure {
     pub kind: HealthKind,
     pub message: String,

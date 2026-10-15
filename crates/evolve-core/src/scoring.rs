@@ -44,6 +44,13 @@ pub fn quality_floor(difficulty_eff: f32) -> f32 {
 /// 实际加成随方案消耗率线性衰减（见 engine 的配额头寸处理），越接近软阈值越小。
 pub const PLAN_QUOTA_BONUS: f32 = 0.05;
 
+/// 近期使用偏好上限（用户裁决 2026-10，缓存前缀亲和）：同难度层内优先复用
+/// 近期用过的模型（prompt 缓存前缀仍热），减少模型跳变。加成随时长线性衰减
+/// （窗口 2h），上限 5% —— 不干扰"简单任务用便宜模型"的大原则（难度闸与
+/// 成本权重不变）。
+pub const RECENCY_BONUS: f32 = 0.05;
+pub const RECENCY_WINDOW_MS: u64 = 2 * 3600 * 1000;
+
 /// 难度-费用联动（用户裁决：简单任务用便宜模型，复杂任务可以用贵的模型）。
 /// 难度 0：成本权重 ×2、质量权重 ×0.75（省钱优先）；
 /// 难度 3：成本权重 ×0.4、质量权重满额（成本让位，质量主导）。
@@ -287,6 +294,20 @@ pub fn score_all_tiered(
                 .unwrap_or(1.0)
                 .clamp(0.7, 1.3);
             score *= (user_w * bias).sqrt().clamp(0.4, 1.8);
+            // 近期使用偏好（缓存前缀亲和，见 RECENCY_BONUS）：同层内优先复用
+            // 近期用过的模型，减少跳变；加成随窗口内时长线性衰减
+            if let Some(latest_ts) = telemetry
+                .get(&m.id)
+                .and_then(|t| t.recent.as_ref())
+                .and_then(|r| r.last())
+                .map(|s| s.ts)
+                .filter(|ts| *ts > 0)
+            {
+                let age = crate::engine::now_epoch_ms().saturating_sub(latest_ts);
+                if age < RECENCY_WINDOW_MS {
+                    score *= 1.0 + RECENCY_BONUS * (1.0 - age as f32 / RECENCY_WINDOW_MS as f32);
+                }
+            }
             CandidateScore { model_id: m.id.clone(), score, q, s, c, r, h, uw: user_w, bias, qp: 1.0 }
         })
         .collect();
@@ -418,6 +439,51 @@ mod difficulty_cost_tests {
         let mid = difficulty_weights(&PolicyWeights::balanced(), 1.5)[2];
         let hi = difficulty_weights(&PolicyWeights::balanced(), 3.0)[2];
         assert!(lo > mid && mid > hi, "lo={lo} mid={mid} hi={hi}");
+    }
+
+    /// 近期使用偏好（缓存前缀亲和，用户裁决 2026-10）：同分候选中近期用过的
+    /// 获得小幅加成（减少跳变），幅度 <6%
+    #[test]
+    fn recency_prefers_recently_used_model() {
+        use crate::types::{ModelTelemetry, ReqSample};
+        let now = crate::engine::now_epoch_ms();
+        let mk = |id: &str| ModelRecord {
+            id: id.into(),
+            provider: "zhipu".into(),
+            base_url: "https://open.bigmodel.cn/api/coding/paas/v4".into(),
+            api_key: Some("k".into()),
+            upstream_model: id.into(),
+            context_window: Some(1_000_000),
+            max_output: 4096,
+            plan: true,
+            tiers: Tiers { reasoning: 0.8, coding: 0.8, vision: 0.0, agentic: 0.8 },
+            speed_tier: 0.5,
+            source: Source::User,
+            ..Default::default()
+        };
+        let cands = vec![mk("plan-a"), mk("plan-b")];
+        let j = judge(Domain::Code, 1.0);
+        let w = PolicyWeights {
+            quality: 0.35, speed: 0.15, cost: 0.25, stability: 0.15, headroom: 0.10,
+        };
+        let mut tel = TelemetrySnapshot::new();
+        tel.insert(
+            "plan-a".into(),
+            ModelTelemetry {
+                recent: Some(vec![ReqSample {
+                    ts: now, ttft_ms: 100, total_ms: 400,
+                    in_tok: 10, cached_tok: 0, out_tok: 5,
+                    ok: true, tools_total: 0, tools_ok: 0,
+                }]),
+                ..Default::default()
+            },
+        );
+        let refs: Vec<&ModelRecord> = cands.iter().collect();
+        let scores = score_all(&refs, &j, 1.0, 10_000, 4_000, &w, &tel);
+        let sa = scores.iter().find(|s| s.model_id == "plan-a").unwrap().score;
+        let sb = scores.iter().find(|s| s.model_id == "plan-b").unwrap().score;
+        assert!(sa > sb, "recently used model gets the affinity bonus: {sa} vs {sb}");
+        assert!(sa / sb < 1.06, "bonus must stay small (<6%): {sa} vs {sb}");
     }
 }
 

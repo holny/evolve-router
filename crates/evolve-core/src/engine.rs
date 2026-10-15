@@ -321,6 +321,8 @@ impl Engine {
             },
         };
         let mut filtered: Vec<FilteredOut> = Vec::new();
+        // 配额紧张（软排序）：0 < 剩余 < est 的候选保留但降权（id, remaining, est）
+        let mut quota_tight: Vec<(String, u64, u64)> = Vec::new();
         let mut candidates: Vec<ModelRecord> = Vec::new();
         let now = now_epoch_ms();
         for m in &catalog_models {
@@ -403,14 +405,21 @@ impl Engine {
                     continue;
                 }
             }
-            if let Some(remaining) = input.quota.get(&m.id)
-                && *remaining < m_est {
+            // 配额过滤（用户裁决 2026-10 软化）：剩余 0（实锤耗尽）→ 硬滤；
+            // 0 < 剩余 < est → **保留候选但标记配额紧张**（评分后按充足度降权，
+            // est 超大时降权而非出局——避免大上下文会话全灭）
+            if let Some(remaining) = input.quota.get(&m.id) {
+                if *remaining == 0 {
                     filtered.push(FilteredOut {
                         model: m.id.clone(),
-                        cause: format!("quota remaining {remaining} < est {m_est}"),
+                        cause: "quota remaining 0 (exhausted)".into(),
                     });
                     continue;
                 }
+                if *remaining < m_est {
+                    quota_tight.push((m.id.clone(), *remaining, m_est));
+                }
+            }
             if let Err(cause) = scoring::context_fits(m, m_est, max_output) {
                 filtered.push(FilteredOut { model: m.id.clone(), cause: cause.into() });
                 continue;
@@ -626,6 +635,17 @@ impl Engine {
         let mut scores = scoring::score_all_tiered(
             &eligible.iter().collect::<Vec<_>>(), &j, difficulty_eff, est, est_output, &eff_policy,
             input.telemetry, input.price_tier_of, &tier_penalty);
+        // 配额紧张降权（用户裁决 2026-10，软排序替代硬过滤）：0 < 剩余 < est 的
+        // 候选保留在池内，但按充足度压分——剩余/est 比例越低压得越狠（0.25x
+        // 下限），est 覆盖得住则无惩罚。避免大上下文会话因配额硬滤全灭。
+        for s in scores.iter_mut() {
+            if let Some((_, remaining, m_est)) =
+                quota_tight.iter().find(|(id, _, _)| id == &s.model_id)
+            {
+                let fit = (*remaining as f32 / *m_est as f32).clamp(0.05, 1.0);
+                s.score *= 0.25 + 0.75 * fit;
+            }
+        }
         // 订阅方案预算软降权（用户裁决：配额宝贵，别让一个会话烧光）：
         // 消耗超软阈值后按超出幅度压分，难度越高压制越轻（硬任务保留好模型）
         let soft = self.policy.plan_soft_pct.clamp(10.0, 95.0) / 100.0;

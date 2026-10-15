@@ -235,7 +235,7 @@ pub async fn chat_completions(
     // 上限 = min(fallback_depth, WINNER_QUEUE_MAX)；队列整体失败或为空后，才尝试
     // 队列外模型（sweep 段，评分序 + 目录长尾，防单点大面积不可用）。
     const WINNER_QUEUE_MAX: usize = 5;
-    let (attempts, sweep_from): (Vec<String>, usize) = match &target {
+    let (mut attempts, sweep_from): (Vec<String>, usize) = match &target {
         Target::Auto(_) => {
             let queue_max =
                 (st.config.policy.fallback_depth.max(3) as usize).min(WINNER_QUEUE_MAX);
@@ -263,6 +263,26 @@ pub async fn chat_completions(
         }
         Target::Direct(_) => (vec![decision.chosen.clone()], usize::MAX),
     };
+
+    // 全灭兜底（用户裁决 2026-10）：配额被硬滤（剩余不足/耗尽）的模型排
+    // 最后——主链+清扫全灭后再试一轮（学习到的配额可能过期/已重置，
+    // 死马当活马医，延迟换成功率）。去重、上限 6。
+    if !attempts.is_empty() {
+        let mut retry: Vec<String> = Vec::new();
+        for f in &decision.filtered {
+            if f.cause.starts_with("quota remaining")
+                && !attempts.iter().any(|a| a == &f.model)
+                && !retry.contains(&f.model)
+                && retry.len() < 6
+            {
+                retry.push(f.model.clone());
+            }
+        }
+        if !retry.is_empty() {
+            tracing::info!(models = ?retry, "quota-filtered models appended as last-resort");
+            attempts.extend(retry);
+        }
+    }
 
     let mut skipped: Vec<String> = Vec::new();
     let mut last_error: Option<(StatusCode, Bytes)> = None;
@@ -539,6 +559,18 @@ pub async fn chat_completions(
                     st.quota.gate_mark_limited(provider_name, api_backed, reset_ms, evolve_memory::quota::now_ms());
                 }
             }
+            // skip 标签：api-backed 配额型失败不落健康冷却（watchdog/API 复核
+            // 接管）——标签改用失败类别 + api 标注，避免空括号
+            let kind_label = if api_backed_quota {
+                format!("{} (api-backed)", failure.kind.label())
+            } else {
+                st.health.mark_failure(&health_id, failure.clone());
+                st.health
+                    .snapshot()
+                    .get(&health_id)
+                    .map(|h| h.kind.label().to_string())
+                    .unwrap_or_default()
+            };
             if api_backed_quota {
                 // 立即用官方 API 复核（异步；gate 由 API 数据接管，不落健康冷却）
                 let st2 = st.clone();
@@ -550,13 +582,7 @@ pub async fn chat_completions(
                         &st2, &key_name, &bu, &pk_now, None, evolve_memory::quota::now_ms(),
                     ).await;
                 });
-            } else {
-                st.health.mark_failure(&health_id, failure);
             }
-            let kind_label = {
-                let snap = st.health.snapshot();
-                snap.get(&health_id).map(|h| h.kind.label().to_string()).unwrap_or_default()
-            };
             skipped.push(format!("{cand}[{key_idx}]({kind_label})"));
             last_error = Some((map_status(status), err_body));
             continue; // next key in pool, then next candidate
