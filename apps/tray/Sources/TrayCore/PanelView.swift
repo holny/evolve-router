@@ -29,7 +29,11 @@ public struct PanelView: View {
             if !state.providers.isEmpty || !state.recent.isEmpty { tagLegend }
             controls
         }
-        .padding(14)
+        // 页脚（控制区）与页头留白对齐：菜单栏窗口底部无系统内边距，
+        // 与页头同值时按钮会贴住下边框（实测页头 15pt / 页脚 8pt）→ 页脚加宽
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 20)
         .frame(width: 336)
         .task {
             await state.pollLive()
@@ -648,20 +652,17 @@ public struct PanelView: View {
     static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
 
-    /// 标签颜色说明：色卡 = 类别（左：request 标签 / 右：model 标签），括号内 = 该类别的取值
-    /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 释义必须直接可见
+    /// 标签颜色说明：色卡 = 类别名（左：request 标签 / 右：model 标签）
+    /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 不再赘述取值，
+    /// 取值本身就在胶囊里（easy/medium/hard、0.99、match/over/under …）
     private var tagLegend: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            HStack(spacing: 8) {
-                legendItem(Self.tagColorDiff, "difficulty", "easy/medium/hard")
-                legendItem(Self.tagColorScore, "score", "0-1")
-                legendItem(Self.tagColorFit, "fit", "match/over/under")
-            }
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                legendItem(Self.tagColorCap, "capability", "basic/standard/powerful")
-                legendItem(Self.tagColorPrice, "price", "cheap/medium/premium")
-            }
+        HStack(spacing: 8) {
+            legendItem(Self.tagColorDiff, "difficulty")
+            legendItem(Self.tagColorScore, "score")
+            legendItem(Self.tagColorFit, "fit")
+            Spacer(minLength: 8)
+            legendItem(Self.tagColorCap, "capability")
+            legendItem(Self.tagColorPrice, "price")
         }
         .font(.system(size: 8.5))
         .lineLimit(1)
@@ -669,11 +670,10 @@ public struct PanelView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func legendItem(_ c: Color, _ label: String, _ values: String) -> some View {
+    private func legendItem(_ c: Color, _ label: String) -> some View {
         HStack(spacing: 3) {
             Circle().fill(c.opacity(0.6)).frame(width: 6, height: 6)
-            Text(label).foregroundStyle(.secondary)
-            Text(values).foregroundStyle(.tertiary)
+            Text(label).foregroundStyle(.tertiary)
         }
         .help(Self.tagHelp(label))
     }
