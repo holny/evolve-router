@@ -236,15 +236,13 @@ public struct PanelView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                             // 标签约定（用户裁决）：颜色只表示"类别"，胶囊内的字表示"该类别的哪个值"
-                            // → 与色卡一一对应，此处只出决策级标签（difficulty / score / fit）
-                            if r.difficulty != nil || r.score != nil {
+                            // → 与色卡一一对应，此处只出决策级标签（difficulty / fit）
+                            // score 不在此展示：单点分数无误导性的对比作用（用户裁决）
+                            if r.difficulty != nil {
                                 HStack(spacing: 3) {
                                     if let d = r.difficulty {
                                         tagPill(AppState.diffLabel(d), tint: Self.tagColorDiff,
                                                 bg: Self.tagColorDiff.opacity(0.15), help: Self.tagHelpDiff)
-                                    }
-                                    if let sc = r.score {
-                                        tagPill(String(format: "%.2f", sc), help: Self.tagHelpScore)
                                     }
                                     let capMap = ["basic": 0, "standard": 1, "powerful": 2]
                                     if let cap = r.capability, let d = r.difficulty,
@@ -658,7 +656,6 @@ public struct PanelView: View {
     private var tagLegend: some View {
         HStack(spacing: 8) {
             legendItem(Self.tagColorDiff, "difficulty")
-            legendItem(Self.tagColorScore, "score")
             legendItem(Self.tagColorFit, "fit")
             Spacer(minLength: 8)
             legendItem(Self.tagColorCap, "capability")
