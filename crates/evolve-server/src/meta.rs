@@ -875,7 +875,8 @@ fn provider_health(
 
 /// 配额窗口派生（单一事实源）：官方 observed 实测优先，本地 5h 用量估算兜底。
 /// 返回 `(逐窗, 绑定窗口)`。窗口固定 5h/weekly/monthly；weekly 兼容 `7d` 键名
-/// （Anthropic 系把周窗写成 7d）。绑定窗口 = 用量最高者；有窗口实测耗尽时
+/// （Anthropic 系把周窗写成 7d）。绑定窗口 = 用量最高者（全 0% 时取首个，
+/// 保证只要声明过额度就有 scope，客户端不会回落 "payg" 文案）；有窗口实测耗尽时
 /// exhausted=true、reset 取耗尽窗口里最长的恢复时间。
 /// 客户端（macOS 面板 / web 面板）只渲染，不再各自计算——此前两端各写一份，
 /// 已多次出现口径漂移。
@@ -903,11 +904,12 @@ fn derive_quota(observed: &Value, windows: &Value, used_5h: f64) -> (Value, Valu
             }));
             continue;
         }
-        // 估算：本地 5h 用量 × 窗口系数 ÷ 声明额度（无用量/无额度则不出该窗）
+        // 估算：本地 5h 用量 × 窗口系数 ÷ 声明额度。**有声明额度即出窗**（用量为 0
+        // 时显示 0%）——窗口本身标识"这是订阅方案"，缺了它面板只能回落到 "payg"
+        // 文案，把 plan 误标成按量（volcengine 这类仅有响应头、无官方端点的 provider
+        // 一旦被配额闸挡下，观测值 5 分钟即过期 → 曾因此整块显示成 payg）。
         let allowance = windows.get(scope).and_then(|v| v.as_f64()).filter(|a| *a > 0.0);
-        if let Some(a) = allowance
-            && used_5h > 0.0
-        {
+        if let Some(a) = allowance {
             let used = used_5h * sim;
             per.insert(scope.to_string(), json!({
                 "used_pct": ((used / a) * 100.0).round().clamp(0.0, 100.0),
@@ -916,7 +918,10 @@ fn derive_quota(observed: &Value, windows: &Value, used_5h: f64) -> (Value, Valu
             }));
         }
     }
-    let mut b_used = 0.0f64;
+    // 绑定窗口 = 用量最高者；初值 -1 保证"有窗就选一个"（全 0% 时取首个=5h），
+    // 否则 scope 为 null → 客户端回落 "payg" 文案。有实测耗尽时 exhausted=true、
+    // reset 取耗尽窗口里最长的恢复时间。
+    let mut b_used = -1.0f64;
     let mut b_scope = Value::Null;
     let mut exhausted = false;
     let mut b_reset: Option<f64> = None;
@@ -1469,7 +1474,18 @@ fn observed_for_provider(quota: &std::sync::Arc<evolve_memory::quota::QuotaLedge
     if provider.is_empty() { return json!({}) };
     let mut out = serde_json::Map::new();
     for scope in ["5h", "7d", "tokens", "requests", "weekly", "monthly"] {
-        if let Some(w) = quota.observed_window(provider, scope, now_ms, 5 * 60 * 1000) {
+        // 常规 5 分钟新鲜度；**额外**放宽到"耗尽且 reset 未到"的陈旧观测——
+        // 仅有响应头、无官方端点可查的 provider（如 volcengine）一旦被配额闸挡下就
+        // 不再发请求 → 永无新响应头 → 5 分钟后观测过期，面板会忘掉"该窗口已耗尽"
+        // （反馈闭环）。reset 一到即自然失效（那时也确实该重新探活）。
+        let fresh = quota.observed_window(provider, scope, now_ms, 5 * 60 * 1000);
+        let stale_exhausted = || {
+            quota.observed_window(provider, scope, now_ms, u64::MAX).filter(|w| {
+                w.remaining == Some(0)
+                    && w.reset_epoch_ms.map(|r| r > now_ms).unwrap_or(false)
+            })
+        };
+        if let Some(w) = fresh.or_else(stale_exhausted) {
             out.insert(scope.into(), json!({
                 // remaining=0 且 reset 未到 → 窗口对抗（provider 明示该窗口耗尽）
                 "exhausted": w.remaining == Some(0),
@@ -2920,6 +2936,18 @@ mod quota_derive_tests {
         let (per, binding) = derive_quota(&json!({}), &json!({}), 0.0);
         assert_eq!(per.as_object().unwrap().len(), 0);
         assert!(binding["scope"].is_null());
+        assert_eq!(binding["exhausted"], false);
+    }
+
+    /// 有声明额度但无 observed、5h 用量为 0：仍须出窗并给出 scope——否则客户端
+    /// 拿不到窗口只能回落 "payg" 文案，把订阅方案误标成按量（volcengine 实测回归）
+    #[test]
+    fn declared_allowance_alone_still_yields_a_window() {
+        let (per, binding) = derive_quota(&json!({}), &json!({"5h": 12000.0, "weekly": 60000.0}), 0.0);
+        assert_eq!(per["5h"]["used_pct"], 0.0);
+        assert_eq!(per["5h"]["source"], "estimate");
+        assert_eq!(per["weekly"]["used_pct"], 0.0);
+        assert_eq!(binding["scope"], "5h", "全 0% 时绑定首个窗口（5h），不得为 null");
         assert_eq!(binding["exhausted"], false);
     }
 }
