@@ -217,7 +217,7 @@ public struct PanelView: View {
                                         .help("upstream time-to-first-token")
                                 }
                                 if let s = r.tokS, s > 0 {
-                                    Text(String(format: "%.0f t/s", s))
+                                    Text(AppState.fmtRate(s) + " t/s")
                                         .help("generation speed")
                                 }
                                 if r.totalTokens > 0 {
@@ -330,7 +330,7 @@ public struct PanelView: View {
                             .monospacedDigit()
                     }
                     if let rt = m.rate, rt > 0 {
-                        Text(String(format: "%.0f t/s", rt))
+                        Text(AppState.fmtRate(rt) + " t/s")
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()
@@ -379,7 +379,7 @@ public struct PanelView: View {
                             .monospacedDigit()
                     }
                     if let rt = p.avgRate, rt > 0 {
-                        Text(String(format: "%.0f t/s", rt))
+                        Text(AppState.fmtRate(rt) + " t/s")
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
                             .monospacedDigit()

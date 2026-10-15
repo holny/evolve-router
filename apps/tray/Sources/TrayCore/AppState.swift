@@ -418,6 +418,13 @@ public final class AppState: ObservableObject {
         return Self.tsFmt.string(from: Date(timeIntervalSince1970: ms))
     }
 
+    /// 速率缩写（t/s 数值部分）：30000 → "30.0k"，1.2M → "1.2M"，92 → "92"
+    public static func fmtRate(_ v: Double) -> String {
+        v >= 1_000_000 ? String(format: "%.1fM", v / 1e6)
+          : v >= 1_000 ? String(format: "%.1fk", v / 1e3)
+          : String(format: "%.0f", v)
+    }
+
     public static func fmtTok(_ n: Int) -> String {
         n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6)
           : n >= 1_000 ? String(format: "%.1fk", Double(n) / 1e3)

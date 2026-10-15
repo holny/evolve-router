@@ -938,7 +938,8 @@ function feedMetrics(e){
   if (e.ttft_ms != null) parts.push('<span>TTFT '+fmtMs(e.ttft_ms)+'</span>');
   if (e.ttft_ms != null && e.total_ms > e.ttft_ms && (e.completion_tokens||0) > 0) {
     const rate = e.completion_tokens / ((e.total_ms - e.ttft_ms) / 1000);
-    parts.push('<span title="'+esc(t('t_rate_f'))+'">'+rate.toFixed(1)+' tok/s</span>');
+    const rTxt = rate >= 1000 ? (rate/1000).toFixed(1)+'k' : rate.toFixed(1);
+    parts.push('<span title="'+esc(t('t_rate_f'))+'">'+rTxt+' tok/s</span>');
   }
   if ((e.prompt_tokens||0) > 0 && e.cached_tokens)
     parts.push('<span title="'+esc(t('t_cache_util'))+'">'+esc(t('f_cache_util'))+' '+Math.round(100*e.cached_tokens/e.prompt_tokens)+'%</span>');
@@ -1892,7 +1893,7 @@ function renderTrends(){
   const metrics = [
     {k:'ttft',  label:'t_ttft',  pick: p => p.ttft || null,  fmt: v => fmtMs(v)},
     {k:'total', label:'t_total', pick: p => p.total || null, fmt: v => fmtMs(v)},
-    {k:'rate',  label:'t_rate',  pick: p => p.tok_s || null, fmt: v => v+' t/s'},
+    {k:'rate',  label:'t_rate',  pick: p => p.tok_s || null, fmt: v => (v>=1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(1))+' t/s'},
     {k:'cache', label:'t_cache', pick: p => (p.tools_total ? p.cache_pct : null), fmt: v => v+'%'},
     {k:'tools', label:'t_tools', pick: p => (p.tools_total ? p.tools_pct : null), fmt: v => v+'%'},
   ];
