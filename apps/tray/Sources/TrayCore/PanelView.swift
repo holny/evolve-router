@@ -235,21 +235,22 @@ public struct PanelView: View {
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
-                            // 标签约定（用户裁决）：颜色只表示"类别"，胶囊内的字表示"该类别的哪个值"
-                            // → 与色卡一一对应，此处只出决策级标签（difficulty / fit）
-                            // score 不在此展示：单点分数无误导性的对比作用（用户裁决）
-                            if r.difficulty != nil {
+                            // Recent 行 = 网关**对这道请求的判定**（用户裁决）：颜色=类别，
+                            // 胶囊里的字=取值。模型侧标签（capability/price/fit）只在 Model 列表；
+                            // score 不展示（单点分数没有对比作用）
+                            if r.difficulty != nil || r.domain != nil || !r.flags.isEmpty {
                                 HStack(spacing: 3) {
                                     if let d = r.difficulty {
                                         tagPill(AppState.diffLabel(d), tint: Self.tagColorDiff,
                                                 bg: Self.tagColorDiff.opacity(0.15), help: Self.tagHelpDiff)
                                     }
-                                    let capMap = ["basic": 0, "standard": 1, "powerful": 2]
-                                    if let cap = r.capability, let d = r.difficulty,
-                                       let cIdx = capMap[cap] {
-                                        let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
-                                        let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over" : "under")
-                                        tagPill(m, tint: Self.tagColorFit, bg: Self.tagColorFit.opacity(0.15), help: Self.tagHelpFit)
+                                    if let dom = r.domain {
+                                        tagPill(dom, tint: Self.tagColorDomain,
+                                                bg: Self.tagColorDomain.opacity(0.15), help: Self.tagHelpDomain)
+                                    }
+                                    ForEach(r.flags, id: \.self) { fl in
+                                        tagPill(fl, tint: Self.tagColorFlag,
+                                                bg: Self.tagColorFlag.opacity(0.15), help: Self.tagHelpFlag)
                                     }
                                 }
                                 .lineLimit(1)
@@ -639,24 +640,28 @@ public struct PanelView: View {
 
     // 标签语义（色卡 + 悬停详解）：颜色 = 类别，胶囊里的字 = 该类别的具体取值
     static let tagColorDiff: Color = .green
+    static let tagColorDomain: Color = .teal
+    static let tagColorFlag: Color = .orange
     static let tagColorCap: Color = .blue
     static let tagColorPrice: Color = .purple
     static let tagColorScore: Color = .secondary
     static let tagColorFit: Color = .orange
 
     static let tagHelpDiff = "task difficulty of this request: easy / medium / hard"
+    static let tagHelpDomain = "request domain classified by the gateway: code / math / data / agent / writing / lookup / chat"
+    static let tagHelpFlag = "request traits detected by the gateway: trivial (nothing to route) / tools (tool-heavy turn) / vision (has images) / stakes (high-stakes)"
     static let tagHelpCap = "model capability tier: basic / standard / powerful"
     static let tagHelpPrice = "model price tier: cheap / medium / premium"
     static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
 
-    /// 标签颜色说明：色卡 = 类别名（左：request 标签 / 右：model 标签）
-    /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 不再赘述取值，
-    /// 取值本身就在胶囊里（easy/medium/hard、0.99、match/over/under …）
+    /// 标签颜色说明：色卡 = 类别名（左：request 判定 / 右：model 属性）
+    /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 取值不赘述，看胶囊
     private var tagLegend: some View {
         HStack(spacing: 8) {
             legendItem(Self.tagColorDiff, "difficulty")
-            legendItem(Self.tagColorFit, "fit")
+            legendItem(Self.tagColorDomain, "domain")
+            legendItem(Self.tagColorFlag, "flags")
             Spacer(minLength: 8)
             legendItem(Self.tagColorCap, "capability")
             legendItem(Self.tagColorPrice, "price")
@@ -679,6 +684,8 @@ public struct PanelView: View {
     static func tagHelp(_ label: String) -> String {
         switch label {
         case "difficulty": return tagHelpDiff
+        case "domain": return tagHelpDomain
+        case "flags": return tagHelpFlag
         case "capability": return tagHelpCap
         case "price": return tagHelpPrice
         case "score": return tagHelpScore

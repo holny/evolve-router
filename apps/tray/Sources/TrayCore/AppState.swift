@@ -2,13 +2,14 @@ import Foundation
 import SwiftUI
 
 public struct RecentDecision: Identifiable {
-    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil) {
+    public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, difficulty: Double? = nil, capability: String? = nil, priceTier: String? = nil, score: Double? = nil, domain: String? = nil, flags: [String] = []) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
         self.preprocessMs = preprocessMs; self.decisionMs = decisionMs
         self.totalTokens = totalTokens; self.cachePct = cachePct; self.failReason = failReason
         self.difficulty = difficulty; self.capability = capability
         self.priceTier = priceTier; self.score = score
+        self.domain = domain; self.flags = flags
     }
     public let id = UUID()
     public let model: String
@@ -28,6 +29,9 @@ public struct RecentDecision: Identifiable {
     public let capability: String?
     public let priceTier: String?
     public let score: Double?
+    /// 网关对请求本身的判定：任务域 + 命中特征（trivial/tools/vision/stakes）
+    public let domain: String?
+    public let flags: [String]
 }
 
 public struct PaygBalance: Equatable {
@@ -414,6 +418,17 @@ public final class AppState: ObservableObject {
                 let judgment = ev["judgment"] as? [String: Any]
                 let difficulty = (judgment?["difficulty"] as? Double)
                     ?? ((judgment?["difficulty"] as? Int).map(Double.init))
+                // 对请求本身的判定：任务域 + 命中特征（阈值 0.6，与评分口径一致）
+                let domain = Self.shortDomain(judgment?["domain"] as? String)
+                let f = { (k: String) -> Bool in
+                    let v = (judgment?[k] as? Double) ?? ((judgment?[k] as? Int).map(Double.init)) ?? 0
+                    return v > 0.6
+                }
+                var flags: [String] = []
+                if f("is_trivial") { flags.append("trivial") }
+                if f("tool_heavy") { flags.append("tools") }
+                if f("needs_vision") { flags.append("vision") }
+                if f("high_stakes") { flags.append("stakes") }
                 let modelTags = ev["model_tags"] as? [String: Any]
                 let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
                     ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
@@ -426,7 +441,9 @@ public final class AppState: ObservableObject {
                     difficulty: difficulty,
                     capability: modelTags?["capability"] as? String,
                     priceTier: modelTags?["price_tier"] as? String,
-                    score: score))
+                    score: score,
+                    domain: domain,
+                    flags: flags))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 4 { break }
@@ -462,6 +479,21 @@ public final class AppState: ObservableObject {
     /// 难度标签（难度 0-3 → easy/medium/hard；具体档位靠文字，颜色只表示类别=难度）
     static func diffLabel(_ d: Double) -> String {
         d <= 0.8 ? "easy" : d <= 2.0 ? "medium" : "hard"
+    }
+
+    /// 任务域 → 面板短词（judgment.domain 是 snake_case 枚举名）
+    static func shortDomain(_ raw: String?) -> String? {
+        switch raw {
+        case "code": return "code"
+        case "math_logic": return "math"
+        case "data": return "data"
+        case "agent_ops": return "agent"
+        case "writing": return "writing"
+        case "lookup": return "lookup"
+        case "chitchat": return "chat"
+        case "other": return "other"
+        default: return nil
+        }
     }
 
     /// 速率缩写（t/s 数值部分）：30000 → "30.0k"，1.2M → "1.2M"，92 → "92"
