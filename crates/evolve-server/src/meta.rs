@@ -83,6 +83,7 @@ pub async fn api_health(State(st): State<AppState>) -> Response {
 /// 窗口聚合：把模型近期样本环按窗口过滤后折算成与累计口径同形的聚合值
 /// 解析绝对窗口（依赖本地时区的日历口径——由客户端算好 epoch 传入）：
 /// `since:<epoch_ms>` → (start, +∞)；`range:<start>-<end>` → (start, end)。
+/// ⚠ 绝对窗口走**小时桶**聚合（保留 3 天）——更早的 since 会静默截断到 3 天。
 fn parse_absolute_window(window: &str) -> Option<(u64, u64)> {
     if let Some(rest) = window.strip_prefix("since:") {
         let start = rest.parse::<u64>().ok()?;
