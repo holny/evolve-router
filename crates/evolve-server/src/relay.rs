@@ -93,6 +93,26 @@ pub async fn chat_completions(
             "cache": true, "status": 200, "session": session_key,
             "agent": agent_hdr, "total_ms": started.elapsed().as_millis() as u64,
         }));
+        // 缓存命中也是一次"已服务请求"——喂给飞轮（样本环 + 小时桶），否则面板
+        // 的窗口请求数会少于最近请求列表，今天/昨天统计漏计缓存命中的请求
+        let usage = serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("usage").cloned())
+            .unwrap_or(Value::Null);
+        let num = |v: &Value, k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+        st.flywheel.observe(&json!({
+            "kind": "chat", "chosen": model_id, "status": 200,
+            "ts": evolve_memory::health::now(),
+            "ttft_ms": started.elapsed().as_millis() as u64,
+            "total_ms": started.elapsed().as_millis() as u64,
+            "prompt_tokens": num(&usage, "prompt_tokens"),
+            "completion_tokens": num(&usage, "completion_tokens"),
+            "cached_tokens": usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+        }));
         return Response::builder()
             .status(StatusCode::OK)
             .header("content-type", content_type)

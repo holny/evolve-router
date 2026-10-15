@@ -320,9 +320,13 @@ public struct PanelView: View {
                     }
                 }
                 .lineLimit(1)
+                // 空间不足先缩字再截断——保证 subline 不被右侧配额条挤没
+                .minimumScaleFactor(0.75)
             }
             Spacer(minLength: 0)
+            // 固定宽度列：进度条/百分比位置稳定，也不会盖住左侧数据
             trailingCell(p)
+                .frame(width: 88, alignment: .trailing)
         }
     }
 

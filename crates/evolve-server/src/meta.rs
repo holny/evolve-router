@@ -81,6 +81,22 @@ pub async fn api_health(State(st): State<AppState>) -> Response {
 
 /// Flywheel aggregates + learned telemetry + link status + dynamic score.
 /// 窗口聚合：把模型近期样本环按窗口过滤后折算成与累计口径同形的聚合值
+/// 解析绝对窗口（依赖本地时区的日历口径——由客户端算好 epoch 传入）：
+/// `since:<epoch_ms>` → (start, +∞)；`range:<start>-<end>` → (start, end)。
+fn parse_absolute_window(window: &str) -> Option<(u64, u64)> {
+    if let Some(rest) = window.strip_prefix("since:") {
+        let start = rest.parse::<u64>().ok()?;
+        return Some((start, u64::MAX));
+    }
+    if let Some(rest) = window.strip_prefix("range:") {
+        let mut it = rest.split('-');
+        let s = it.next().and_then(|v| v.parse::<u64>().ok())?;
+        let e = it.next().and_then(|v| v.parse::<u64>().ok())?;
+        return Some((s, e));
+    }
+    None
+}
+
 fn windowed_view(
     s: &evolve_core::types::ModelTelemetry,
     window: &str,
@@ -93,34 +109,20 @@ fn windowed_view(
     let now = evolve_memory::health::now();
     // (cutoff, before)：cutoff = 起始回溯量（含），before = 结束回溯量（**不含**，
     // 用于"昨天"这类有上下界的日历窗口——只给起点会把今天的流量也算进昨天）
-    let (cutoff_ms, before_ms): (Option<u64>, Option<u64>) = match window {
-        "7d" => (Some(7 * 24 * 3600 * 1000), None),
-        "24h" => (Some(24 * 3600 * 1000), None),
-        // 5h = 订阅配额窗口（Coding/Go/Agent plan）
-        "5h" => (Some(5 * 3600 * 1000), None),
-        "1h" => (Some(3600 * 1000), None),
-        "10m" => (Some(10 * 60 * 1000), None),
-        // `since:<epoch_ms>`：绝对起点（无上界）。见 apps/tray 的窗口切换。
-        w if w.starts_with("since:") => (
-            w.trim_start_matches("since:")
-                .parse::<u64>()
-                .ok()
-                .map(|ts| now.saturating_sub(ts)),
-            None,
+    let (cutoff_ms, before_ms): (Option<u64>, Option<u64>) = match parse_absolute_window(window) {
+        Some((start, end)) => (
+            Some(now.saturating_sub(start)),
+            (end != u64::MAX).then(|| now.saturating_sub(end)),
         ),
-        // `range:<start_ms>-<end_ms>`：有上下界的绝对窗口——日历口径（今天/昨天）
-        // 依赖本地时区，服务端不引 TZ 库，由客户端算好两端 epoch 传入。
-        w if w.starts_with("range:") => {
-            let rest = w.trim_start_matches("range:");
-            let mut it = rest.split('-');
-            let s = it.next().and_then(|v| v.parse::<u64>().ok());
-            let e = it.next().and_then(|v| v.parse::<u64>().ok());
-            match (s, e) {
-                (Some(s), Some(e)) => (Some(now.saturating_sub(s)), Some(now.saturating_sub(e))),
-                _ => (None, None),
-            }
-        }
-        _ => (None, None),
+        None => match window {
+            "7d" => (Some(7 * 24 * 3600 * 1000), None),
+            "24h" => (Some(24 * 3600 * 1000), None),
+            // 5h = 订阅配额窗口（Coding/Go/Agent plan）
+            "5h" => (Some(5 * 3600 * 1000), None),
+            "1h" => (Some(3600 * 1000), None),
+            "10m" => (Some(10 * 60 * 1000), None),
+            _ => (None, None),
+        },
     };
     let take_n: Option<usize> = match window {
         "last30" => Some(30),
@@ -277,10 +279,21 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
     // 窗口模式：用近期样本环折算聚合，覆盖累计口径（总览保持原样）。
     // 窗口内**无样本的模型一律归零**（否则会保留累计值充数——曾出现同一模型
     // 5h=1229 而 24h=107 的自相矛盾）。
+    // 绝对窗口（今天/昨天等日历口径）走**持久化小时桶**：不受样本环 cap 300
+    // 限制、重启不丢——面板的日历数据必须准确。
     if window != "overview" {
-        for (id, s) in stats.iter_mut() {
-            let view = telemetry.get(id).and_then(|tm| windowed_view(tm, window));
-            apply_windowed(s, &view.unwrap_or_else(|| json!({})));
+        let absolute = parse_absolute_window(window);
+        if let Some((start_ms, end_ms)) = absolute {
+            let hourly = st.flywheel.hourly_window(start_ms, end_ms);
+            for (id, s) in stats.iter_mut() {
+                let view = hourly.get(id).cloned().unwrap_or_else(|| json!({}));
+                apply_windowed(s, &view);
+            }
+        } else {
+            for (id, s) in stats.iter_mut() {
+                let view = telemetry.get(id).and_then(|tm| windowed_view(tm, window));
+                apply_windowed(s, &view.unwrap_or_else(|| json!({})));
+            }
         }
     }
     let overlays = st.engine.tier_overrides();

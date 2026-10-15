@@ -39,6 +39,19 @@ enum PanelPreview {
         win.contentView = host
         win.center()
         win.makeKeyAndOrderFront(nil)
+        // 截图模式（EV_SCREENSHOT=<path>）：8s 后对**本窗口**截图并退出——
+        // 用 windowNumber 定位，不受其他窗口遮挡/层级影响
+        if let shot = ProcessInfo.processInfo.environment["EV_SCREENSHOT"] {
+            let n = win.windowNumber
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                p.arguments = ["-x", "-o", "-l", "\(n)", shot]
+                try? p.run()
+                p.waitUntilExit()
+                exit(0)
+            }
+        }
         // 预览 harness 轮询循环：等真实网关就绪即覆盖种子数据（app 的循环在
         // AppDelegate 里，harness 只跑一次会错过就绪窗口）
         Task { [weak state] in

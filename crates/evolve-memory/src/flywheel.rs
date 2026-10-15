@@ -61,8 +61,34 @@ pub struct ModelStats {
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FlywheelInner {
     models: HashMap<String, ModelStats>,
+    /// 小时聚合桶（模型 → 桶序列）：**今天/昨天等日历窗口的持久化数据源**。
+    /// 样本环 cap 300/模型，撑不住高频日的日历统计且重启前数据有限；小时桶
+    /// 精确（日界落在整点的时区）且重启不丢。保留 3 天，写入时剪枝。
+    #[serde(default)]
+    hourly: HashMap<String, Vec<HourBucket>>,
     dirty: bool,
 }
+
+/// 小时聚合桶：该模型在这一小时内的请求聚合。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HourBucket {
+    pub hour_start_ms: u64,
+    pub requests: u64,
+    pub success: u64,
+    pub in_tok: u64,
+    pub cached_tok: u64,
+    pub out_tok: u64,
+    pub ttft_ms_sum: u64,
+    pub ttft_n: u64,
+    pub total_ms_sum: u64,
+    pub total_n: u64,
+    pub gen_ms_sum: u64,
+    pub tools_total: u32,
+    pub tools_ok: u32,
+}
+
+const HOURLY_RETAIN_MS: u64 = 3 * 24 * 3600 * 1000;
+const HOUR_MS: u64 = 3_600_000;
 
 /// 分层窗口可靠性（三重约束）：样本时间 ≤ 回溯期限（不能太老）、
 /// 条数 ≤ take、条数 ≥ min（不能太新——不足则弃用回落上层）
@@ -292,6 +318,56 @@ impl Flywheel {
                 s.empty_responses += 1;
             }
         }
+        // 小时聚合桶（今天/昨天等**日历窗口**的持久化数据源；样本环 cap 300/模型
+        // 撑不住高频日）。放函数尾：此时 models 的可变借用已结束。
+        {
+            let ts = event.get("ts").and_then(|v| v.as_u64()).unwrap_or_else(now_ms);
+            let hour_start = ts.saturating_sub(ts % HOUR_MS);
+            let in_tok = event.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let cached = event.get("cached_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let out_tok = event.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ttft = event.get("ttft_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            let total = event.get("total_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ok = (200..300).contains(&status) && !quality_bad;
+            let tools_total = event
+                .get("quality")
+                .and_then(|q| q.get("tool_calls_total"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let tools_ok = event
+                .get("quality")
+                .and_then(|q| q.get("tool_calls_valid_json"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
+            let buckets = inner.hourly.entry(chosen.to_string()).or_default();
+            let b = match buckets.last_mut() {
+                // 快路径：事件基本按时间到达 → 直接命中尾部桶
+                Some(b) if b.hour_start_ms == hour_start => b,
+                _ => {
+                    buckets.retain(|b| b.hour_start_ms >= hour_start.saturating_sub(HOURLY_RETAIN_MS));
+                    buckets.push(HourBucket { hour_start_ms: hour_start, ..Default::default() });
+                    buckets.last_mut().expect("bucket just pushed")
+                }
+            };
+            b.requests += 1;
+            if ok {
+                b.success += 1;
+            }
+            b.in_tok += in_tok;
+            b.cached_tok += cached;
+            b.out_tok += out_tok;
+            if ttft > 0 {
+                b.ttft_ms_sum += ttft;
+                b.ttft_n += 1;
+            }
+            if total > 0 {
+                b.total_ms_sum += total;
+                b.total_n += 1;
+            }
+            b.gen_ms_sum += total.saturating_sub(ttft);
+            b.tools_total += tools_total;
+            b.tools_ok += tools_ok;
+        }
         inner.dirty = true;
     }
 
@@ -345,6 +421,67 @@ impl Flywheel {
 
     pub fn stats(&self) -> HashMap<String, ModelStats> {
         self.inner.lock().map(|i| i.models.clone()).unwrap_or_default()
+    }
+
+    /// 日历窗口聚合（今天/昨天等）：基于**持久化小时桶**——不受样本环 cap 300
+    /// 限制、重启不丢，故面板的"今天/昨天"数据准确。桶粒度 1h：日界落在整点的
+    /// 时区（如 UTC+8）下精确，半小时偏移的时区边界最多差半小时。
+    /// 返回与 ring 窗口视图同形的逐模型聚合（meta 直接 apply_windowed）。
+    pub fn hourly_window(
+        &self,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> HashMap<String, serde_json::Value> {
+        let Ok(inner) = self.inner.lock() else { return HashMap::new() };
+        let mut out: HashMap<String, serde_json::Value> = HashMap::new();
+        for (model, buckets) in inner.hourly.iter() {
+            let mut requests = 0u64;
+            let mut success = 0u64;
+            let mut in_tok = 0u64;
+            let mut cached = 0u64;
+            let mut out_tok = 0u64;
+            let mut ttft_sum = 0u64;
+            let mut ttft_n = 0u64;
+            let mut total_sum = 0u64;
+            let mut total_n = 0u64;
+            let mut gen_ms = 0u64;
+            let mut tools_total = 0u32;
+            let mut tools_ok = 0u32;
+            for b in buckets {
+                // 桶 [hs, hs+1h) 与请求窗口 [start, end) 相交即计入
+                if b.hour_start_ms < end_ms && b.hour_start_ms + HOUR_MS > start_ms {
+                    requests += b.requests;
+                    success += b.success;
+                    in_tok += b.in_tok;
+                    cached += b.cached_tok;
+                    out_tok += b.out_tok;
+                    ttft_sum += b.ttft_ms_sum;
+                    ttft_n += b.ttft_n;
+                    total_sum += b.total_ms_sum;
+                    total_n += b.total_n;
+                    gen_ms += b.gen_ms_sum;
+                    tools_total += b.tools_total;
+                    tools_ok += b.tools_ok;
+                }
+            }
+            if requests == 0 {
+                continue;
+            }
+            let avg = |sum: u64, n: u64| if n > 0 { (sum as f64 / n as f64).round() as u64 } else { 0 };
+            let rate = if gen_ms > 0 { (out_tok as f64 * 1000.0 / gen_ms as f64).round() as u64 } else { 0 };
+            out.insert(
+                model.clone(),
+                serde_json::json!({
+                    "requests": requests, "success": success,
+                    "avg_ttft_ms": avg(ttft_sum, ttft_n),
+                    "avg_total_ms": avg(total_sum, total_n),
+                    "avg_rate_tok_s": rate,
+                    "in_tok": in_tok, "cached_tok": cached, "out_tok": out_tok,
+                    "tool_calls": {"total": tools_total, "valid_json": tools_ok},
+                }),
+            );
+        }
+        out
     }
 
     pub fn save(&self) {
@@ -499,5 +636,73 @@ mod tests {
             .collect();
         let r = outcome_reward(&mixed, &crate::strategy::StrategyParams::default()).unwrap();
         assert!((0.0..=1.0).contains(&r), "reward {r} out of [0,1]");
+    }
+}
+
+#[cfg(test)]
+mod hourly_tests {
+    use super::Flywheel;
+    use crate::strategy::StrategyParams;
+    use serde_json::json;
+
+    fn fw(dir_suffix: &str) -> Flywheel {
+        Flywheel::open_with(
+            &format!("{}/fw-hourly-test-{}", std::env::temp_dir().to_string_lossy(), dir_suffix),
+            StrategyParams::default(),
+        )
+    }
+
+    fn event(model: &str, ts: u64) -> serde_json::Value {
+        json!({
+            "kind": "chat", "chosen": model, "status": 200, "ts": ts,
+            "ttft_ms": 100, "total_ms": 400,
+            "prompt_tokens": 10, "completion_tokens": 5, "cached_tokens": 0,
+        })
+    }
+
+    const H: u64 = 3_600_000;
+    const DAY: u64 = 24 * H;
+
+    #[test]
+    fn hourly_window_buckets_by_calendar_range() {
+        let f = fw("range");
+        let today_noon = 1_792_000_000_000 / DAY * DAY + 12 * H; // 某日 12:00（整点）
+        let yest_noon = today_noon - DAY;
+        for _ in 0..3 {
+            f.observe(&event("m", today_noon));
+        }
+        for _ in 0..5 {
+            f.observe(&event("m", yest_noon));
+        }
+
+        // 今天窗口：只含今天的桶
+        let today = f.hourly_window(today_noon - H, today_noon + H);
+        assert_eq!(today["m"]["requests"], 3, "today bucket only: {}", today["m"]);
+        // 昨天窗口：有界——不得混入今天的流量
+        let yest = f.hourly_window(yest_noon - H, today_noon - H + H);
+        assert_eq!(yest["m"]["requests"], 5, "yesterday bucket only: {}", yest["m"]);
+        // 不相交窗口：无数据
+        assert!(f.hourly_window(today_noon + 2 * H, today_noon + 3 * H).get("m").is_none());
+    }
+
+    #[test]
+    fn hourly_buckets_survive_restart() {
+        let dir = format!(
+            "{}/fw-hourly-persist-{}",
+            std::env::temp_dir().to_string_lossy(),
+            std::process::id()
+        );
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let noon = 1_792_000_000_000 / DAY * DAY + 12 * H;
+        {
+            let f = Flywheel::open_with(&dir, StrategyParams::default());
+            f.observe(&event("m", noon));
+            f.observe(&event("m", noon));
+            f.save();
+        }
+        // 重新打开（模拟网关重启）：日历数据仍在
+        let f2 = Flywheel::open_with(&dir, StrategyParams::default());
+        let w = f2.hourly_window(noon - H, noon + H);
+        assert_eq!(w["m"]["requests"], 2, "hourly buckets must persist across restart: {}", w["m"]);
     }
 }
