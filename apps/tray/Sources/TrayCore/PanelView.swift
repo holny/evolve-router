@@ -230,25 +230,36 @@ public struct PanelView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                             // 决策打标微缩行（用户裁决）：任务难度 + 模型能力/价位
-                            // + 网关评分 + 难度↔能力匹配
+                            // + 网关评分 + 难度↔能力匹配（英文标签 + 背景胶囊）
                             if r.difficulty != nil || r.capability != nil || r.score != nil {
-                                HStack(spacing: 4) {
+                                HStack(spacing: 3) {
                                     if let d = r.difficulty {
                                         let (label, col) = AppState.diffBadge(d)
-                                        Text(label).foregroundStyle(col)
+                                        Text(label)
+                                            .font(.system(size: 8.5, weight: .medium))
+                                            .padding(.horizontal, 4).padding(.vertical, 1)
+                                            .background(Capsule().fill(col.opacity(0.15)))
+                                            .foregroundStyle(col)
                                     }
                                     if let cap = r.capability {
-                                        Text(cap).foregroundStyle(.quaternary)
+                                        tagPill("cap " + cap)
                                     }
                                     if let pt = r.priceTier {
-                                        Text(pt).foregroundStyle(.quaternary)
+                                        tagPill("tier " + pt)
                                     }
                                     if let sc = r.score {
-                                        Text(String(format: "评 %.2f", sc)).foregroundStyle(.quaternary)
+                                        tagPill(String(format: "★%.2f", sc))
+                                    }
+                                    let capMap = ["basic": 0, "standard": 1, "powerful": 2]
+                                    if let cap = r.capability, let d = r.difficulty,
+                                       let cIdx = capMap[cap] {
+                                        let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
+                                        let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over-fit" : "under-fit")
+                                        tagPill(m, tint: dIdx == cIdx ? .green : .orange)
                                     }
                                 }
-                                .font(.system(size: 8.5))
                                 .lineLimit(1)
+                                .minimumScaleFactor(0.75)
                             }
                             if r.status != 200, let reason = r.failReason {
                                 Text("Fail: \(reason)")
@@ -342,10 +353,10 @@ public struct PanelView: View {
                     // 当前态标签对历史无意义（用户裁决）→ 不展示
                     if state.statWindowToday {
                         if let cap = m.capability, !cap.isEmpty {
-                            Text(cap).foregroundStyle(.quaternary)
+                            tagPill("cap " + cap)
                         }
                         if let pt = m.priceTier, !pt.isEmpty {
-                            Text(pt).foregroundStyle(.quaternary)
+                            tagPill("tier " + pt)
                         }
                     }
                     if m.tok > 0 {
@@ -620,6 +631,15 @@ public struct PanelView: View {
                 .foregroundStyle(.secondary)
                 .textCase(nil)
         }
+    }
+
+    /// 打标胶囊（英文小标签 + 背景色）
+    private func tagPill(_ text: String, tint: Color = .secondary) -> some View {
+        Text(text)
+            .font(.system(size: 8.5))
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(Color.primary.opacity(0.08)))
+            .foregroundStyle(tint)
     }
 
     private func quotaBar(_ pct: Int) -> some View {

@@ -459,11 +459,11 @@ public final class AppState: ObservableObject {
         return Self.tsFmt.string(from: Date(timeIntervalSince1970: ms))
     }
 
-    /// 难度徽章（难度 0-3 → 简单/普通/高难，绿/橙/红）
+    /// 难度徽章（难度 0-3 → easy/medium/hard，绿/橙/红；标签统一英文）
     static func diffBadge(_ d: Double) -> (String, Color) {
-        d <= 0.8 ? ("难·简单", .green)
-          : d <= 2.0 ? ("难·普通", .orange)
-          : ("难·高难", .red)
+        d <= 0.8 ? ("easy", .green)
+          : d <= 2.0 ? ("medium", .orange)
+          : ("hard", .red)
     }
 
     /// 速率缩写（t/s 数值部分）：30000 → "30.0k"，1.2M → "1.2M"，92 → "92"
