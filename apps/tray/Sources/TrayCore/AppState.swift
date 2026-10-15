@@ -42,7 +42,7 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = []) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = []) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
@@ -52,6 +52,7 @@ public struct ProviderRow: Identifiable {
         self.quotaExhausted = quotaExhausted; self.quotaReset = quotaReset
         self.cooldownModel = cooldownModel
         self.quotaSource = quotaSource
+        self.mergedFrom = mergedFrom
         self.blockedModels = blockedModels
     }
     public let key: String
@@ -63,6 +64,8 @@ public struct ProviderRow: Identifiable {
     public let cooldownModel: String?
     /// w2 配额信息源：official（官方 API/响应头）/ official_headers / estimated（网关推算）/ ""
     public let quotaSource: String
+    /// 合并行的来源账号（服务端 merged_from；窗口指标跨账号聚合用）
+    public let mergedFrom: [String]
     /// w3 永久黑名单模型（上游 404 且不在模型列表）——仅 Web 手动恢复
     public let blockedModels: [String]
     public let pct: Int?
@@ -119,7 +122,7 @@ public final class AppState: ObservableObject {
         if !healthy { return .stopped }
         if starting { return .starting }
         if inflight > 0 { return .busy }  // busy 期间用绿色 ER（用户裁决：路由中才显示）
-        if let r = lastResult, r.status != 200 { return .fail }  // idle+失败 → 黄 ER；新请求会清掉 lastResult
+        if let r = lastResult, !(200...299).contains(r.status) { return .fail }  // idle+失败 → 黄 ER；新请求会清掉 lastResult
         return .idle
     }
 
@@ -221,6 +224,7 @@ public final class AppState: ObservableObject {
                 let quotaReset = (binding?["reset_epoch_ms"] as? Double)
                     .map { Date(timeIntervalSince1970: $0 / 1000) }
                 let tok24 = (p["tokens_24h"] as? Int) ?? Int((p["tokens_24h"] as? Double) ?? 0)
+                let mergedKeys = ((p["merged_from"] as? [Any])?.compactMap { $0 as? String }) ?? [key]
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: usedPct,
                                         tokens24h: tok24, planKind: kind,
@@ -229,7 +233,8 @@ public final class AppState: ObservableObject {
                                         quotaExhausted: quotaExhausted, quotaReset: quotaReset,
                                         cooldownModel: cooldownModel,
                                         quotaSource: (p["quota_source"] as? String) ?? "",
-                                        blockedModels: blockedModels))
+                                        blockedModels: blockedModels,
+                                        mergedFrom: mergedKeys))
             }
         }
         // per-provider 5h 指标：stats 的 model key 形如 "provider/model"，按前缀聚合
@@ -252,8 +257,23 @@ public final class AppState: ObservableObject {
             e.promptSum += pin
             agg[prov] = e
         }
+        // 合并行（服务端按 key_fp 并账号，merged_from 记录来源账号）的窗口指标
+        // 须跨来源账号聚合——stats 的 model 前缀是各账号自己的 provider 名
+        let mergedBy: [String: [String]] = rows.reduce(into: [:]) { acc, r in
+            acc[r.key] = r.mergedFrom.isEmpty ? [r.key] : r.mergedFrom
+        }
         rows = rows.map { r in
-            guard let e = agg[r.key] else { return r }
+            let keys = mergedBy[r.key] ?? [r.key]
+            // 跨来源账号求和（tokens/hit/速率/TTFT）
+            let e = keys.reduce(nil as (tok: Int, ttftW: Double, ttftN: Int, rateW: Double, rateN: Int, cacheSum: Int, promptSum: Int)?) { acc, k in
+                guard let x = agg[k] else { return acc }
+                guard var a = acc else { return x }
+                a.tok += x.tok; a.ttftW += x.ttftW; a.ttftN += x.ttftN
+                a.rateW += x.rateW; a.rateN += x.rateN
+                a.cacheSum += x.cacheSum; a.promptSum += x.promptSum
+                return a
+            }
+            guard let e else { return r }
             let cachePct: Int? = e.promptSum > 0 ? Int(round(100.0 * Double(e.cacheSum) / Double(e.promptSum))) : nil
             // 配额/冷却等派生量已在服务端算好（见上），此处只叠加 /api/stats 的指标
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
@@ -299,18 +319,21 @@ public final class AppState: ObservableObject {
                 let totalTok = pin + out
                 let cachePct: Int? = pin > 0 ? Int(round(100.0 * Double(cached) / Double(pin))) : nil
                 var failReason: String? = nil
-                if status != 200 {
-                    let raw = (ev["reason"] as? String) ?? ""
-                    // reason 形如 "all routed upstreams failed: m1[0](transient error); m2[0](no credit)"
-                    // 提取括号内原因去重，最多 2 个
+                if !(200...299).contains(status) {
+                    // 优先结构化 filtered[]（服务端派生，与 Web 面板同源同文案）；
+                    // 旧事件缺字段时回退 reason 原文
                     var causes: [String] = []
-                    var rest = Substring(raw)
-                    while let r1 = rest.range(of: "("), let r2 = rest.range(of: ")", range: r1.upperBound..<rest.endIndex) {
-                        let c = String(rest[r1.upperBound..<r2.lowerBound])
-                        if !causes.contains(c) { causes.append(c) }
-                        rest = rest[r2.upperBound...]
+                    if let arr = ev["filtered"] as? [[String: Any]] {
+                        for f in arr {
+                            guard let c = f["cause"] as? String else { continue }
+                            let t = c.split(separator: "(").first.map(String.init)?
+                                .trimmingCharacters(in: .whitespaces) ?? ""
+                            if !t.isEmpty, !causes.contains(t) { causes.append(t) }
+                            if causes.count >= 2 { break }
+                        }
                     }
                     if causes.isEmpty {
+                        let raw = (ev["reason"] as? String) ?? ""
                         failReason = raw.isEmpty ? "HTTP \(status)" : String(raw.prefix(60))
                     } else {
                         failReason = causes.prefix(2).joined(separator: " / ")
@@ -356,7 +379,7 @@ public final class AppState: ObservableObject {
 
     public static func fmtTok(_ n: Int) -> String {
         n >= 1_000_000 ? String(format: "%.1fM", Double(n) / 1e6)
-          : n >= 1_000 ? String(format: "%.0fk", Double(n) / 1e3)
+          : n >= 1_000 ? String(format: "%.1fk", Double(n) / 1e3)
           : "\(n)"
     }
 

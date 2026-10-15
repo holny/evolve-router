@@ -331,8 +331,10 @@ fn mock_upstream(port: u16) -> anyhow::Result<()> {
 fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {
     let (cfg, path) = config::load_config(config_path.as_deref())?;
     tracing::info!(?path, "config loaded");
-    let port = port_override.unwrap_or(cfg.server.port);
-    let host = cfg.server.host.clone();
+    // 缺省兜底（安全默认）：host 为空会得到 ":8787" → **绑定全部网卡**，把无鉴权
+    // 的管理面暴露到 LAN（精简配置/旧版升级缺 [server] 段时触发）；port 0 同理
+    let host = if cfg.server.host.trim().is_empty() { "127.0.0.1".to_string() } else { cfg.server.host.clone() };
+    let port = port_override.unwrap_or(if cfg.server.port == 0 { 8787 } else { cfg.server.port });
     let state = state::build_state(cfg);
 
     let app = state::build_router(state.clone());

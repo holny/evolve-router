@@ -560,13 +560,16 @@ public struct PanelView: View {
 
 // 时长格式：>=1s 折秒，<1s 毫秒
 extension PanelView {
-    /// 上游配额信息（"quota window exhausted (monthly)"）→ 窗口态标签
+    /// 上游配额信息（"quota window exhausted (monthly)"）→ 窗口态标签。
+    /// 通用提取括号内的窗口名——逐值枚举会随服务端窗口名演进而漏判
+    /// （"(weekly/monthly)" 曾因此被显示成 "5h full"）。
     static func quotaFullLabel(_ cause: String) -> String {
-        // 顺序：先判组合标签——"(weekly/monthly)" 既不整词含 "(monthly)"
-        // 也不整词含 "(weekly)"，漏判会一律显示成 "5h full"
-        if cause.contains("(weekly/monthly)") { return "weekly/monthly full" }
-        if cause.contains("(monthly)") { return "monthly full" }
-        if cause.contains("(weekly)") { return "weekly full" }
+        if let r = cause.range(of: "exhausted (") {
+            let rest = cause[r.upperBound...]
+            if let close = rest.range(of: ")") {
+                return String(rest[..<close.lowerBound]) + " full"
+            }
+        }
         return "5h full"
     }
 

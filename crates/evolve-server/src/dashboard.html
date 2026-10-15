@@ -488,6 +488,8 @@ const T = {
   w_stream: {zh:'流式传输', en:'streaming', ko:'스트리밍', ja:'ストリーミング', es:'streaming', fr:'streaming'},
   wf_title: {zh:'⏱ 耗时分解', en:'⏱ Latency breakdown', ko:'⏱ 지연 분해', ja:'⏱ レイテンシ分解', es:'⏱ Desglose de latencia', fr:'⏱ Décomposition de latence'},
   w_total:  {zh:'总耗时', en:'total', ko:'총', ja:'合計', es:'total', fr:'total'},
+  win_today: {zh:'今天', en:'today', ko:'오늘', ja:'今日', es:'hoy', fr:'aujourd\'hui'},
+  win_yesterday: {zh:'昨天', en:'yesterday', ko:'어제', ja:'昨日', es:'ayer', fr:'hier'},
   win_overview: {zh:'总览', en:'overview', ko:'전체', ja:'全体', es:'todo', fr:'global'},
   win_7d: {zh:'近7天', en:'7 days', ko:'7일', ja:'7日', es:'7 días', fr:'7 jours'},
   win_24h: {zh:'24小时', en:'24 hours', ko:'24시간', ja:'24時間', es:'24 horas', fr:'24 heures'},
@@ -1348,7 +1350,7 @@ function jumpToWheel(model){
   row.classList.add('hl');
   row.scrollIntoView({block:'center', behavior:'smooth'});
 }
-const WIN_KEYS = ['overview','7d','24h','1h','10m','last30','last10'];
+const WIN_KEYS = ['today','yesterday','overview','7d','24h','1h','10m','last30','last10'];
 function renderTabs(el, cur, keys, onpick) {
   el.innerHTML = keys.map(k =>
     '<span class="wtab'+(k===cur?' on':'')+'" data-w="'+k+'">'+esc(t('win_'+k))+'</span>').join('');
@@ -1384,9 +1386,11 @@ function renderChips(){
     if (!w) return;
     byPlan[k] = Math.max(byPlan[k]||0, Math.min(100, Math.round(w.used_pct || 0)));
   });
+  // 告警阈值与配额条同源（行内 soft_pct = 服务端 plan_soft_pct），不再硬编码 85
+  const soft = (state.providers.find(p => p.soft_pct != null) || {}).soft_pct || 60;
   const planTxt = Object.entries(byPlan).length
     ? Object.entries(byPlan).sort((a,b)=>b[1]-a[1]).map(([k,v]) =>
-        '<b class="'+(v>=85?'warn':v>=60?'':'')+'" style="font-size:13px'+(v>=85?'':';color:var(--fg)')+'">'+k+' '+v+'%</b>').join(' <span class="dim2">·</span> ')
+        '<b class="'+(v>=90||v>=soft?'warn':'')+'" style="font-size:13px'+((v>=90||v>=soft)?'':';color:var(--fg)')+'">'+k+' '+v+'%</b>').join(' <span class="dim2">·</span> ')
     : '-';
   document.getElementById('chips').innerHTML =
     '<span class="chip"><span>'+t('chip_reqs')+'</span><b>'+reqs+(rate!==null?' <b class="'+rateCls.trim()+'" style="font-size:12px">'+rate+'%</b>':'')+'</b></span>' +
@@ -1904,8 +1908,18 @@ document.getElementById('pw-btn').addEventListener('click', () => {
 
 async function refresh(){
   try {
+    // today/yesterday = 日历口径（本地时区由浏览器算好，服务端不引时区库）
+    const winParam = (() => {
+      if (state.win === 'today' || state.win === 'yesterday') {
+        const t0 = new Date(); t0.setHours(0,0,0,0);
+        const s = state.win === 'today' ? t0.getTime() : t0.getTime() - 86400000;
+        const e = state.win === 'today' ? Date.now() : t0.getTime();
+        return 'range:' + s + '-' + e;
+      }
+      return encodeURIComponent(state.win);
+    })();
     const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, liveR] = await Promise.all([
-      fetch('/api/stats?window='+encodeURIComponent(state.win)), fetch('/api/health'), fetch('/api/quota'), fetch('/api/benchmarks'),
+      fetch('/api/stats?window='+winParam), fetch('/api/health'), fetch('/api/quota'), fetch('/api/benchmarks'),
       fetch('/api/policy-weights'), fetch('/api/plans'),
       fetch('/api/trends?window='+encodeURIComponent(state.twin)),
       fetch('/api/providers'), fetch('/api/live')]);
