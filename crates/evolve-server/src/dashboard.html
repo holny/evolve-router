@@ -507,10 +507,6 @@ const T = {
   l_cancel:   {zh:'取消', en:'Cancel', ko:'취소', ja:'キャンセル', es:'Cancelar', fr:'Annuler'},
   la_chosen:  {zh:'选中', en:'chosen', ko:'선택', ja:'選択', es:'elegido', fr:'choisi'},
   la_failed:  {zh:'失败', en:'failed', ko:'실패', ja:'失敗', es:'falló', fr:'échoué'},
-  d_l1: {zh:'简单', en:'simple', ko:'간단', ja:'簡単', es:'simple', fr:'simple'},
-  d_l2: {zh:'中等', en:'moderate', ko:'보통', ja:'中程度', es:'moderada', fr:'modérée'},
-  d_l3: {zh:'复杂', en:'complex', ko:'복잡', ja:'複雑', es:'compleja', fr:'complexe'},
-  d_l4: {zh:'关键', en:'critical', ko:'중대', ja:'重大', es:'crítica', fr:'critique'},
   w_pre:    {zh:'网关预处理', en:'preprocess', ko:'전처리', ja:'前処理', es:'preproceso', fr:'prétraitement'},
   w_dec:    {zh:'路由决策', en:'routing decision', ko:'라우팅 결정', ja:'ルーティング判定', es:'decisión de ruta', fr:'décision de routage'},
   w_first:  {zh:'上游首字', en:'first token', ko:'첫 토큰', ja:'初トークン', es:'primer token', fr:'premier jeton'},
@@ -661,9 +657,6 @@ const T = {
   dom_Chitchat:  {zh:'闲聊', en:'chitchat', ko:'잡담', ja:'雑談', es:'charla', fr:'bavardage'},
   dom_AgentOps:  {zh:'Agent 操作', en:'agent ops', ko:'에이전트 작업', ja:'エージェント操作', es:'operaciones de agente', fr:'opérations d\'agent'},
   dom_Other:     {zh:'通用', en:'general', ko:'일반', ja:'汎用', es:'general', fr:'général'},
-  diff_low:  {zh:'低', en:'low', ko:'낮음', ja:'低', es:'baja', fr:'faible'},
-  diff_mid:  {zh:'中', en:'medium', ko:'보통', ja:'中', es:'media', fr:'moyenne'},
-  diff_high: {zh:'高', en:'high', ko:'높음', ja:'高', es:'alta', fr:'élevée'},
   ca_cred:    {zh:'无凭据', en:'no credentials', ko:'자격 증명 없음', ja:'認証情報なし', es:'sin credenciales', fr:'pas d\'identifiants'},
   ca_vision:  {zh:'不支持图像输入', en:'no vision support', ko:'비전 미지원', ja:'画像入力非対応', es:'sin soporte de visión', fr:'pas de support vision'},
   ca_window:  {zh:'上下文窗口装不下本次请求', en:'context window too small for this request', ko:'컨텍스트 윈도우에 들어가지 않음', ja:'コンテキスト窓に収まらない', es:'ventana de contexto muy pequeña', fr:'fenêtre de contexte trop petite'},
@@ -717,14 +710,6 @@ const T = {
   au_win:     {zh:'胜出', en:'winner', ko:'승자', ja:'勝者', es:'ganador', fr:'gagnant'},
   au_qp:      {zh:'预算压制 ×{q}', en:'budget damp ×{q}', ko:'예산 감쇠 ×{q}', ja:'予算減衰 ×{q}', es:'amortiguación ×{q}', fr:'amortissement ×{q}'},
   theme_lbl:  {zh:'主题', en:'Theme', ko:'테마', ja:'テーマ', es:'Tema', fr:'Thème'},
-  dom_code:      {zh:'代码', en:'code', ko:'코드', ja:'コード', es:'código', fr:'code'},
-  dom_math_logic:{zh:'数理逻辑', en:'math/logic', ko:'수리 논리', ja:'数理論理', es:'matemática', fr:'maths/logique'},
-  dom_writing:   {zh:'写作', en:'writing', ko:'작문', ja:'執筆', es:'escritura', fr:'écriture'},
-  dom_factual_lookup:{zh:'事实查询', en:'factual lookup', ko:'사실 조회', ja:'事実検索', es:'búsqueda factual', fr:'recherche factuelle'},
-  dom_data_analysis:{zh:'数据分析', en:'data analysis', ko:'데이터 분석', ja:'データ分析', es:'análisis de datos', fr:'analyse de données'},
-  dom_chitchat:  {zh:'闲聊', en:'chitchat', ko:'잡담', ja:'雑談', es:'charla', fr:'discussion'},
-  dom_agent_ops: {zh:'Agent 操作', en:'agent ops', ko:'에이전트 작업', ja:'エージェント操作', es:'operación de agente', fr:'opérations d\'agent'},
-  dom_other:     {zh:'其他', en:'other', ko:'기타', ja:'その他', es:'otro', fr:'autre'},
   au_wsrc:    {zh:'由难度联动 × 配额感知调节后归一化——百分比 = 各因子的重要度占比（总和 100%）', en:'adjusted by difficulty link × quota awareness, then normalized — each % is a factor\'s importance share (sums to 100%)', ko:'난이도×할당량 조절 후 정규화—각 %는 중요도 비율(합 100%)', ja:'難易度× quota 調整後に正規化—%は重要度の割合（合計100%）', es:'ajustado por dificultad × cuota y normalizado — cada % es la importancia del factor (suma 100%)', fr:'ajusté par difficulté × quota puis normalisé — chaque % est le poids du facteur (somme 100%)'},
   au_formula: {zh:'本次计算', en:'this run', ko:'이번 계산', ja:'今回の計算', es:'este cálculo', fr:'ce calcul'},
   au_bias_tip:{zh:'飞轮学习偏置：>1 近期表现优于群体被加分，<1 被减分——只会微调，不改判', en:'flywheel learned bias: >1 rewarded (outperforming peers), <1 penalized — fine-tuning only, never overrides', ko:'플라이휠 학습 바이어스: >1 가산, <1 감산—미세 조정만', ja:'フライホイール学習バイアス：>1 加算、<1 減算—微調整のみ', es:'sesgo aprendido: >1 premiado, <1 penalizado — solo ajuste fino', fr:'biais appris : >1 récompensé, <1 pénalisé — ajustement fin uniquement'},
@@ -889,7 +874,7 @@ function decisionDetail(e){
     if (dm) {
       const dk = T['dom_'+dm[1]];
       const diff = +e.difficulty_eff || 0;
-      const dw = diff < 1 ? t('diff_low') : diff < 2 ? t('diff_mid') : t('diff_high');
+      const dw = diffLevel(diff);
       push2(L, esc(t('st_task').replace('{d}', dk ? (dk[lang] ?? dk.zh) : dm[1]).replace('{w}', dw).replace('{v}', diff.toFixed(1))));
     }
     const f = e.funnel || [];
@@ -911,8 +896,11 @@ function decisionDetail(e){
   return L.join('');
 }
 function push2(L, h){ L.push('<div style="margin:1px 0">· '+h+'</div>'); }
+// 难度档位词（唯一实现，0.8/2.0 与路由同源）
 function diffLevel(v){
-  return v < 1 ? t('d_l1') : v < 1.9 ? t('d_l2') : v < 2.6 ? t('d_l3') : t('d_l4');
+  // 与路由同源的三档（0.8 / 2.0）——与 decision_tags 的 easy/medium/hard 一致，
+  // 不再用另一套 1/1.9/2.6 边界（旧实现与标签/路由互相矛盾）
+  return v <= 0.8 ? t('tagdiff_easy') : v <= 2.0 ? t('tagdiff_mid') : t('tagdiff_hard');
 }
 function waterfallBar(e){
   const pre = e.preprocess_ms, dec = e.decision_ms;
