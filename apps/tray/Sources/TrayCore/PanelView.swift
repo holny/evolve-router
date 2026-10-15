@@ -231,9 +231,9 @@ public struct PanelView: View {
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
-                            // 决策打标微缩行（用户裁决）：任务难度 + 模型能力/价位
-                            // + 网关评分 + 难度↔能力匹配（英文标签 + 背景胶囊）
-                            if r.difficulty != nil || r.capability != nil || r.score != nil {
+                            // 决策打标微缩行（用户裁决）：只留决策级标签——任务难度 +
+                            // 网关评分 + 难度↔能力匹配；模型侧标签（cap/price）只在 Model 列表展示
+                            if r.difficulty != nil || r.score != nil {
                                 HStack(spacing: 3) {
                                     if let d = r.difficulty {
                                         let (label, col) = AppState.diffBadge(d)
@@ -243,12 +243,6 @@ public struct PanelView: View {
                                             .padding(.horizontal, 4).padding(.vertical, 1)
                                             .background(Capsule().fill(col.opacity(0.15)))
                                             .foregroundStyle(col)
-                                    }
-                                    if let cap = r.capability {
-                                        tagPill(cap, tint: .blue, bg: Color.blue.opacity(0.14), help: Self.tagHelpCap)
-                                    }
-                                    if let pt = r.priceTier {
-                                        tagPill(pt, tint: .purple, bg: Color.purple.opacity(0.14), help: Self.tagHelpPrice)
                                     }
                                     if let sc = r.score {
                                         tagPill(String(format: "%.2f", sc), help: Self.tagHelpScore)
