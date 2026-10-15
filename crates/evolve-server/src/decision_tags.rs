@@ -99,11 +99,14 @@ pub fn flags(j: &JudgmentSet) -> Vec<&'static str> {
     out
 }
 
-/// 判定为空（粘性复用 / 显式指定）时只有 mode——其余字段是服务端占位值
-/// （difficulty=0、flags=0，sticky 的 domain 直接沿用上轮），照原样展示会变成
-/// "easy/code" 这种从没判过的结论（Web 端同口径：只出 mode 徽章）
+/// 判定为空时只有 mode：**显式指定**（pinned）没走任何判定，服务端写的是
+/// `Domain::Other` + 全 0 占位（relay 的 direct 分支）——照原样展示会变成
+/// "easy/other" 这种从没判过的结论。
+/// 粘性复用（reused）不再算占位：它沿用的是**同一次工具流程**上一轮的真实判定
+/// （engine 粘性分支已把 domain/difficulty/flags 全量照搬），如实展示即可
+/// （用户裁决 2026-10-15：沿用的值是真的，只有"没判定"才是假的）
 fn judgment_is_placeholder(mode: &str) -> bool {
-    mode == "reused" || mode == "pinned"
+    mode == "pinned"
 }
 
 /// 事件里的 `tags` 对象（面板/Web 的唯一数据源）
@@ -159,10 +162,19 @@ mod tests {
 
     #[test]
     fn placeholder_paths_emit_mode_only() {
-        let reused = derive(&j(0.0, Domain::Code, "sticky"), Some("powerful"), true);
-        assert_eq!(reused, json!({ "mode": "reused" }));
+        // 显式指定：没判定过 → 只出 mode
         let pinned = derive(&j(0.0, Domain::Other, "explicit"), Some("basic"), false);
         assert_eq!(pinned, json!({ "mode": "pinned" }));
+        // 粘性复用：沿用值是真的 → 全量出（含 mode）
+        let mut st = j(1.2, Domain::Code, "sticky");
+        st.is_trivial = 0.0;
+        st.tool_heavy = 0.9;
+        let reused = derive(&st, Some("standard"), true);
+        assert_eq!(reused["mode"], "reused");
+        assert_eq!(reused["difficulty"], "medium");
+        assert_eq!(reused["domain"], "code");
+        assert_eq!(reused["flags"], json!(["tools"]));
+        assert_eq!(reused["fit"], "match");
         let model = derive(&j(1.2, Domain::Code, "decision_model"), Some("standard"), false);
         assert_eq!(model["mode"], "model");
         assert_eq!(model["difficulty"], "medium");
@@ -235,7 +247,17 @@ pub fn derive_from_event(ev: &Value) -> Option<Value> {
         .get("model_tags")
         .and_then(|m| m.get("capability"))
         .and_then(|x| x.as_str());
-    Some(derive(&set, cap, sticky))
+    let mut out = derive(&set, cap, sticky);
+    // 补算期的诚实性：**旧**粘性事件（本次修复前写入，无 tags 字段）里的
+    // difficulty/flags 是历史占位值 0——真实的沿用难度当时没落库，无法恢复。
+    // 此时宁可不出难度（也不出依赖难度的 fit），别把占位 0 读成"easy"
+    if sticky && set.difficulty == 0.0 {
+        if let Some(o) = out.as_object_mut() {
+            o.remove("difficulty");
+            o.remove("fit");
+        }
+    }
+    Some(out)
 }
 
     #[test]
@@ -257,12 +279,27 @@ pub fn derive_from_event(ev: &Value) -> Option<Value> {
         assert_eq!(t["fit"], "match");
         assert_eq!(t["flags"], json!(["tools", "stakes"]));
 
-        // 粘性复用事件 → 只有 mode（占位判定不外显）
+        // 粘性复用事件 → 沿用真实判定（难度取自 judgment，缺失时退回 difficulty_eff）
         let sticky = json!({
-            "judge": "sticky", "sticky": true,
-            "judgment": {"domain": "Code", "difficulty": 0.0},
+            "judge": "sticky", "sticky": true, "difficulty_eff": 1.2,
+            "judgment": {"domain": "Code", "difficulty": 1.2, "tool_heavy": 0.9},
         });
-        assert_eq!(derive_from_event(&sticky), Some(json!({"mode": "reused"})));
+        let t = derive_from_event(&sticky).expect("legacy sticky tags");
+        assert_eq!(t["mode"], "reused");
+        assert_eq!(t["difficulty"], "medium");
+        assert_eq!(t["domain"], "code");
+        assert_eq!(t["flags"], json!(["tools"]));
+
+        // 修复前的旧粘性事件：占位 0（真难度未落库）→ 不出难度/fit，别读成 easy
+        let old_sticky = json!({
+            "judge": "sticky", "sticky": true, "difficulty_eff": 0.0,
+            "judgment": {"domain": "Code", "difficulty": 0.0, "tool_heavy": 0.0},
+        });
+        let t = derive_from_event(&old_sticky).expect("legacy sticky tags");
+        assert_eq!(t["mode"], "reused");
+        assert!(t.get("difficulty").is_none(), "placeholder difficulty must be hidden: {t}");
+        assert!(t.get("fit").is_none());
+        assert_eq!(t["domain"], "code", "domain is genuinely inherited");
 
         // 缺 judgment → 不补（老到没有判定字段的事件保持原样）
         assert_eq!(derive_from_event(&json!({"kind": "chat"})), None);

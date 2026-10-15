@@ -238,15 +238,17 @@ impl Engine {
             if still_fits && size_ok && low_diff && tools_same && tier_ok && sticky.turns_left > 0 {
                 // zero external calls on the sticky fast path: reuse the
                 // sticky judgment snapshot instead of invoking the backend
+                // 沿用上一轮判定：domain / difficulty / 四个特征全部照搬
+                // （同一次工具流程的续跑，判定对象没变；填 0 会被读成"没判过/无特征"）
                 let j = JudgmentSet {
                     domain: sticky.domain,
                     domain_confidence: 1.0,
-                    difficulty: 0.0,
+                    difficulty: sticky.difficulty,
                     difficulty_confidence: 1.0,
-                    needs_vision: 0.0,
-                    is_trivial: 0.0,
-                    tool_heavy: 0.0,
-                    high_stakes: 0.0,
+                    needs_vision: sticky.flags[2],
+                    is_trivial: sticky.flags[0],
+                    tool_heavy: sticky.flags[1],
+                    high_stakes: sticky.flags[3],
                     session_relevance: 1.0,
                     session_depth: 0.0,
                     judge_source: "sticky",
@@ -1366,6 +1368,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
+            flags: [0.0; 4],
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1388,6 +1391,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
+            flags: [0.0; 4],
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1414,6 +1418,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
+            flags: [0.0; 4],
             est_tokens: 5,
         };
         let h = HealthMap::new();
@@ -1434,6 +1439,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 1.4,
+            flags: [0.0; 4],
             est_tokens: 600,
         };
         let h = HealthMap::new();
@@ -1457,6 +1463,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
+            flags: [0.0; 4],
             est_tokens: 1_000,
         };
         let h = HealthMap::new();
@@ -1521,6 +1528,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Code,
             difficulty: 1.2,
+            flags: [0.0; 4],
             est_tokens: 12_000,
         };
         // 注入热缓存遥测：standard 命中率 90%
@@ -1555,6 +1563,7 @@ mod tests {
             tools_sig: 0,
             domain: Domain::Chitchat,
             difficulty: 0.5,
+            flags: [0.0; 4],
             est_tokens: 200,
         };
         let tiers: HashMap<String, u8> = HashMap::from([

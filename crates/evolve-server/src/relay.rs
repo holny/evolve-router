@@ -214,6 +214,12 @@ pub async fn chat_completions(
                     tools_sig,
                     domain: d.judgment.domain,
                     difficulty: d.difficulty_eff,
+                    flags: [
+                        d.judgment.is_trivial,
+                        d.judgment.tool_heavy,
+                        d.judgment.needs_vision,
+                        d.judgment.high_stakes,
+                    ],
                     est_tokens: est,
                 },
             );

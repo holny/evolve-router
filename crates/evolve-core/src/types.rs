@@ -222,6 +222,10 @@ pub struct StickyState {
     pub domain: Domain,
     /// 上次判定的有效难度：粘性只对低难度任务延续（L2 上限）
     pub difficulty: f32,
+    /// 上次判定的请求特征 [is_trivial, tool_heavy, needs_vision, high_stakes]：
+    /// 与 difficulty/domain 一起沿用（同一次工具流程的续跑，特征不变）；
+    /// 不存的话占位判定只能是 0，面板/Web 会把"沿用"误读成"没有特征"
+    pub flags: [f32; 4],
     /// 上次请求的估算输入 tokens：粘性量级保护上限（2 倍暴增/减半即断）
     pub est_tokens: u64,
 }
