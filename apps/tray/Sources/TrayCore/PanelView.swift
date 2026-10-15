@@ -663,7 +663,7 @@ public struct PanelView: View {
     static let tagHelpDomain = "request domain classified by the gateway: code / math / data / agent / writing / lookup / chat"
     static let tagHelpFlag = "request traits detected by the gateway: trivial (nothing to route) / tools (tool-heavy turn) / vision (has images) / stakes (high-stakes)"
     static let tagHelpFit = "task difficulty ↔ model capability fit: match / over (capability above task) / under (capability below task)"
-    static let tagHelpMode = "decision path actually taken: reused (session stickiness — decision model not called) / rules (rule-engine fallback, decision model unavailable). Nothing shown = normal model-based decision"
+    static let tagHelpMode = "decision path actually taken: reused (session stickiness) / rules (rule-engine fallback when the decision model was unavailable) / pinned (you named the model explicitly) — all three skip the decision model. Nothing shown = normal model-based decision"
     static let tagHelpCap = "model capability tier: basic / standard / powerful"
     static let tagHelpPrice = "model price tier: cheap / medium / premium"
     static let tagHelpScore = "router score for the chosen model on this request (0.00-1.00)"
