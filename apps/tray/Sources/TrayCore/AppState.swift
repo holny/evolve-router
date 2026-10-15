@@ -419,10 +419,10 @@ public final class AppState: ObservableObject {
                 }
                 // 决策时点打标：难度 / 模型能力 / 价位 / 网关评分（事件同帧落库）
                 let judgment = ev["judgment"] as? [String: Any]
-                let difficulty = (judgment?["difficulty"] as? Double)
+                var difficulty = (judgment?["difficulty"] as? Double)
                     ?? ((judgment?["difficulty"] as? Int).map(Double.init))
                 // 对请求本身的判定：任务域 + 命中特征（阈值 0.6，与评分口径一致）
-                let domain = Self.shortDomain(judgment?["domain"] as? String)
+                var domain = Self.shortDomain(judgment?["domain"] as? String)
                 let f = { (k: String) -> Bool in
                     let v = (judgment?[k] as? Double) ?? ((judgment?[k] as? Int).map(Double.init)) ?? 0
                     return v > 0.6
@@ -441,6 +441,12 @@ public final class AppState: ObservableObject {
                     : (judgeSrc == "explicit" ? "pinned"
                     : (judgeSrc == "decision_model" ? "model"
                     : (judgeSrc == "decision_model+rules" ? "model+rules" : nil))))
+                // ⚠ 粘性复用/显式指定是**空判定**（服务端占位：difficulty=0、flags=0，
+                // sticky 的 domain 直接沿用上轮）→ 展示会变成"easy/code"这种没判过的结论。
+                // Web 端同口径：这类请求只出 mode 徽章，判定标签整块不出
+                if mode == "reused" || mode == "pinned" {
+                    difficulty = nil; domain = nil; flags = []
+                }
                 let modelTags = ev["model_tags"] as? [String: Any]
                 let score = ((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Double)
                     ?? (((ev["scores"] as? [String: Any])?[(ev["chosen"] as? String) ?? ""] as? Int).map(Double.init))
