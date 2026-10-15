@@ -23,19 +23,14 @@ public struct PanelView: View {
             header
             decisionBanner
             metricsCard
-            // 中段（Providers + Recent）可滚动：打标行增加了内容高度，必须保证
-            // 底部控制按钮（Stop/Quit）始终在框内（用户裁决）
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 10) {
-                    if !state.providers.isEmpty { providersCard }
-                    if !state.recent.isEmpty { decisionsCard }
-                }
-            }
-            .frame(maxHeight: .infinity)
+            if !state.providers.isEmpty { providersCard }
+            if !state.recent.isEmpty { decisionsCard }
+            // 标签颜色说明（用户裁决）：紧贴控制区之上，每项 1-2 词
+            if !state.providers.isEmpty || !state.recent.isEmpty { tagLegend }
             controls
         }
         .padding(14)
-        .frame(width: 336, height: 620)
+        .frame(width: 336)
         .task {
             await state.pollLive()
             await state.pollData()
@@ -249,20 +244,20 @@ public struct PanelView: View {
                                             .foregroundStyle(col)
                                     }
                                     if let cap = r.capability {
-                                        tagPill("cap " + cap)
+                                        tagPill("cap " + cap, tint: .blue, bg: Color.blue.opacity(0.14))
                                     }
                                     if let pt = r.priceTier {
-                                        tagPill("tier " + pt)
+                                        tagPill("price " + pt, tint: .purple, bg: Color.purple.opacity(0.14))
                                     }
                                     if let sc = r.score {
-                                        tagPill(String(format: "★%.2f", sc))
+                                        tagPill(String(format: "score %.2f", sc))
                                     }
                                     let capMap = ["basic": 0, "standard": 1, "powerful": 2]
                                     if let cap = r.capability, let d = r.difficulty,
                                        let cIdx = capMap[cap] {
                                         let dIdx = d <= 0.8 ? 0 : d <= 2.0 ? 1 : 2
                                         let m = dIdx == cIdx ? "match" : (cIdx > dIdx ? "over-fit" : "under-fit")
-                                        tagPill(m, tint: dIdx == cIdx ? .green : .orange)
+                                        tagPill(m, tint: dIdx == cIdx ? .green : .orange, bg: (dIdx == cIdx ? Color.green : Color.orange).opacity(0.15))
                                     }
                                 }
                                 .lineLimit(1)
@@ -360,10 +355,10 @@ public struct PanelView: View {
                     // 当前态标签对历史无意义（用户裁决）→ 不展示
                     if state.statWindowToday {
                         if let cap = m.capability, !cap.isEmpty {
-                            tagPill("cap " + cap)
+                            tagPill("cap " + cap, tint: .blue, bg: Color.blue.opacity(0.14))
                         }
                         if let pt = m.priceTier, !pt.isEmpty {
-                            tagPill("tier " + pt)
+                            tagPill("price " + pt, tint: .purple, bg: Color.purple.opacity(0.14))
                         }
                     }
                     if m.tok > 0 {
@@ -640,13 +635,33 @@ public struct PanelView: View {
         }
     }
 
-    /// 打标胶囊（英文小标签 + 背景色）
-    private func tagPill(_ text: String, tint: Color = .secondary) -> some View {
+    /// 打标胶囊（英文小标签 + 类别底色）
+    private func tagPill(_ text: String, tint: Color = .secondary, bg: Color? = nil) -> some View {
         Text(text)
             .font(.system(size: 8.5))
             .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(Capsule().fill(Color.primary.opacity(0.08)))
+            .background(Capsule().fill(bg ?? Color.primary.opacity(0.08)))
             .foregroundStyle(tint)
+    }
+
+    /// 标签颜色说明（每项 1-2 词）
+    private var tagLegend: some View {
+        HStack(spacing: 9) {
+            legendItem(.green, "difficulty")
+            legendItem(.blue, "cap")
+            legendItem(.purple, "price")
+            legendItem(.secondary, "score")
+            legendItem(.orange, "match")
+        }
+        .font(.system(size: 8.5))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func legendItem(_ c: Color, _ label: String) -> some View {
+        HStack(spacing: 3) {
+            Circle().fill(c.opacity(0.55)).frame(width: 6, height: 6)
+            Text(label).foregroundStyle(.tertiary)
+        }
     }
 
     private func quotaBar(_ pct: Int) -> some View {

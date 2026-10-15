@@ -23,7 +23,7 @@ enum PanelPreview {
         state.lastSync = Date()
 
         let win = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 336, height: 660),
+            contentRect: NSRect(x: 0, y: 0, width: 336, height: 860),
             styleMask: [.titled, .resizable],
             backing: .buffered, defer: false
         )

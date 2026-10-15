@@ -254,7 +254,7 @@ public final class AppState: ObservableObject {
         }
         mrows.sort { if $0.tok != $1.tok { return $0.tok > $1.tok } ; return $0.id < $1.id }
         // 模型打标（实时口径）：仅 today 视图挂到行上（yesterday 的标签是当前态，无意义）
-        modelRows = mrows.prefix(8).map { m in
+        modelRows = mrows.prefix(6).map { m in
             let tag = statWindowToday ? modelTagMap[m.id] : nil
             return ModelRow(id: m.id, tok: m.tok, hit: m.hit, rate: m.rate, ttft: m.ttft,
                             requests: m.requests, capability: tag?.0, priceTier: tag?.1)
@@ -369,7 +369,7 @@ public final class AppState: ObservableObject {
             if $0.enabled != $1.enabled { return $0.enabled }
             return $0.key < $1.key
         }
-        providers = Array(rows.prefix(8))
+        providers = Array(rows.prefix(6))
         if case (200, let data)? = try? await get("/api/events?limit=30"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             var decRows: [RecentDecision] = []
@@ -429,7 +429,7 @@ public final class AppState: ObservableObject {
                     score: score))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
-                if decRows.count >= 5 { break }
+                if decRows.count >= 4 { break }
             }
             recent = decRows
             if let newest = arr.last(where: { ($0["kind"] as? String) == "chat" }) {
