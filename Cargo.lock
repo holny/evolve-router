@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "hex",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-decision"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "async-trait",
  "evolve-core",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-discovery"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "evolve-core",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-memory"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "evolve-core",
@@ -398,7 +398,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-server"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "anyhow",
  "axum",

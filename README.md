@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#development)
+[![Tests](https://img.shields.io/badge/tests-220%20passing-brightgreen.svg)](#development)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -20,10 +20,12 @@
 
 ![EvolveRouter architecture](docs/assets/architecture.svg)
 
+*Every agent points at one endpoint with `model = "auto"`. A dual judge (decision model + heuristic) scores each request; the flywheel feeds every outcome back into the ranking; each provider plan is priced in its own currency against its own budget. [Edit the source](docs/assets/architecture.excalidraw).*
+
 
 ## Price-aware routing: spend where it matters, by construction
 
-Difficulty is judged, then **calibrated to a target distribution (70% easy / 20% medium / 10% hard)",
+Difficulty is judged, then **calibrated to a target distribution (70% easy / 20% medium / 10% hard)**,
 and mapped onto **capability and price tiers** so the expensive models only serve the hard tail:
 
 | Layer | What it does |
@@ -40,7 +42,7 @@ and mapped onto **capability and price tiers** so the expensive models only serv
 
 ## Decision-model slots: JEV > LAYA > OPENAI
 
-The judge is pluggable and configurable per slot (`[[decision.slots]]` in `evo-router.toml` — the single place it is read from); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
+The judge is pluggable and configurable per slot (`decision.slots` in `~/.evo-router/evo-router-config.jsonc` — the single place it is read from); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
 
 ## Why not another proxy
 
@@ -98,7 +100,7 @@ Quality cascade: a *successful* response that is degenerate / empty / has broken
 
 ## Three pillars
 
-1. **Intelligent decisions, not prefix rules.** Every request is judged by a pluggable **decision model** on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion, covering the decision model's CJK blind spots); if the decision model is unreachable, the heuristic takes over and **routing never blocks**. Backends are swappable by config — cloud (TypeSafe Jev) or self-hosted open-source decision models (Intern-Decision, StartLux-Decision) behind the same protocol. Re-judging is skipped only inside a **tool loop** (the request continues a tool call of the same turn) and only while the previous judgment stays low-difficulty, the size band holds, the toolset is unchanged, and the service healthy — a new user message always triggers a full re-judgment.
+1. **Intelligent decisions, not prefix rules.** Every request is judged by a pluggable **decision model** on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion, covering the decision model's CJK blind spots); if the decision model is unreachable, the heuristic takes over and **routing never blocks**. Backends are swappable by config — cloud (TypeSafe Jev) or self-hosted open-source decision models (Intern-Decision, StartLux-Decision) behind the same protocol, plus an optional local `laya` sidecar. Re-judging is skipped only inside a **tool loop** (the request continues a tool call of the same turn) and only while the previous judgment stays low-difficulty, the size band holds, the toolset is unchanged, and the service healthy — a new user message always triggers a full re-judgment.
 2. **Budget-aware routing.** Every candidate is priced in its plan's own currency — credits (zhipu / Z.ai / MiniMax), dollars (opencode zen Go), AFP (volces) — before it is scored. Quota budget protection runs at three levels: **>60%** of your allowance deprioritizes the plan, **>85%** breaks session stickiness, **>95%** filters it out entirely — preserving headroom for the tasks that actually need it.
 3. **Managed plans in one dashboard.** Vendor subscription plans are first-class citizens: tiers, allowances, credit multipliers and per-model dollar limits are built in; the dashboard shows live provider-reported quotas per window with one-click reconciliation.
 
@@ -145,33 +147,49 @@ cargo build --release
 # gateway listening on http://127.0.0.1:8787
 ```
 
-Configuration lives at `~/.evo-router/evo-router.toml` (a default is embedded and written on first run). Point providers with their base URLs and API keys:
+Configuration lives at `~/.evo-router/evo-router-config.jsonc`; when no file exists the embedded default is used (writing one out is a one-time migration step for older installs). Point providers with their base URLs and API keys:
 
-```toml
-[server]
-host = "127.0.0.1"
-port = 8787
-
-[[models]]
-id = "zhipuai-coding-plan/glm-5.3"
-provider = "zhipuai-coding-plan"
-base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
-api_key_env = "ZHIPU_API_KEY"
-upstream_model = "glm-5.3"
-context_window = 1024000
-cost = { input = 0.0, output = 0.0 }   # plan models: marginal cost ≈ 0
+```jsonc
+// ~/.evo-router/evo-router-config.jsonc  (JSONC: comments allowed)
+{
+  "server": { "host": "127.0.0.1", "port": 8787 },
+  "models": [
+    {
+      "id": "zhipuai-coding-plan/glm-5.3",
+      "provider": "zhipuai-coding-plan",
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "api_key_env": "ZHIPU_API_KEY",       // or inline "api_key": "..." (chmod 600)
+      "upstream_model": "glm-5.3",
+      "context_window": 1024000,
+      "cost": { "input": 0.0, "output": 0.0 }   // plan models: marginal cost ~ 0
+    }
+  ]
+}
 ```
 
-The decision model is configured in the same file — this is the only place it is read from (a gateway started by the menu-bar app at login has no shell environment, so environment-only configuration silently degraded to the heuristic judge):
+The decision model goes in the same file (`decision.slots`) — that is the only place it is read from, since a gateway started by the menu-bar app at login has no shell environment:
 
-```toml
-[[decision.slots]]
-kind = "jev"                        # jev | laya | openai (priority order)
-api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 this file)
-# base_url = ""                     # optional for the JEV cloud; required for laya/openai
-# model = ""                        # required for openai
+```jsonc
+{
+  "decision": {
+    "backend": "decision_model",     // decision_model = model + rules fusion; auto = model only; heuristic = rules only
+    "judge_timeout_ms": 12000,       // default 3000; raise it for internet relays
+    "slots": [
+      { "kind": "jev", "api_key": "<key>" },                                   // JEV cloud (native contract)
+      { "kind": "jev",                                                          // StartLux-Decision 27B via Bamboo Relay
+        "base_url": "https://api.bamboonode.dev/v1/systemone",
+        "model": "startlux-decision-27b-autothink",
+        "think_mode": "never",        // one pass, fastest (AutoThink otherwise reasons when unsure)
+        "api_key": "<bamboo-key>" },
+      { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" },        // local sidecar, no key
+      { "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",             // any OpenAI-compatible endpoint
+        "model": "<model-id>" }
+    ]
+  }
+}
 ```
-Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Two speed knobs matter with a remote judge: `judge_timeout_ms` (default 3000; raise it for internet relays — a 27B judge behind a relay answers in ~2.5 s, so 3 s times out before the answer arrives) and a per-slot `think_mode: "never"` (StartLux AutoThink: one pass instead of reasoning when unsure). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
+
+Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Slots are tried in the order **jev > laya > openai**, a fatal error blacklists that slot for the process lifetime, and a whole-chain failure degrades to the heuristic — a decision-model outage never blocks routing. With a remote judge, `judge_timeout_ms` matters (a 27B judge behind a relay answers in ~2.5 s, so the 3 s default times out before the answer arrives).
 
 ### Config format and where credentials live
 
@@ -194,15 +212,22 @@ So: nothing is required in the config file to get started (discovery finds your 
 
 | Section | How it takes effect |
 |---|---|
-| `[decision]` / `[[decision.slots]]` | **hot-reloaded within ~5 s** — the judge chain (and its route advisor) is swapped in place, no restart. Force it immediately with `curl -X POST http://127.0.0.1:8787/api/reload` |
+| `decision` / `decision.slots` | **hot-reloaded within ~5 s** — the judge chain (and its route advisor) is swapped in place, no restart. Force it immediately with `curl -X POST http://127.0.0.1:8787/api/reload` |
 | any other section (`[server]`, `[policy]`, `[[models]]`, `[discovery]`, …) | needs a restart — the menu-bar panel's **Stop / Start**, or `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway` for the LaunchAgent, or Ctrl-C the foreground process |
 
 `/api/live` reports the live state so you never have to guess:
 
 ```json
-"config": { "reloaded_at_ms": 1792116723449, "restart_required": false,
-            "restart_reason": null, "path": "~/.evo-router/evo-router.toml", "active_slots": ["jev"] }
+{
+  "config":   { "reloaded_at_ms": 1792116723449, "restart_required": false, "restart_reason": null,
+                "path": "~/.evo-router/evo-router-config.jsonc", "active_slots": ["jev"] },
+  "decision": { "backend": "decision_model", "status": "ok",
+                "last_judge": "decision_model+rules", "last_model_used": true,
+                "last_fail": null }
+}
 ```
+
+`decision.status` is one of `ok` (judging as configured), `degraded` (slots configured but the last judge fell back to rules — `last_fail` carries the reason, e.g. `timeout` or `auth failed (401/403)`), `stale` (configured, not applied yet) or `missing` (nothing configured). The menu-bar panel and the dashboard render the same object, and a yellow banner spells out the non-`ok` states.
 
 `restart_required` turns on when a non-`[decision]` section changes and clears again if you revert it, so a stale reminder cannot stick.
 
@@ -212,7 +237,7 @@ Everything the gateway writes lives under `~/.evo-router/` (override with `[data
 
 ```
 ~/.evo-router/
-├── evo-router.toml       # configuration (the only file you edit)
+├── evo-router-config.jsonc  # configuration (the only file you edit)
 ├── events/               # append-only decision log (replay, stats, backtest)
 │   ├── events.jsonl
 │   └── events.jsonl.1     # 32 MB rotation
@@ -283,6 +308,8 @@ On macOS, EvolveRouter lives in your **menu bar** as a native SwiftUI panel. The
 | Gray + breathing | Gateway starting |
 
 The panel streams live decisions, per-provider 5-hour quotas, cache-hit rates, tok/s, TTFT, cooldown countdowns with causes, and one-tap wiring-config copy — all without opening the dashboard.
+
+The header answers "who is judging, and is it working": line 1 is the gateway state (`Running · 8787`) plus the version, line 2 is the sync time plus **`judged by decision model + rules`** / **`judged by rules only`** — the *configured* judge path, not the last request's outcome. When a configured decision model is not working, an orange banner says why (`Decision model unreachable (timeout)` / `(auth failed (401/403))` / `not configured` / `applying`). The controls row carries **Stop/Start**, a labelled **Restart** (applies `[server]` / `[policy]` / `models` changes) and Quit; the Providers card is a **top-6-by-usage** snapshot of the chosen window (the dashboard shows the full management list).
 
 Every request and every model row is **tagged with the decision itself**, rendered from the same server-derived values the dashboard uses:
 
@@ -358,7 +385,7 @@ Deep dives: [Architecture](docs/ARCHITECTURE.md) · [Decision flow](docs/DECISIO
 
 ```bash
 cargo build --release
-cargo test          # 197 tests
+cargo test          # 220 tests
 cargo clippy        # zero warnings policy
 ```
 

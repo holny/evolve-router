@@ -6,7 +6,7 @@
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-197%20passing-brightgreen.svg)](#开发)
+[![Tests](https://img.shields.io/badge/tests-220%20passing-brightgreen.svg)](#开发)
 
 [English](README.md) | [中文](README.zh-CN.md)
 
@@ -40,7 +40,7 @@
 
 ## 决策模型槽位：JEV > LAYA > OPENAI
 
-判官可插拔、按槽位配置（`evo-router.toml` 的 `[[decision.slots]]`，这是唯一的读取来源）；按优先级尝试，任一失败即降级启发式——**路由永不阻塞**。`/api/live` 与面板横幅会显示当前生效槽位与"未配置"提示。各 provider 的官方配额端点、价目与峰谷时段收在一张按 hostname 索引的注册表（`provider_info`）里，数据过期会提醒复核。
+判官可插拔、按槽位配置（`~/.evo-router/evo-router-config.jsonc` 的 `decision.slots`，这是唯一的读取来源）；按优先级尝试，任一失败即降级启发式——**路由永不阻塞**。`/api/live` 与面板横幅会显示当前生效槽位与"未配置"提示。各 provider 的官方配额端点、价目与峰谷时段收在一张按 hostname 索引的注册表（`provider_info`）里，数据过期会提醒复核。
 
 ## 为什么不是另一个 proxy
 
@@ -145,33 +145,49 @@ cargo build --release
 # 网关监听 http://127.0.0.1:8787
 ```
 
-配置位于 `~/.evo-router/evo-router.toml`（内置默认配置，首次运行自动写出）。填入 Provider 的 base URL 与 API key：
+配置位于 `~/.evo-router/evo-router-config.jsonc`；文件不存在时直接用内置默认（写盘只发生在旧安装的一次性迁移里）。填入 Provider 的 base URL 与 API key：
 
-```toml
-[server]
-host = "127.0.0.1"
-port = 8787
-
-[[models]]
-id = "zhipuai-coding-plan/glm-5.3"
-provider = "zhipuai-coding-plan"
-base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
-api_key_env = "ZHIPU_API_KEY"
-upstream_model = "glm-5.3"
-context_window = 1024000
-cost = { input = 0.0, output = 0.0 }   # plan 模型边际成本 ≈ 0
+```jsonc
+// ~/.evo-router/evo-router-config.jsonc（JSONC：允许注释）
+{
+  "server": { "host": "127.0.0.1", "port": 8787 },
+  "models": [
+    {
+      "id": "zhipuai-coding-plan/glm-5.3",
+      "provider": "zhipuai-coding-plan",
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "api_key_env": "ZHIPU_API_KEY",       // 或内联 "api_key": "..."（文件 chmod 600）
+      "upstream_model": "glm-5.3",
+      "context_window": 1024000,
+      "cost": { "input": 0.0, "output": 0.0 }   // plan 模型边际成本 ≈ 0
+    }
+  ]
+}
 ```
 
-决策模型在**同一份配置**里声明——这是它唯一的读取来源（登录后由菜单栏 app 拉起的网关没有 shell 环境变量，只靠 env 配置会静默降级成启发式判官）：
+决策模型写在同一份文件的 `decision.slots` 里——这是它唯一的读取来源（登录后由菜单栏 app 拉起的网关没有 shell 环境变量）：
 
-```toml
-[[decision.slots]]
-kind = "jev"                        # jev | laya | openai（按此优先级）
-api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 chmod 600 本文件）
-# base_url = ""                     # JEV 云端可省；laya/openai 必填
-# model = ""                        # openai 槽必填
+```jsonc
+{
+  "decision": {
+    "backend": "decision_model",     // decision_model = 模型 + 规则取严融合；auto = 仅模型；heuristic = 仅规则
+    "judge_timeout_ms": 12000,       // 默认 3000；走公网中继请调大
+    "slots": [
+      { "kind": "jev", "api_key": "<key>" },                                   // JEV 云端（原生契约）
+      { "kind": "jev",                                                          // StartLux-Decision 27B（经 Bamboo Relay）
+        "base_url": "https://api.bamboonode.dev/v1/systemone",
+        "model": "startlux-decision-27b-autothink",
+        "think_mode": "never",        // 单遍作答（最快）；AutoThink 默认不确定时会先推理
+        "api_key": "<bamboo-key>" },
+      { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" },        // 本地 sidecar，免 key
+      { "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",             // 任意 OpenAI 兼容端点
+        "model": "<model-id>" }
+    ]
+  }
+}
 ```
-配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。用远程判定端点时有两个速度旋钮要注意：`judge_timeout_ms`（默认 3000，走公网中继请调大——实测 27B 判定经中继约 2.5s，3s 会在响应到达前超时降级）与槽位级 `think_mode: "never"`（StartLux AutoThink 单遍作答，不进入推理）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。
+
+配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。用远程判定端点时 `judge_timeout_ms` 很关键（27B 判定经中继约 2.5s，默认 3s 会在响应到达前超时）。
 
 ### 配置格式与凭据存放位置
 
@@ -194,15 +210,22 @@ Provider 凭据到底从哪来：
 
 | 段落 | 生效方式 |
 |---|---|
-| `[decision]` / `[[decision.slots]]` | **约 5 秒内热加载**——判定槽位链与其 route advisor 原地替换，**无需重启**；想立刻生效：`curl -X POST http://127.0.0.1:8787/api/reload` |
+| `decision`（含 `decision.slots`） | **约 5 秒内热加载**——判定槽位链与其 route advisor 原地替换，**无需重启**；想立刻生效：`curl -X POST http://127.0.0.1:8787/api/reload` |
 | 其余段落（`[server]` / `[policy]` / `[[models]]` / `[discovery]` …） | 需重启——菜单栏面板 **Stop → Start**，或 LaunchAgent 模式 `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway`，或前台进程 Ctrl-C 后重新 `evo-router serve` |
 
 `/api/live` 会如实下发状态，不用猜：
 
 ```json
-"config": { "reloaded_at_ms": 1792116723449, "restart_required": false,
-            "restart_reason": null, "path": "~/.evo-router/evo-router.toml", "active_slots": ["jev"] }
+{
+  "config":   { "reloaded_at_ms": 1792116723449, "restart_required": false, "restart_reason": null,
+                "path": "~/.evo-router/evo-router-config.jsonc", "active_slots": ["jev"] },
+  "decision": { "backend": "decision_model", "status": "ok",
+                "last_judge": "decision_model+rules", "last_model_used": true,
+                "last_fail": null }
+}
 ```
+
+`decision.status` 取值为 `ok`（按配置判定）/ `degraded`（配了槽位但最近一次回退成规则，`last_fail` 带原因如 `timeout`、`auth failed (401/403)`）/ `stale`（配了但尚未生效）/ `missing`（什么都没配）。macOS 面板与网页渲染同一份数据，非 `ok` 状态会显示黄字横幅说明原因。
 
 非 `[decision]` 段落改动时 `restart_required` 置位；把文件改回原样它会自动清除（不留假提醒）。
 
@@ -212,7 +235,7 @@ Provider 凭据到底从哪来：
 
 ```
 ~/.evo-router/
-├── evo-router.toml       # 配置（唯一需要手动编辑的文件）
+├── evo-router-config.jsonc  # 配置（唯一需要手动编辑的文件）
 ├── events/               # 追加型决策日志（回放/统计/回测的数据底座）
 │   ├── events.jsonl
 │   └── events.jsonl.1     # 32MB 轮转
@@ -283,6 +306,8 @@ evo-router service install   # 另有：start / stop / restart / status
 | 灰色 + 呼吸 | 网关启动中 |
 
 面板实时推送最近决策、每家 Provider 的 5 小时配额、缓存命中率、吐字速率、TTFT、冷却倒计时与原因，接入配置一键复制——无需打开完整面板。
+
+头行回答"现在是谁在判定、是否正常"：第一行是网关状态（`Running · 8787`）与版本号，第二行是同步时间 + **`judged by decision model + rules`**／**`judged by rules only`**——显示的是**配置的判定路径**，不是最近一条请求的结果。配了决策模型但当前不可用时，橙色横幅会写明原因（`Decision model unreachable (timeout)`／`(auth failed 401/403)`／`not configured`／`applying`）。控制行有 **Stop/Start**、带文字的 **Restart**（让 `[server]` / `[policy]` / `models` 改动生效）与 Quit；Providers 卡是所选窗口的**用量 top 6** 快照（网页面板才是全量管理列表）。
 
 每条请求、每行模型都**带着这次决策本身的标签**，取值与网页面板同源（服务端一次算好）：
 
@@ -355,7 +380,7 @@ evo-router backtest              # 在 events.jsonl 上 A/B 回放两套策略�
 
 ```bash
 cargo build --release
-cargo test          # 197 个测试
+cargo test          # 220 个测试
 cargo clippy        # 零警告策略
 ```
 
