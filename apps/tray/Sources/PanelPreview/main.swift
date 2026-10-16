@@ -34,6 +34,11 @@ enum PanelPreview {
             ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, tokens24h: 51_000, planKind: "coding"),
         ]
         state.lastSync = Date()
+        // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）
+        if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil {
+            state.configRestartRequired = true
+            state.configRestartReason = "sections other than [decision] changed — restart the gateway to apply"
+        }
 
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 336, height: 860),

@@ -37,7 +37,7 @@ public struct PanelView: View {
         // 与页头同值时按钮会贴住下边框（实测页头 15pt / 页脚 8pt）→ 页脚加宽
         .padding(.horizontal, 14)
         .padding(.top, 14)
-        .padding(.bottom, 20)
+        .padding(.bottom, 26)
         .frame(width: 336)
         .task {
             if previewSeed { return }
@@ -546,20 +546,38 @@ public struct PanelView: View {
                     if let url = URL(string: Config.baseURL) { NSWorkspace.shared.open(url) }
                 }
             }
+            // 非 [decision] 段落改动 → 提示（重启按钮就在下一行，不再重复放一个）
+            if state.configRestartRequired {
+                HStack(spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.orange)
+                    Text(t("cfg_dirty"))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                .help(state.configRestartReason ?? t("restart_help"))
+            }
             HStack(spacing: 6) {
                 gatewayChip
+                chip(icon: "arrow.clockwise", label: t("restart"), tint: .accentColor,
+                     help: t("restart_help")) {
+                    Task { await restartGateway() }
+                }
                 chip(icon: "power", label: t("quit"), tint: .red, help: t("quit"), danger: true) {
                     showExitConfirm = true
                 }
                 Spacer(minLength: 2)
+                // 开关文字改由 tooltip 承载：控制行已有 Stop/Restart/Quit 三个文字按钮，
+                // 336pt 宽度下再放 "Autostart" 文字会把 Restart 挤成 "Res…"
                 Toggle(isOn: $autostart) { EmptyView() }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .labelsHidden()
+                    .help(t("autostart"))
                     .onChange(of: autostart) { on in applyAutostart(on) }
-                Text(t("autostart"))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -724,6 +742,15 @@ public struct PanelView: View {
     }
 
     // MARK: - 操作
+
+    /// 面板"Restart"：停掉网关子进程再拉起（非 [decision] 配置改动靠它生效）
+    private func restartGateway() async {
+        await gateway.stop()
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        await gateway.ensureRunning()
+        await state.pollLive()
+        await state.pollData()
+    }
 
     private func toggleGateway() async {
         if state.healthy {

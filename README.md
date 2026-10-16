@@ -173,6 +173,20 @@ api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 
 ```
 Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
 
+### Config format and where credentials live
+
+The config is one **serde schema**, so you can write it as **TOML** (`evo-router.toml`, canonical — comments are the docs), **JSONC** (`evo-router.jsonc`, comments allowed) or **JSON** (`evo-router.json`). The lookup order is `.toml` → `.jsonc` → `.json` in `~/.evo-router/` then the working directory, so switching format is a rename.
+
+Where provider credentials actually come from:
+
+| Source | Contains | When |
+|---|---|---|
+| Agent configs (`~/.config/opencode/opencode.jsonc`, `~/.codex/config.toml`, …) | base_url + api_key, read by discovery | every startup — **never copied** into our files |
+| `~/.evo-router/state/overrides.json` | the providers you add/edit in the dashboard or panel (base_url, api_key, tier, protocol, …) | written by the UI, replayed at startup |
+| `evo-router.toml` `[[models]]` | static declarations — `base_url`, `api_key_env` (env var name), or **inline `api_key`** (chmod 600) | static, wins over discovery for the same id |
+
+So: nothing is required in the config file to get started (discovery finds your agents), and everything *can* live there if you prefer an explicit, single-file setup.
+
 ### Reloading configuration
 
 | Section | How it takes effect |

@@ -156,6 +156,12 @@ public final class AppState: ObservableObject {
     @Published public var decisionStatus = "ok"
     /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
     @Published public var version = ""
+    /// 配置热加载状态（/api/live 下发）：非 [decision] 段落改动 → 面板提示重启
+    @Published public var configRestartRequired = false
+    @Published public var configRestartReason: String?
+    @Published public var configReloadedAt: Int64?
+    /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
+    @Published public var activeSlots: [String] = []
     /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
     @Published public var softPct = 60
     /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
@@ -204,6 +210,11 @@ public final class AppState: ObservableObject {
             inflight = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
             decisionStatus = ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok"
             version = (obj["version"] as? String) ?? version
+            let cfgObj = obj["config"] as? [String: Any]
+            configRestartRequired = (cfgObj?["restart_required"] as? Bool) ?? false
+            configRestartReason = cfgObj?["restart_reason"] as? String
+            configReloadedAt = (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) }
+            activeSlots = (cfgObj?["active_slots"] as? [String]) ?? []
         } else {
             inflight = 0
         }

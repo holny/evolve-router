@@ -37,8 +37,13 @@ let T: [String: String] = [
     "gateway_err": "gateway error",
     "l_edit_weight": "Edit model weight",
     "dm_missing": "Decision model missing — heuristic only",
-    "dm_missing_hint": "Set DECISION_JEV_* / LAYA_* / OPENAI_* env, then restart",
-    "dm_stale": "Decision model set — restart to apply",
+    "dm_missing_hint": "Add a [[decision.slots]] block in evo-router.toml (hot-reloads in ~5s)",
+    "dm_stale": "Decision slots configured — applying",
+    "restart": "Restart",
+    "restart_help": "Restart the gateway (applies [server]/[policy]/[[models]] changes)",
+    "reload": "Reload",
+    "reload_help": "Reload config now (decision slots hot-reload automatically every ~5s)",
+    "cfg_dirty": "Config changed — restart to apply",
 ]
 
 public func t(_ key: String) -> String {

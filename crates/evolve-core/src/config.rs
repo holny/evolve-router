@@ -167,6 +167,9 @@ pub struct ModelEntry {
     pub base_url: String,
     pub api_key_env: Option<String>,
     pub api_keys_env: Option<Vec<String>>,
+    /// 内联 key（等价于 api_key_env，但值直接写在配置里）——
+    /// 适合"配置即唯一来源"的部署（如登录自启的网关拿不到 shell 环境变量）
+    pub api_key: Option<String>,
     pub upstream_model: Option<String>,
     pub context_window: Option<u64>,
     pub max_output: u64,
@@ -191,6 +194,7 @@ impl Default for ModelEntry {
             base_url: d.base_url.clone(),
             api_key_env: None,
             api_keys_env: None,
+            api_key: None,
             plan: None,
             currency: None,
             upstream_model: None,
@@ -276,16 +280,79 @@ impl Default for StrategyCfg {
     }
 }
 
+/// 剥掉 JSONC 注释（`//` 行注释与 `/* */` 块注释），**字符串内的注释符不动**。
+/// 目的：JSON 配置也能像 TOML 一样写说明，解析前清理即可。
+pub fn strip_json_comments(text: &str) -> String {
+    let b: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut in_str, mut esc) = (0usize, false, false);
+    while i < b.len() {
+        let c = b[i];
+        if in_str {
+            out.push(c);
+            if esc {
+                esc = false;
+            } else if c == '\\' {
+                esc = true;
+            } else if c == '"' {
+                in_str = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_str = true;
+                out.push(c);
+                i += 1;
+            }
+            '/' if i + 1 < b.len() && b[i + 1] == '/' => {
+                while i < b.len() && b[i] != '\n' {
+                    i += 1;
+                }
+            }
+            '/' if i + 1 < b.len() && b[i + 1] == '*' => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == '*' && b[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 impl FileConfig {
+    /// 解析 TOML（内部错误类型保持 toml::de::Error，兼容既有调用）
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
+    }
+
+    /// 按扩展名解析：`.json` / `.jsonc` 走 JSON（jsonc 允许 `//` 与 `/* */` 注释），
+    /// 其余（含内置默认）走 TOML。JSON 与 TOML 是**同一套结构**（serde 同一份定义），
+    /// 所以两种文件可互换；注释在 JSON 里也能写（jsonc），只是解析前被剥掉。
+    pub fn parse_text(text: &str, path: Option<&Path>) -> anyhow::Result<Self> {
+        let is_json = path
+            .and_then(|p| p.extension().map(|e| e.to_string_lossy().to_lowercase()))
+            .map(|e| e == "json" || e == "jsonc")
+            .unwrap_or(false);
+        if !is_json {
+            return Ok(Self::parse(text)?);
+        }
+        let cleaned = strip_json_comments(text);
+        Ok(serde_json::from_str(&cleaned)?)
     }
 
     pub fn from_paths(candidates: &[std::path::PathBuf], embedded_default: &str) -> anyhow::Result<(Self, Option<std::path::PathBuf>)> {
         for p in candidates {
             if p.is_file() {
                 let text = std::fs::read_to_string(p)?;
-                return Ok((Self::parse(&text)?, Some(p.clone())));
+                return Ok((Self::parse_text(&text, Some(p))?, Some(p.clone())));
             }
         }
         Ok((Self::parse(embedded_default)?, None))
@@ -306,7 +373,12 @@ impl FileConfig {
                     .to_string()
             });
         let mut keys: Vec<KeySlot> = Vec::new();
-        if let Some(envs) = &entry.api_keys_env {
+        // 内联 key 优先（显式写在配置文件里 = 用户意图最强）
+        if let Some(k) = entry.api_key.as_ref().filter(|k| !k.trim().is_empty()) {
+            keys.push(KeySlot { label: "config:api_key".into(), value: k.trim().to_string() });
+        }
+        if keys.is_empty()
+            && let Some(envs) = &entry.api_keys_env {
             for (i, env) in envs.iter().enumerate() {
                 if let Ok(v) = std::env::var(env)
                     && !v.is_empty() {
@@ -320,7 +392,11 @@ impl FileConfig {
                     && !v.is_empty() {
                         keys.push(KeySlot { label: env.clone(), value: v });
                     }
-        let api_key = entry.api_key_env.as_ref().map(|env| std::env::var(env).unwrap_or_default());
+        let api_key = entry
+            .api_key
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .or_else(|| entry.api_key_env.as_ref().map(|env| std::env::var(env).unwrap_or_default()));
         // provider 为空时从 id 前缀推断（"zhipuai-coding-plan/glm-5.3" → "zhipuai-coding-plan"）
         let provider = if entry.provider.is_empty() {
             entry.id.split('/').next().unwrap_or(&entry.id).to_string()
@@ -364,10 +440,15 @@ pub const DEFAULT_CONFIG_NAME: &str = "evo-router.toml";
 pub const LEGACY_DATA_DIR: &str = "~/.evolve";
 
 pub fn default_config_paths() -> Vec<std::path::PathBuf> {
+    // 同名多扩展名：TOML 优先（注释即文档），也支持 JSON / JSONC（机器生成友好）
     let mut paths = vec![Path::new(DEFAULT_CONFIG_NAME).to_path_buf()];
+    paths.push(Path::new("evo-router.jsonc").to_path_buf());
+    paths.push(Path::new("evo-router.json").to_path_buf());
     if let Ok(home) = std::env::var("HOME") {
         let dir = Path::new(&home).join(".evo-router");
         paths.push(dir.join(DEFAULT_CONFIG_NAME));
+        paths.push(dir.join("evo-router.jsonc"));
+        paths.push(dir.join("evo-router.json"));
         // 改名前的旧位置：新名优先，旧名兜底——升级用户配置不静默丢失
         // 新目录里的旧文件名（迁移后可能残留）→ 兜底读取
         paths.push(dir.join("evolve.toml"));
@@ -794,5 +875,64 @@ mod data_dir_tests {
         assert_eq!(moved.len(), 1, "conflicting file must be kept aside, not dropped");
         assert_eq!(std::fs::read_to_string(moved[0].path()).unwrap(), "new");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// JSON / JSONC 与 TOML 是同一套结构：同一份配置两种写法都要能解析
+    #[test]
+    fn json_and_jsonc_configs_parse_like_toml() {
+        let toml_text = r#"
+[server]
+port = 8787
+
+[decision]
+backend = "auto"
+
+[[decision.slots]]
+kind = "jev"
+api_key_env = "TYPESAFE_API_KEY"
+
+[[models]]
+id = "p/m"
+base_url = "https://example.test/v1"
+api_key = "inline-key"
+"#;
+        let json_text = r#"{
+  // server 段
+  "server": { "port": 8787 },
+  /* decision 段 */
+  "decision": {
+    "backend": "auto",
+    "slots": [{ "kind": "jev", "api_key_env": "TYPESAFE_API_KEY" }]
+  },
+  "models": [
+    { "id": "p/m", "base_url": "https://example.test/v1", "api_key": "inline-key" }
+  ]
+}"#;
+        let t = FileConfig::parse_text(toml_text, Some(Path::new("/tmp/evo-router.toml"))).unwrap();
+        let j = FileConfig::parse_text(json_text, Some(Path::new("/tmp/evo-router.jsonc"))).unwrap();
+        assert_eq!(t.server.port, j.server.port);
+        assert_eq!(t.decision.slots.len(), 1);
+        assert_eq!(j.decision.slots.len(), 1);
+        assert_eq!(j.decision.slots[0].kind, "jev");
+        // 内联 key 生效（配置文件即唯一来源）
+        let m = j.resolve_model(&j.models[0]);
+        assert_eq!(m.keys.len(), 1);
+        assert_eq!(m.keys[0].value, "inline-key");
+        assert_eq!(m.api_key.as_deref(), Some("inline-key"));
+    }
+
+    /// 注释剥离不能误伤字符串里的 `//`（URL！）
+    #[test]
+    fn json_comment_stripping_keeps_urls() {
+        let src = r#"{
+  "base_url": "https://example.test/v1", // trailing comment
+  "note": "a /* not a comment */ inside a string"
+}"#;
+        let out = strip_json_comments(src);
+        assert!(out.contains("https://example.test/v1"));
+        assert!(out.contains("/* not a comment */"));
+        assert!(!out.contains("trailing comment"));
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["base_url"], "https://example.test/v1");
     }
 }

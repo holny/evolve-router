@@ -173,6 +173,20 @@ api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 c
 ```
 配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。
 
+### 配置格式与凭据存放位置
+
+配置是**同一套 serde 结构**，可写成 **TOML**（`evo-router.toml`，规范形式——注释即文档）、**JSONC**（`evo-router.jsonc`，允许注释）或 **JSON**（`evo-router.json`）。查找顺序 `~/.evo-router/` 下 `.toml` → `.jsonc` → `.json`. 再退回工作目录，换格式就是改个文件名。
+
+Provider 凭据到底从哪来：
+
+| 来源 | 内容 | 时机 |
+|---|---|---|
+| 各 Agent 配置（`~/.config/opencode/opencode.jsonc`、`~/.codex/config.toml` …） | base_url + api_key，由发现器读取 | 每次启动读取，**从不复制**进我们的文件 |
+| `~/.evo-router/state/overrides.json` | 你在面板/网页新增或编辑的 provider（base_url、api_key、档位、协议…） | 由 UI 写入，启动时重放 |
+| `evo-router.toml` 的 `[[models]]` | 静态声明——`base_url`、`api_key_env`（环境变量名）或**内联 `api_key`**（chmod 600） | 静态生效，同 id 优先于发现结果 |
+
+结论：**配置文件里可以什么都不写**（发现器会接手你已有的 Agent 凭据）；也**可以全都写进去**，做成显式的单文件配置。
+
 ### 配置生效方式
 
 | 段落 | 生效方式 |
