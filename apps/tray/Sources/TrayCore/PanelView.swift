@@ -75,6 +75,10 @@ public struct PanelView: View {
                         if !state.version.isEmpty {
                             Text("v\(state.version)")
                         }
+                        // 判定器实况常显（用户问"没配决策模型为啥没提示"）：
+                        // 显式 heuristic 是**主动选择**，所以不是告警，但状态必须看得见
+                        Text("\(t("judge")) \(judgeLabel)")
+                            .foregroundStyle(state.activeSlots.isEmpty ? .tertiary : .secondary)
                     }
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
@@ -97,6 +101,11 @@ public struct PanelView: View {
             .foregroundStyle(.secondary)
             .help(t("copy_cfg"))
         }
+    }
+
+    /// 当前生效的判定器（/api/live 的 config.active_slots；空 = 内置启发式）
+    private var judgeLabel: String {
+        state.activeSlots.isEmpty ? t("judge_heuristic") : state.activeSlots.joined(separator: "+")
     }
 
     // MARK: - 决策模型横幅（missing/stale 提示；点按打开 Dashboard）
