@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod config;
 pub mod decision_tags;
 pub mod identity;
+pub mod live;
 pub mod meta;
 pub mod quality;
 pub mod relay;

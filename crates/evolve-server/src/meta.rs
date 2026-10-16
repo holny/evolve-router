@@ -348,7 +348,9 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
         .unwrap_or((None, 0, 0));
     let watch = watch_cfg.clone();
     axum::Json(json!({
-        "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
+        "inflight": crate::live::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
+        // 在飞明细（含正在生成的流）：重启前提示"谁在飞、飞了多久"
+        "inflight_detail": crate::live::inflight_detail(),
         "ts": evolve_memory::health::now(),
         // 配置热加载状态：reloaded_at_ms = 上次热加载时刻；restart_required = 有非判定配置改动待重启
         "config": {

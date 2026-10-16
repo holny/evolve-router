@@ -54,7 +54,9 @@ public struct PanelView: View {
             }
             Button(t("cancel"), role: .cancel) { pendingAction = nil }
         } message: {
-            Text(t("inflight_confirm_hint"))
+            Text(inflightSummary.isEmpty
+                 ? t("inflight_confirm_hint")
+                 : t("inflight_confirm_hint") + "\n\n" + inflightSummary)
         }
         .confirmationDialog(t("quit_confirm"), isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button(t("quit_action"), role: .destructive) { quitAll() }
@@ -105,13 +107,6 @@ public struct PanelView: View {
                                 .fixedSize()
                             Text("·").opacity(0.6)
                         }
-                        // 在飞请求（含正在进行的流）：重启前必须看得见
-                        if state.inflight > 0 {
-                            Text(String(format: t("inflight_n"), state.inflight))
-                                .foregroundStyle(.orange)
-                                .fixedSize()
-                            Text("·").opacity(0.6)
-                        }
                         Text("\(t("judge")) \(judgeLabel)")
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
@@ -153,6 +148,15 @@ public struct PanelView: View {
             return t("j_rules")
         }
         return (backend == "decision_model" || backend == "typesafe") ? t("j_model_rules") : t("j_model")
+    }
+
+    /// 在飞请求摘要（谁在飞、飞了多久）——重启提示与悬停都用它
+    private var inflightSummary: String {
+        state.inflightDetail.prefix(3).compactMap { d -> String? in
+            let model = (d["model"] as? String) ?? "?"
+            let age = Int(((d["age_ms"] as? Double) ?? 0) / 1000)
+            return "\(model) · \(age)s"
+        }.joined(separator: "\n")
     }
 
     /// degraded 横幅文案：原因 + **自动重试状态**（用户问"后续请求还会继续重试吗"）
@@ -284,7 +288,22 @@ public struct PanelView: View {
 
     private var decisionsCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            sectionLabel("sparkle.middle", t("recent"))
+            HStack(spacing: 6) {
+                sectionLabel("sparkle.middle", t("recent"))
+                Spacer(minLength: 0)
+                // 在飞提示（用户裁决：放 Recent requests 标题右侧，右对齐）
+                if state.inflight > 0 {
+                    HStack(spacing: 4) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 8.5))
+                        Text(String(format: t("inflight_n"), state.inflight))
+                            .font(.system(size: 9))
+                    }
+                    .foregroundStyle(.orange)
+                    .help(state.inflightDetail.isEmpty ? t("inflight_hint")
+                          : inflightSummary)
+                }
+            }
             let rows = state.recent
             ForEach(rows, id: \.id) { r in
                 HStack(spacing: 7) {

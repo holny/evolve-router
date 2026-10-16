@@ -120,23 +120,6 @@ fn quota_now_ms() -> u64 {
 /// calls while forwarding chunks untouched. At stream end (or drop) runs
 /// response-quality analysis, feeds the flywheel, and records pending tool
 /// calls for L3 session-loop matching.
-/// 在飞请求令牌：**流式响应由流的生命周期持有**（而非"返回响应头之前"）。
-/// 面板/网页据此在重启前提示"还有 N 个流在飞"，并说明重启会排空它们。
-pub struct InflightGuard(());
-
-impl InflightGuard {
-    pub fn new() -> Self {
-        crate::relay::LIVE_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self(())
-    }
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        crate::relay::LIVE_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub fn telemetry_body<E>(
     inner: impl Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
@@ -165,8 +148,25 @@ where
             bus: Some(bus),
             request,
             acc: StreamAcc::new(anthropic_mode),
-            // 流的整个生命期都算"在飞"（流结束/被丢弃时释放）
-            _inflight: InflightGuard::new(),
+            // 流的整个生命期都算"在飞"（流结束/被丢弃时释放），并登记模型/会话
+            _inflight: {
+                let (model, session, agent, started) = telem
+                    .lock()
+                    .map(|t| {
+                        (
+                            t.chosen.clone(),
+                            t.session.clone(),
+                            t.agent.clone().unwrap_or_default(),
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0)
+                                .saturating_sub(t.started.elapsed().as_millis() as u64),
+                        )
+                    })
+                    .unwrap_or_default();
+                crate::live::Guard::with_meta(&model, &session, &agent, started)
+            },
         }),
     );
     TelemetryStream { inner: Box::new(state) }.boxed()
@@ -379,8 +379,8 @@ impl StreamAcc {
 }
 
 struct Finalizer {
-    /// 在飞令牌：随 Finalizer 一起 release（见 InflightGuard 注释）
-    _inflight: InflightGuard,
+    /// 在飞令牌：**随流一起存活**，直到流结束才 release（重启提示据此可见"谁在飞"）
+    _inflight: crate::live::Guard,
     telem: SharedTelem,
     events: Option<EventLog>,
     flywheel: Option<Flywheel>,

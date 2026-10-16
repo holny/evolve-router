@@ -49,6 +49,7 @@ let T: [String: String] = [
     "top6_by_usage": "top 6 by usage",
     "restart": "Restart",
     "inflight_n": "%d in flight",
+    "inflight_hint": "requests being processed right now (streams included) — the tooltip lists model and age",
     "inflight_confirm_title": "%d request(s) in flight",
     "inflight_confirm_hint": "Restarting drains them gracefully (up to 60 s), then the gateway exits — the running generation is not cut off.",
     "inflight_confirm_go": "Restart anyway",

@@ -22,7 +22,7 @@ const MAX_ERROR_BODY: usize = 8 * 1024;
 
 pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let started = Instant::now();
-    let _live = crate::relay::LiveGuard::new();
+    let mut live = crate::relay::LiveGuard::new();
     let agent_hdr = crate::identity::agent_identity(&headers, &st.config.telemetry.agent_header);
     let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
         return mr_error(StatusCode::BAD_REQUEST, "invalid json body");
@@ -34,6 +34,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     };
 
     let session_key = session_key_of(&st, &headers, &parsed);
+    live.describe("", &session_key, &agent_hdr);
     let sticky_key = format!("{}\u{1f}{}", agent_hdr, session_key);
     let header_policy = headers
         .get("x-ev-policy")
@@ -87,6 +88,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
+            live.describe(&d.chosen, &session_key, &agent_hdr);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
             // 否则每轮 put 满额轮次，turns_left 永不触 0，粘性无度
             let turns_left = if d.sticky {

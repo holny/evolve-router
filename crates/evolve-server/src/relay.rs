@@ -23,22 +23,9 @@ const KEY_SEP: char = '\u{1f}';
 // ── 实时状态（/api/live，菜单栏图标/面板的"忙碌"数据源）──
 // in-flight = 请求进入 chat/messages 处理器到返回的全周期（含路由决策段），
 // RAII 守卫覆盖所有提前 return 路径（缓存命中/参数错误/级联降级等）。
-pub static LIVE_INFLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-pub struct LiveGuard;
-
-impl LiveGuard {
-    pub fn new() -> Self {
-        LIVE_INFLIGHT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Self
-    }
-}
-
-impl Drop for LiveGuard {
-    fn drop(&mut self) {
-        LIVE_INFLIGHT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
+// 在飞登记迁到 `crate::live`（含元信息，供"重启前提示在飞的流"）；
+// 保留旧名以免改动散落的调用点
+pub use crate::live::{Guard as LiveGuard, LIVE_INFLIGHT};
 
 pub async fn chat_completions(
     State(st): State<AppState>,
@@ -46,7 +33,7 @@ pub async fn chat_completions(
     body: Bytes,
 ) -> Response {
     let started = Instant::now();
-    let _live = LiveGuard::new();
+    let mut live = LiveGuard::new();
     let agent_hdr = crate::identity::agent_identity(&headers, &st.config.telemetry.agent_header);
     let Ok(parsed) = serde_json::from_slice::<Value>(&body) else {
         return json_error(StatusCode::BAD_REQUEST, "invalid json body");
@@ -59,6 +46,8 @@ pub async fn chat_completions(
     };
 
     let session_key = session_key_of(&st, &headers, &parsed);
+    // 在飞登记：先记"(routing)/会话"，选出模型后再更新（面板重启提示可读）
+    live.describe("", &session_key, &agent_hdr);
     // 内部状态（粘性/L3 反馈）按 agent 隔离：跨 agent 同名会话绝不共享状态
     let sticky_key = format!("{}\u{1f}{}", agent_hdr, session_key);
     let header_policy = headers
@@ -196,6 +185,7 @@ pub async fn chat_completions(
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
+            live.describe(&d.chosen, &session_key, &agent_hdr);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
             // 否则每轮 put 满额轮次，turns_left 永不触 0，粘性无度
             let turns_left = if d.sticky {

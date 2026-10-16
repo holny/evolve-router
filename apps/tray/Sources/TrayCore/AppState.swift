@@ -156,6 +156,8 @@ public final class AppState: ObservableObject {
     /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
     @Published public var version = ""
     /// 配置热加载状态（/api/live 下发）：非 [decision] 段落改动 → 面板提示重启
+    /// 在飞请求明细（/api/live 的 inflight_detail）：model / session / age_ms
+    @Published public var inflightDetail: [[String: Any]] = []
     @Published public var configRestartRequired = false
     @Published public var configRestartReason: String?
     @Published public var configReloadedAt: Int64?
@@ -215,6 +217,7 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/live"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             inflight = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
+            inflightDetail = (obj["inflight_detail"] as? [[String: Any]]) ?? []
             decisionStatus = ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok"
             version = (obj["version"] as? String) ?? version
             let cfgObj = obj["config"] as? [String: Any]

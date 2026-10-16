@@ -252,7 +252,10 @@ table.mx tr.win td { color:var(--green); }
 <main>
   <div class="duo">
     <section class="card">
-      <h2 data-i18n="feed">实时决策流</h2>
+      <div style="display:flex;align-items:center;gap:8px">
+        <h2 data-i18n="feed" style="margin-right:auto">实时决策流</h2>
+        <span id="feed-inflight" class="dim2" style="font-size:12px;display:none"></span>
+      </div>
       <div id="feed"></div>
     </section>
     <aside class="card autopsy" id="autopsy">
@@ -1488,6 +1491,20 @@ function renderTrendTabs(){
     state.twin = w; refresh();
   });
 }
+/// 在飞提示（Recent 流标题右侧，右对齐）：正在处理的请求（含流式生成）
+function renderInflight(){
+  const el = document.getElementById('feed-inflight');
+  if (!el) return;
+  const n = state.inflight || 0;
+  if (!n) { el.style.display = 'none'; el.textContent = ''; return; }
+  const detail = (state.inflightDetail || []).slice(0,5)
+    .map(d => (d.model||'?') + ' · ' + Math.round((d.age_ms||0)/1000) + 's').join('\n');
+  el.style.display = '';
+  el.style.color = 'var(--amber)';
+  el.innerHTML = '◉ ' + esc(t('chip_inflight')) + ' <b>' + n + '</b>';
+  el.title = t('chip_inflight_hint') + (detail ? '\n\n' + detail : '');
+}
+
 function renderChips(){
   const all = Object.values(state.stats);
   const reqs = all.reduce((a,s) => a+(s.requests||0), 0);
@@ -1506,12 +1523,7 @@ function renderChips(){
     '<span class="chip"><span>'+t('chip_reqs')+'</span><b>'+reqs+(rate!==null?' <b class="'+rateCls.trim()+'" style="font-size:12px">'+rate+'%</b>':'')+'</b></span>' +
     '<span class="chip"><span>'+t('chip_tokens')+'</span><b style="font-size:13px">'+fmtK(toks)+'</b></span>' +
     '<span class="chip"><span>'+t('chip_cost')+'</span><b style="font-size:13px">'+cost+'</b></span>' +
-    '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>' +
-    // 在飞请求（含正在进行的流）：重启网关前应当知情——重启会**排空**它们（≤60s），不会截断
-    (state.inflight > 0
-      ? '<span class="chip" title="'+esc(t('chip_inflight_hint'))+'" style="border-color:var(--amber);color:var(--amber)">'
-        + '<span>'+t('chip_inflight')+'</span><b>'+state.inflight+'</b></span>'
-      : '');
+    '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>';
   renderPwPanel();
 }
 const PLANS_COLS = [
@@ -2059,12 +2071,14 @@ async function refresh(){
     const liveBody = (await liveR.json()) || {};
     state.decision = liveBody.decision || null;
     state.inflight = liveBody.inflight || 0;
+    state.inflightDetail = liveBody.inflight_detail || [];
     state.version = liveBody.version || '';
     { const v = document.getElementById('app-version');
       if (v) v.textContent = state.version ? 'v' + state.version : ''; }
     renderPlans();
     renderTrends();
     renderChips();
+    renderInflight();
     renderDynTabs();
     renderTrendTabs();
     renderDyn();
