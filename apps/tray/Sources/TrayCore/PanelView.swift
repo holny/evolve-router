@@ -62,38 +62,46 @@ public struct PanelView: View {
             //  ① 状态（绿点 + 13pt 主字）
             //  ② 元信息（9.5pt tertiary，图标代替 "synced" 字样）：
             //     🕐 11:48 · v0.1.7 · judged by decision model + rules
+            // 头行（用户指定版式）：
+            //   ① ● Running · 8787 ……… v0.1.7
+            //   ② 🕐 11:49 · judged by decision model + rules
             HStack(spacing: 5) {
                 Circle()
                     .fill(statusColor)
                     .frame(width: 7, height: 7)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 4) {
-                Text(statusText)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.85)
-                HStack(spacing: 4) {
-                    if let ts = state.lastSync {
-                        Image(systemName: "clock")
-                            .font(.system(size: 8.5))
-                        Text(ts.formatted(date: .omitted, time: .shortened))
-                            .fixedSize()
-                        Text("·").opacity(0.6)
+                    HStack(spacing: 6) {
+                        Text(statusText)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .layoutPriority(1)
+                        Spacer(minLength: 6)
+                        if !state.version.isEmpty {
+                            Text("v\(state.version)")
+                                .font(.system(size: 9, weight: .medium, design: .rounded))
+                                .foregroundStyle(.tertiary)
+                                .fixedSize()
+                        }
                     }
-                    if !state.version.isEmpty {
-                        Text("v\(state.version)")
-                            .fixedSize()
-                        Text("·").opacity(0.6)
+                    HStack(spacing: 4) {
+                        if let ts = state.lastSync {
+                            Image(systemName: "clock")
+                                .font(.system(size: 8.5))
+                            Text(ts.formatted(date: .omitted, time: .shortened))
+                                .fixedSize()
+                            Text("·").opacity(0.6)
+                        }
+                        Text("\(t("judge")) \(judgeLabel)")
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .foregroundStyle(configuredJudge
+                                             ? Color.secondary
+                                             : Color.secondary.opacity(0.62))
                     }
-                    Text("\(t("judge")) \(judgeLabel)")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                        .foregroundStyle(configuredJudge
-                                         ? Color.secondary
-                                         : Color.secondary.opacity(0.62))
-                }
-                .font(.system(size: 9.5))
-                .foregroundStyle(.tertiary)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
                 }
             }
             Spacer()

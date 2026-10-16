@@ -11,6 +11,8 @@ enum PanelPreview {
         state.requests = 1691
         state.successRate = 99
         state.tokensK = "780.4k"
+        state.version = "0.1.7"
+        state.lastSync = Date()
         // 文档截图用的稳定种子（EV_PREVIEW_SEED=1）：覆盖五类标签的各种组合，
         // 不依赖本机实时流量（否则 README 图会随环境漂移）
         state.recent = [
