@@ -173,6 +173,30 @@ api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 c
 ```
 配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。
 
+### 数据目录
+
+网关写的一切都在 `~/.evo-router/`（可用 `[data] dir` 改）：
+
+```
+~/.evo-router/
+├── evo-router.toml       # 配置（唯一需要手动编辑的文件）
+├── events/               # 追加型决策日志（回放/统计/回测的数据底座）
+│   ├── events.jsonl
+│   └── events.jsonl.1     # 32MB 轮转
+├── state/                # 机器写的状态与缓存
+│   ├── snapshot.json       # 飞轮快照（含小时桶）
+│   ├── distilled.json      # 能力卡蒸馏
+│   ├── overrides.json      # 面板/网页调控覆盖
+│   ├── benchmarks.json     # 榜单缓存
+│   ├── modelsdev.json      # models.dev 参考缓存
+│   └── remote-models.json  # /v1/models 扫描缓存
+└── logs/
+    ├── gateway.log         # LaunchAgent 模式
+    └── gateway-child.log   # 菜单栏 app 子进程
+```
+
+旧版平铺布局（以及改名前的 `~/.evolve`）会在启动时自动归类迁移——文件只搬不删；同名冲突的那份留成 `.old-<时间戳>`。
+
 ### 接入你的 Agent
 
 **opencode**（`~/.config/opencode/opencode.jsonc`）：

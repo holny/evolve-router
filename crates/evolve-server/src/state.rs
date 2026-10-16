@@ -272,8 +272,7 @@ impl Inner {
     /// Must be called inside the tokio runtime.
     /// 榜单快照读取（/api/benchmarks 展示 + 拉取失败时保留旧值）
     pub(crate) fn bench_snapshot(&self) -> evolve_discovery::benchmarks::BenchSnapshot {
-        let dir = crate::meta::shellexpand_dir(&self.config.data.dir);
-        std::fs::read_to_string(dir.join("benchmarks.json"))
+        std::fs::read_to_string(evolve_core::config::state_file(&self.config.data.dir, "benchmarks.json"))
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default()
@@ -284,7 +283,6 @@ impl Inner {
         &self,
         sources: &[(String, Vec<evolve_discovery::benchmarks::BenchScore>)],
     ) {
-        let dir = crate::meta::shellexpand_dir(&self.config.data.dir);
         let snapshot = evolve_discovery::benchmarks::BenchSnapshot {
             sources: sources
                 .iter()
@@ -301,7 +299,9 @@ impl Inner {
                 .collect(),
         };
         if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
-            let _ = std::fs::write(dir.join("benchmarks.json"), text);
+            let path = evolve_core::config::state_file(&self.config.data.dir, "benchmarks.json");
+            evolve_core::config::ensure_parent(&path);
+            let _ = std::fs::write(path, text);
         }
     }
 
@@ -705,12 +705,7 @@ pub struct PlanOverride {
 }
 
 pub fn overrides_path(data_dir: &str) -> std::path::PathBuf {
-    let p = if let Some(rest) = data_dir.strip_prefix("~/") {
-        std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(rest)).unwrap_or_else(|_| std::path::PathBuf::from(data_dir))
-    } else {
-        std::path::PathBuf::from(data_dir)
-    };
-    p.join("overrides.json")
+    evolve_core::config::state_file(data_dir, "overrides.json")
 }
 
 pub fn load_overrides(data_dir: &str) -> Overrides {
@@ -722,6 +717,8 @@ pub fn load_overrides(data_dir: &str) -> Overrides {
 
 pub fn save_overrides(data_dir: &str, o: &Overrides) {
     if let Ok(t) = serde_json::to_string_pretty(o) {
-        let _ = std::fs::write(overrides_path(data_dir), t);
+        let path = overrides_path(data_dir);
+        evolve_core::config::ensure_parent(&path);
+        let _ = std::fs::write(path, t);
     }
 }

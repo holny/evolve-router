@@ -173,6 +173,30 @@ api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 
 ```
 Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
 
+### Data layout
+
+Everything the gateway writes lives under `~/.evo-router/` (override with `[data] dir`):
+
+```
+~/.evo-router/
+├── evo-router.toml       # configuration (the only file you edit)
+├── events/               # append-only decision log (replay, stats, backtest)
+│   ├── events.jsonl
+│   └── events.jsonl.1     # 32 MB rotation
+├── state/                # machine-written state & caches
+│   ├── snapshot.json       # flywheel snapshot (incl. hourly buckets)
+│   ├── distilled.json      # distilled capability cards
+│   ├── overrides.json      # dashboard/panel overrides
+│   ├── benchmarks.json     # leaderboard feed cache
+│   ├── modelsdev.json      # models.dev reference cache
+│   └── remote-models.json  # /v1/models scan cache
+└── logs/
+    ├── gateway.log         # LaunchAgent mode
+    └── gateway-child.log   # menu-bar app child process
+```
+
+Older flat layouts (and the pre-rename `~/.evolve`) are migrated automatically on startup — files are moved into their category, never deleted; a conflicting file is kept aside with a `.old-<ts>` suffix.
+
 ### Connect your agents
 
 **opencode** (`~/.config/opencode/opencode.jsonc`):

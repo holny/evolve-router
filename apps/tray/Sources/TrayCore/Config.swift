@@ -13,10 +13,11 @@ public enum Config {
             .appendingPathComponent("evo-router")
     ) ?? URL(fileURLWithPath: "/Applications/EvolveRouter.app/Contents/MacOS/evo-router")
 
-    /// 网关子进程日志（追加）
+    /// 网关子进程日志（追加）：归类到 ~/.evo-router/logs/
     static let gatewayLogURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".evo-router", isDirectory: true)
+            .appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("gateway-child.log")
     }()

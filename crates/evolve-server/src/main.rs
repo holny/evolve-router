@@ -136,8 +136,7 @@ fn backtest(
     judge_samples: usize,
 ) -> anyhow::Result<()> {
     let (cfg, _) = config::load_config(config_path.as_deref())?;
-    let expanded = evolve_memory::events::shellexpand_home_pub(&cfg.data.dir);
-    let events = expanded.join("events.jsonl");
+    let events = evolve_core::config::events_file(&cfg.data.dir, false);
     // review#3 修复：A 组 = 用户当前生效参数（config [strategy] 段，缺省回落
     // 编译默认）——否则用户采纳过自定义参数后，backtest 会拿编译默认当
     // "当前"，裁决结论失实
@@ -157,8 +156,8 @@ fn backtest(
     // 充分"是纯噪声。前置校验：仅 telemetry.response_digest=true 且事件带
     // resp_digest 时才有意义；否则拒绝执行而非污染 A/B 裁决。
     let report = if judge_samples > 0 {
-        let has_digest = expanded.join("events.jsonl").exists() && {
-            std::fs::read_to_string(expanded.join("events.jsonl"))
+        let has_digest = events.exists() && {
+            std::fs::read_to_string(&events)
                 .map(|s| s.contains("\"resp_digest\""))
                 .unwrap_or(false)
         };

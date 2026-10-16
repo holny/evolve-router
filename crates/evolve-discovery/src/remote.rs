@@ -111,14 +111,7 @@ pub async fn fetch_provider_models(
 }
 
 pub fn cache_path(dir: &str) -> PathBuf {
-    let base = if dir.starts_with("~/") {
-        std::env::var("HOME")
-            .map(|h| PathBuf::from(h).join(&dir[2..]))
-            .unwrap_or(PathBuf::from(dir))
-    } else {
-        PathBuf::from(dir)
-    };
-    base.join("remote-models.json")
+    evolve_core::config::state_file(dir, "remote-models.json")
 }
 
 const CACHE_TTL_MS: u64 = 60 * 60 * 1000;
@@ -203,6 +196,7 @@ pub fn discover_remote_blocking(
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    evolve_core::config::ensure_parent(&path);
     let _ = std::fs::write(&path, serde_json::to_string(&snap).unwrap_or_default());
     tracing::info!(count = all.len(), "remote model discovery complete");
     all

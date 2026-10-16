@@ -39,19 +39,6 @@ impl Judge for LayaBackend {
 }
 
 impl LayaBackend {
-    pub fn from_env() -> Option<Self> {
-        // w2：LAYA_URL 显式优先；DECISION_BASE_URL 的 /judge 型判定端点同样
-        // 可作为 sidecar 入口（两类协议族统一 = 环境变量）；最后回退默认本地端点
-        let endpoint = std::env::var("LAYA_URL")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| {
-                let b = ["DECISION_BASE_URL", "DECISION_MODEL_ENDPOINT"].iter().find_map(|n| std::env::var(n).ok())?;
-                if crate::decision_backend::DecisionModelBackend::is_judge_style(&b) { Some(b) } else { None }
-            })
-            .unwrap_or_else(|| "http://127.0.0.1:8321/v1/judge".into());
-        Some(Self::with_endpoint(&endpoint, None))
-    }
 
     pub fn with_endpoint(endpoint: &str, api_key: Option<&str>) -> Self {
         Self { client: reqwest::Client::new(), endpoint: endpoint.to_string(), api_key: api_key.unwrap_or("").to_string() }

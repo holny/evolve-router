@@ -444,14 +444,119 @@ pub fn resolve_data_dir(configured: &str) -> std::path::PathBuf {
         target
     };
     tidy_config_name(&resolved);
+    tidy_layout(&resolved);
     resolved
+}
+
+// ── 数据目录布局（2026-10-16 用户裁决：根目录只留配置，其余归类）───────────────
+///
+/// ```text
+/// ~/.evo-router/
+/// ├── evo-router.toml        # 配置（唯一需要手动编辑的文件）
+/// ├── events/                # 追加型事件日志（回放/统计的数据底座）
+/// │   ├── events.jsonl
+/// │   └── events.jsonl.1     # 32MB 轮转
+/// ├── state/                 # 机器写的状态与缓存
+/// │   ├── snapshot.json        # 飞轮快照（含小时桶）
+/// │   ├── distilled.json       # 能力卡蒸馏
+/// │   ├── overrides.json       # 面板/网页调控覆盖
+/// │   ├── benchmarks.json      # 榜单缓存
+/// │   ├── modelsdev.json       # models.dev 参考缓存
+/// │   └── remote-models.json   # /v1/models 扫描缓存
+/// └── logs/
+///     ├── gateway.log          # LaunchAgent 模式
+///     └── gateway-child.log    # 菜单栏 app 子进程
+/// ```
+pub const EVENTS_DIR: &str = "events";
+pub const STATE_DIR: &str = "state";
+pub const LOGS_DIR: &str = "logs";
+pub const EVENTS_NAME: &str = "events.jsonl";
+
+fn expand_home(dir: &str) -> std::path::PathBuf {
+    if let Some(rest) = dir.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::Path::new(&home).join(rest);
+        }
+    }
+    std::path::Path::new(dir).to_path_buf()
+}
+
+/// `~/.evo-router/events/events.jsonl`（`prev=true` 取轮转后的 `.1`）
+pub fn events_file(data_dir: &str, prev: bool) -> std::path::PathBuf {
+    let root = expand_home(data_dir);
+    let name = if prev { format!("{EVENTS_NAME}.1") } else { EVENTS_NAME.to_string() };
+    root.join(EVENTS_DIR).join(name)
+}
+
+/// `~/.evo-router/state/<name>`
+pub fn state_file(data_dir: &str, name: &str) -> std::path::PathBuf {
+    expand_home(data_dir).join(STATE_DIR).join(name)
+}
+
+/// `~/.evo-router/logs/<name>`
+pub fn log_file(data_dir: &str, name: &str) -> std::path::PathBuf {
+    expand_home(data_dir).join(LOGS_DIR).join(name)
+}
+
+/// 写文件前确保父目录存在（归类后 state/ 等子目录可能是新建的）
+pub fn ensure_parent(path: &Path) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+}
+
+/// 布局整理（幂等）：把历史遗留**散落在根目录**的文件挪进 events/state/logs。
+/// 目标已存在时不覆盖（宁可留一份也不静默丢数据）；失败只告警不阻塞启动。
+pub fn tidy_layout(data_dir: &Path) {
+    // 归类后的三个子目录先建好（幂等）：写入方直接落文件即可
+    for sub in [EVENTS_DIR, STATE_DIR, LOGS_DIR] {
+        let _ = std::fs::create_dir_all(data_dir.join(sub));
+    }
+    let moves: [(&str, &str); 11] = [
+        ("events.jsonl", EVENTS_DIR),
+        ("events.jsonl.1", EVENTS_DIR),
+        ("snapshot.json", STATE_DIR),
+        ("distilled.json", STATE_DIR),
+        ("overrides.json", STATE_DIR),
+        ("benchmarks.json", STATE_DIR),
+        ("modelsdev.json", STATE_DIR),
+        ("remote-models.json", STATE_DIR),
+        ("gateway.log", LOGS_DIR),
+        ("gateway-child.log", LOGS_DIR),
+        ("gateway.log.1", LOGS_DIR),
+    ];
+    for (name, sub) in moves {
+        let from = data_dir.join(name);
+        if !from.is_file() {
+            continue;
+        }
+        let to_dir = data_dir.join(sub);
+        if std::fs::create_dir_all(&to_dir).is_err() {
+            continue;
+        }
+        let mut to = to_dir.join(name);
+        if to.exists() {
+            // 目标已有一份（例如旧根目录里那个 35MB 的历史日志 vs 正在写的同名日志）：
+            // 不覆盖、也不留在根目录——改名带时间戳挪过去，两份都保住
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            to = to_dir.join(format!("{name}.old-{ts}"));
+        }
+        match std::fs::rename(&from, &to) {
+            Ok(()) => tracing::info!(file = name, into = sub, "data dir file moved into its category"),
+            Err(e) => tracing::warn!(error = %e, file = name, "data dir tidy-up failed (left in place)"),
+        }
+    }
 }
 
 /// events.jsonl 的修改时间 = 该目录的"心跳"（不存在 → None）
 fn heartbeat(dir: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(dir.join("events.jsonl"))
-        .and_then(|m| m.modified())
-        .ok()
+    // 归类后的位置优先，兼容尚未整理的历史根目录文件
+    [dir.join(EVENTS_DIR).join(EVENTS_NAME), dir.join(EVENTS_NAME)]
+        .iter()
+        .find_map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
 }
 
 /// 旧目录是否才是"活的那个"：
@@ -527,7 +632,7 @@ mod data_dir_tests {
         std::fs::write(legacy.join("evolve.toml"), "[data]\ndir = \"~/.evolve\"\n").unwrap();
         let got = resolve_data_dir(LEGACY_DATA_DIR);
         assert_eq!(got, home.join(".evo-router"), "must migrate to the new dir");
-        assert!(got.join("events.jsonl").exists(), "data must survive the move");
+        assert!(got.join("events/events.jsonl").exists(), "data must survive the move");
         assert!(!legacy.exists(), "legacy dir is moved, not copied");
         // 配置文件也要改名：否则移动后主候选路径找不到 → 静默回退内置默认
         assert!(got.join("evo-router.toml").is_file(), "config must be renamed in the new dir");
@@ -572,7 +677,7 @@ mod data_dir_tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
         assert_eq!(got, target, "must migrate into the new dir");
-        assert!(got.join("events.jsonl").exists());
+        assert!(got.join("events/events.jsonl").exists());
         let stale: Vec<_> = std::fs::read_dir(&home)
             .unwrap()
             .flatten()
@@ -648,6 +753,42 @@ mod data_dir_tests {
         assert_eq!(got, target);
         assert!(got.join("evo-router.toml").is_file(), "migrated config must be renamed");
         assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 布局整理：散落的旧文件进 events/state/logs；幂等 + 不覆盖已有目标
+    #[test]
+    fn tidy_layout_categorises_loose_files() {
+        let base = std::env::temp_dir().join(format!("er-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        for f in ["events.jsonl", "snapshot.json", "overrides.json", "gateway.log", "gateway-child.log"] {
+            std::fs::write(base.join(f), "x").unwrap();
+        }
+        std::fs::write(base.join("evo-router.toml"), "cfg").unwrap();
+        tidy_layout(&base);
+        assert!(base.join("events/events.jsonl").is_file());
+        assert!(base.join("state/snapshot.json").is_file());
+        assert!(base.join("state/overrides.json").is_file());
+        assert!(base.join("logs/gateway.log").is_file());
+        assert!(base.join("logs/gateway-child.log").is_file());
+        assert!(base.join("evo-router.toml").is_file(), "config stays at the root");
+        assert!(!base.join("events.jsonl").exists(), "no loose files left");
+        // 幂等：再跑一次不报错、不搬动
+        tidy_layout(&base);
+        assert!(base.join("events/events.jsonl").is_file());
+        // 目标已存在时不覆盖：旧的原样保留，根目录那份改名带时间戳挪进来
+        std::fs::write(base.join("events.jsonl"), "new").unwrap();
+        tidy_layout(&base);
+        assert_eq!(std::fs::read_to_string(base.join("events/events.jsonl")).unwrap(), "x");
+        assert!(!base.join("events.jsonl").exists(), "root stays clean even on conflict");
+        let moved: Vec<_> = std::fs::read_dir(base.join("events"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".old-"))
+            .collect();
+        assert_eq!(moved.len(), 1, "conflicting file must be kept aside, not dropped");
+        assert_eq!(std::fs::read_to_string(moved[0].path()).unwrap(), "new");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

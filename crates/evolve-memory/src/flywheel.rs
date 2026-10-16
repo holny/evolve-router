@@ -182,8 +182,7 @@ impl Flywheel {
     /// ⑦ 策略参数注入：learned_bias 公式参数来自配置（[strategy] 段），
     /// 回滚 = 配置回到默认
     pub fn open_with(dir: &str, params: crate::strategy::StrategyParams) -> Self {
-        let expanded = crate::events::shellexpand_home_pub(dir);
-        let path = expanded.join("snapshot.json");
+        let path = evolve_core::config::state_file(dir, "snapshot.json");
         let mut inner: FlywheelInner = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
@@ -516,7 +515,7 @@ impl Flywheel {
         if let Some(path) = &self.path {
             let tmp = path.with_extension("json.tmp");
             if let Ok(text) = serde_json::to_string_pretty(&*inner)
-                && std::fs::write(&tmp, text).is_ok() {
+                && { evolve_core::config::ensure_parent(&path); std::fs::write(&tmp, text).is_ok() } {
                     let _ = std::fs::rename(&tmp, path);
                 }
         }

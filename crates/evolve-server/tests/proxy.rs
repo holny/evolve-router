@@ -1022,8 +1022,10 @@ async fn disabled_manual_provider_is_listed_for_restore() {
     let cfg = test_config(9101);
     let dir = cfg.data.dir.clone();
     std::fs::create_dir_all(&dir).unwrap();
+    let overrides = evolve_core::config::state_file(&dir, "overrides.json");
+    evolve_core::config::ensure_parent(&overrides);
     std::fs::write(
-        std::path::Path::new(&dir).join("overrides.json"),
+        overrides,
         r#"{"providers":{"manual-x":{"base_url":"https://example.test/v1","disabled":true}}}"#,
     )
     .unwrap();

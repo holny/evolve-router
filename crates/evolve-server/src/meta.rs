@@ -501,14 +501,7 @@ async fn api_stats_inner(st: &AppState, window: &str) -> Response {
 /// Benchmark feed status + currently applied tier overlay.
 pub async fn api_benchmarks(State(st): State<AppState>) -> Response {
     let overlay = st.engine.tier_overrides();
-    let dir = if st.config.data.dir.starts_with("~/") {
-        std::env::var("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(&st.config.data.dir[2..]))
-            .unwrap_or_else(|_| std::path::PathBuf::from(&st.config.data.dir))
-    } else {
-        std::path::PathBuf::from(&st.config.data.dir)
-    };
-    let snapshot = std::fs::read_to_string(dir.join("benchmarks.json"))
+    let snapshot = std::fs::read_to_string(evolve_core::config::state_file(&st.config.data.dir, "benchmarks.json"))
     .ok()
     .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
     .unwrap_or(serde_json::json!({}));
@@ -528,8 +521,7 @@ pub async fn api_events(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
-    let dir = shellexpand_dir(&st.config.data.dir);
-    let path = dir.join("events.jsonl");
+    let path = evolve_core::config::events_file(&st.config.data.dir, false);
     let mut events = Vec::new();
     // 只读文件尾部：面板要的是"最近 limit 条"，全量读几十 MB 没有意义。
     // 磁盘读放 spawn_blocking，别占用 async worker
@@ -561,16 +553,6 @@ pub async fn api_events(
         events.reverse(); // oldest first, so prepend works for feed
     }
     (axum::Json(serde_json::Value::Array(events))).into_response()
-}
-
-pub(crate) fn shellexpand_dir(dir: &str) -> std::path::PathBuf {
-    if dir.starts_with("~/") {
-        std::env::var("HOME")
-            .map(|h| std::path::PathBuf::from(h).join(&dir[2..]))
-            .unwrap_or_else(|_| std::path::PathBuf::from(dir))
-    } else {
-        std::path::PathBuf::from(dir)
-    }
 }
 
 /// Quota windows learned from upstream rate-limit headers.

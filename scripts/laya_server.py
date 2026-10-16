@@ -1,4 +1,4 @@
-"""Laya decision-model sidecar for EvolveRoute.
+"""Laya decision-model sidecar for EvolveRouter.
 
 Exposes laya's System-1 typed decisions (choice/score/noul) over local HTTP
 so the Rust gateway can use the multilingual decision model with ~35ms
@@ -9,10 +9,10 @@ Install & run:
     pip install "laya[judge]" fastapi "uvicorn[standard]"
     uvicorn laya_server:app --host 127.0.0.1 --port 8321
 
-Gateway config (evolveroute.toml):
-    [decision]
-    backend = "laya"
-    # LAYA_URL env overrides http://127.0.0.1:8321
+Gateway config (~/.evo-router/evo-router.toml) — the single place slots are read from:
+    [[decision.slots]]
+    kind = "laya"
+    base_url = "http://127.0.0.1:8321/v1/judge"
 """
 
 from __future__ import annotations

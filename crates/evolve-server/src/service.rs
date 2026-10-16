@@ -75,7 +75,7 @@ fn write_plist(bin: &std::path::Path, config: &std::path::Path, port: u16) -> an
     if let Some(parent) = plist.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let log = home().join(".evo-router/gateway.log");
+    let log = home().join(".evo-router/logs/gateway.log");
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -136,7 +136,7 @@ pub fn start(port: u16) -> anyhow::Result<()> {
         println!("网关已启动: http://127.0.0.1:{port}");
         Ok(())
     } else {
-        bail!("启动超时：10s 内端口 {port} 未就绪，查看 {}", home().join(".evo-router/gateway.log").display())
+        bail!("启动超时：10s 内端口 {port} 未就绪，查看 {}", home().join(".evo-router/logs/gateway.log").display())
     }
 }
 
@@ -190,7 +190,7 @@ pub fn status(port: u16) -> anyhow::Result<()> {
     } else if !loaded {
         bail!("服务未加载：运行 evolve start 或 evolve install")
     } else {
-        bail!("服务已加载但端口未就绪：查看 ~/.evo-router/gateway.log")
+        bail!("服务已加载但端口未就绪：查看 ~/.evo-router/logs/gateway.log")
     }
 }
 
@@ -217,6 +217,6 @@ pub fn install(port: u16) -> anyhow::Result<()> {
         println!("服务已安装并启动: http://127.0.0.1:{port}（开机自启已启用）");
         Ok(())
     } else {
-        bail!("安装后启动超时，查看 ~/.evo-router/gateway.log")
+        bail!("安装后启动超时，查看 ~/.evo-router/logs/gateway.log")
     }
 }

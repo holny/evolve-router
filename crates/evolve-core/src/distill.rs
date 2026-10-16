@@ -8,7 +8,6 @@
 use crate::types::{ModelRecord, Tiers};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 
 /// 触发阈值：每积累 50 个成功请求蒸馏一次
 pub const DISTILL_EVERY_SUCCESS: u64 = 50;
@@ -35,13 +34,8 @@ pub struct DistilledCard {
 
 pub type DistilledStore = HashMap<String, DistilledCard>;
 
-fn store_path(dir: &str) -> PathBuf {
-    let expanded = if let Ok(home) = std::env::var("HOME") {
-        dir.replace("~", &home)
-    } else {
-        dir.to_string()
-    };
-    Path::new(&expanded).join("distilled.json")
+fn store_path(dir: &str) -> std::path::PathBuf {
+    crate::config::state_file(dir, "distilled.json")
 }
 
 pub fn now_ms() -> u64 {
@@ -65,7 +59,7 @@ pub fn save_store(dir: &str, store: &DistilledStore) {
     }
     if let Ok(text) = serde_json::to_string_pretty(store) {
         let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
+        if { crate::config::ensure_parent(&path); std::fs::write(&tmp, text).is_ok() } {
             let _ = std::fs::rename(&tmp, &path);
         }
     }

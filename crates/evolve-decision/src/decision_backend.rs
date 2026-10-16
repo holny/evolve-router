@@ -618,13 +618,13 @@ impl evolve_core::types::RouteAdvisor for DecisionModelBackend {
     }
 }
 
-/// 测试与部署共用的构造路径：from_env 读 env 后委托 from_parts，
+/// 测试与部署共用的构造路径：槽位配置 / from_slots 都委托 from_parts，
 /// 接入规则单点定义：protocol 判定 + endpoint 归一化 + model 必填约束
 impl DecisionModelBackend {
     /// base 缺省 = TypeSafe Jev 云默认端点（此时 key 必填——云鉴权）；
     /// 显式 BASE_URL 时 key 一律可选（systemone → 原生契约，/judge → Laya 型，
     /// 其余 → OpenAI chat 兼容——此时 model 必填，判别规则与 endpoint 归一化
-    /// 单点定义在此，from_env 与测试共用）
+    /// 单点定义在此，from_slots 与测试共用）
     pub(crate) fn from_parts(
         api_key: Option<&str>,
         base: Option<&str>,

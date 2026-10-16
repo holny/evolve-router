@@ -19,13 +19,7 @@ pub const API_URL: &str = "https://models.dev/api.json";
 pub const TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 fn cache_path(dir: &str) -> PathBuf {
-    let home = std::env::var("HOME").map(PathBuf::from).unwrap_or_default();
-    let base = if dir.starts_with("~/") {
-        home.join(dir.trim_start_matches("~/"))
-    } else {
-        PathBuf::from(dir)
-    };
-    base.join("modelsdev.json")
+    evolve_core::config::state_file(dir, "modelsdev.json")
 }
 
 pub fn load_fresh(dir: &str) -> Option<Value> {
@@ -61,7 +55,7 @@ pub fn spawn_refresh(dir: String) {
                     if let Some(parent) = path.parent() {
                         let _ = std::fs::create_dir_all(parent);
                     }
-                    if std::fs::write(&path, &bytes).is_ok() {
+                    if { evolve_core::config::ensure_parent(&path); std::fs::write(&path, &bytes).is_ok() } {
                         tracing::info!(bytes = bytes.len(), "models.dev reference cached");
                     }
                 }

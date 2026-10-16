@@ -16,8 +16,8 @@ struct Inner {
 
 impl EventLog {
     pub fn open(dir: &str) -> Self {
-        let expanded = shellexpand_home(dir);
-        let path = expanded.join("events.jsonl");
+        let path = evolve_core::config::events_file(dir, false);
+        let expanded = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let file = std::fs::create_dir_all(&expanded)
             .ok()
             .and_then(|_| OpenOptions::new().create(true).append(true).open(&path).ok());
