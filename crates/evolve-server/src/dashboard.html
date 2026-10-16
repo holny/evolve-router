@@ -338,6 +338,8 @@ const T = {
              fr:'Modèle de décision configuré — redémarrez la passerelle pour appliquer'},
   dm_retrying:{zh:'将在 {n}s 后自动重试', en:'auto-retry in {n}s', ko:'{n}초 후 자동 재시도', ja:'{n}秒後に自動再試行', es:'reintento automático en {n}s', fr:'nouvelle tentative dans {n} s'},
   dm_retrying_now:{zh:'下一条请求即重试', en:'retries on the next request', ko:'다음 요청에서 재시도', ja:'次のリクエストで再試行', es:'reintenta en la próxima solicitud', fr:'réessaie à la requête suivante'},
+  chip_inflight:{zh:'在飞', en:'in flight', ko:'진행 중', ja:'処理中', es:'en vuelo', fr:'en cours'},
+  chip_inflight_hint:{zh:'正在处理的请求（含流式生成）：现在重启网关会**先排空**它们（最多 60s）再退出，不会截断正在生成的流', en:'requests currently being processed (including live streams): restarting the gateway drains them first (up to 60s) and never truncates a running generation', ko:'처리 중인 요청(스트리밍 포함): 게이트웨이 재시작은 먼저 배수(최대 60초)하며 생성 중인 스트림을 끊지 않습니다', ja:'処理中のリクエスト（ストリーミング含む）：ゲートウェイ再起動は先にドレイン（最大60秒）し、生成中のストリームを切断しません', es:'solicitudes en curso (incluye streaming): reiniciar la puerta las drena antes (hasta 60 s) sin cortar la generación', fr:'requêtes en cours (streaming inclus) : redémarrer la passerelle les draine d\'abord (60 s max) sans couper la génération'},
   pv_from:{zh:'来源', en:'from', ko:'출처', ja:'出典', es:'origen', fr:'source'},
   pv_dup_hint:{zh:'与上面同账号的条目重复', en:'same account as the entry above', ko:'위 항목과 동일 계정', ja:'上の項目と同一アカウント', es:'misma cuenta que la entrada anterior', fr:'même compte que l\'entrée ci-dessus'},
   dm_cfgline:{zh:'在配置文件里加一条槽位（保存后约 5 秒热加载，无需重启）：~/.evo-router/evo-router-config.jsonc → decision.slots',
@@ -1327,7 +1329,7 @@ function renderAutopsy(e){
   if (hint) hint.style.display = 'none';
 }
 
-const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[] };
+const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0 };
 
 // 评分矩阵模型名 → 飞轮行高亮（事件委托，覆盖后续新增的矩阵单元格）
 feed.addEventListener('click', ev => {
@@ -1504,7 +1506,12 @@ function renderChips(){
     '<span class="chip"><span>'+t('chip_reqs')+'</span><b>'+reqs+(rate!==null?' <b class="'+rateCls.trim()+'" style="font-size:12px">'+rate+'%</b>':'')+'</b></span>' +
     '<span class="chip"><span>'+t('chip_tokens')+'</span><b style="font-size:13px">'+fmtK(toks)+'</b></span>' +
     '<span class="chip"><span>'+t('chip_cost')+'</span><b style="font-size:13px">'+cost+'</b></span>' +
-    '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>';
+    '<span class="chip"><span>'+t('chip_active')+'</span><b>'+active+'<span style="color:var(--dim);font-size:12px">/'+all.length+'</span></b></span>' +
+    // 在飞请求（含正在进行的流）：重启网关前应当知情——重启会**排空**它们（≤60s），不会截断
+    (state.inflight > 0
+      ? '<span class="chip" title="'+esc(t('chip_inflight_hint'))+'" style="border-color:var(--amber);color:var(--amber)">'
+        + '<span>'+t('chip_inflight')+'</span><b>'+state.inflight+'</b></span>'
+      : '');
   renderPwPanel();
 }
 const PLANS_COLS = [
@@ -2051,6 +2058,7 @@ async function refresh(){
     state.providers = (await provR.json()).providers || [];
     const liveBody = (await liveR.json()) || {};
     state.decision = liveBody.decision || null;
+    state.inflight = liveBody.inflight || 0;
     state.version = liveBody.version || '';
     { const v = document.getElementById('app-version');
       if (v) v.textContent = state.version ? 'v' + state.version : ''; }

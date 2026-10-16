@@ -9,6 +9,9 @@ public struct PanelView: View {
         ? true
         : UserDefaults.standard.bool(forKey: "ev-autostart")
     @State private var showExitConfirm = false
+    /// 有在飞请求时的重启确认（用户裁决：重启前提示在飞的流）
+    @State private var showInflightConfirm = false
+    @State private var pendingAction: (() -> Void)?
 
     /// 预览/截图模式：不触发首帧实时轮询，保证种子数据稳定渲染（README 图可复现）
     public var previewSeed: Bool
@@ -43,6 +46,15 @@ public struct PanelView: View {
             if previewSeed { return }
             await state.pollLive()
             await state.pollData()
+        }
+        .confirmationDialog(String(format: t("inflight_confirm_title"), state.inflight),
+                            isPresented: $showInflightConfirm, titleVisibility: .visible) {
+            Button(t("inflight_confirm_go"), role: .destructive) {
+                let a = pendingAction; pendingAction = nil; a?()
+            }
+            Button(t("cancel"), role: .cancel) { pendingAction = nil }
+        } message: {
+            Text(t("inflight_confirm_hint"))
         }
         .confirmationDialog(t("quit_confirm"), isPresented: $showExitConfirm, titleVisibility: .visible) {
             Button(t("quit_action"), role: .destructive) { quitAll() }
@@ -90,6 +102,13 @@ public struct PanelView: View {
                             Image(systemName: "clock")
                                 .font(.system(size: 8.5))
                             Text(ts.formatted(date: .omitted, time: .shortened))
+                                .fixedSize()
+                            Text("·").opacity(0.6)
+                        }
+                        // 在飞请求（含正在进行的流）：重启前必须看得见
+                        if state.inflight > 0 {
+                            Text(String(format: t("inflight_n"), state.inflight))
+                                .foregroundStyle(.orange)
                                 .fixedSize()
                             Text("·").opacity(0.6)
                         }
@@ -627,7 +646,7 @@ public struct PanelView: View {
             HStack(spacing: 5) {
                 gatewayChip
                 textChip(label: t("restart"), tint: .accentColor, help: t("restart_help")) {
-                    Task { await restartGateway() }
+                    confirmIfInflight { Task { await restartGateway() } }
                 }
                 textChip(label: t("quit"), tint: .red, help: t("quit"), danger: true) {
                     showExitConfirm = true
@@ -685,7 +704,7 @@ public struct PanelView: View {
     /// 停止/启动 胶囊：healthy → 红调（停止），否则 accent（启动）
     private var gatewayChip: some View {
         Button {
-            Task { await toggleGateway() }
+            confirmIfInflight { Task { await toggleGateway() } }
         } label: {
             HStack(spacing: 5) {
                 if state.starting {
@@ -825,6 +844,16 @@ public struct PanelView: View {
     }
 
     // MARK: - 操作
+
+    /// 有在飞请求时的确认（重启会**排空**它们，但用户应当知情；60s 上限后强退）
+    private func confirmIfInflight(_ action: @escaping () -> Void) {
+        if state.inflight > 0 {
+            pendingAction = action
+            showInflightConfirm = true
+        } else {
+            action()
+        }
+    }
 
     /// 面板"Restart"：停掉网关子进程再拉起（非 [decision] 配置改动靠它生效）
     private func restartGateway() async {
