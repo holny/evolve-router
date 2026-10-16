@@ -384,7 +384,15 @@ impl Finalizer {
 impl Drop for Finalizer {
     fn drop(&mut self) {
         let Some(events) = self.events.take() else { return };
-        let Ok(mut t) = self.telem.lock() else { return };
+        // 锁中毒也要落事件（曾经 `let Ok(..) else { return }` 会**静默丢失整条事件**：
+        // 事故排查时"网关没有这条请求的记录"就是这么来的）
+        let mut t = match self.telem.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("telemetry lock poisoned at stream finalize; recording anyway");
+                poisoned.into_inner()
+            }
+        };
         t.usage = self.acc.usage.clone();
         if self.acc.finish_reason.is_some() || !self.acc.content.is_empty() || !self.acc.tool_calls.is_empty() {
             let pseudo = self.acc.build_response();

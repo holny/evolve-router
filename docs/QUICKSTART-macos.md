@@ -91,6 +91,7 @@ curl -sX POST localhost:8787/api/reload                     # reload config now
 | Panel says `Config changed — restart to apply` | A non-hot-reloadable section changed → click **Restart** |
 | Changed a provider / the decision model and nothing happened | Wait ~5 s, or `POST /api/reload`; check `/api/live` → `config.reloaded_at_ms` |
 | Gateway not responding | Panel → **Start** (or `Restart`); logs in `~/.evo-router/logs/` |
+| Restarting from a terminal | send **SIGTERM** (`pkill -TERM -f "evo-router serve"`), never `-9`: SIGTERM stops accepting, lets in-flight requests (including live SSE streams) finish, flushes the flywheel, then exits. SIGKILL cuts live streams — the client sees a truncated response with no usage/terminator |
 | A stale `~/.evolve` or flat `~/.evo-router` layout | Migrated automatically on startup; leftovers are kept aside as `*.migrated` / `.old-<ts>` |
 
 ## Headless / service mode

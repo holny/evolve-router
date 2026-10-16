@@ -211,7 +211,7 @@ Provider 凭据到底从哪来：
 | 段落 | 生效方式 |
 |---|---|
 | `decision`（含 `decision.slots`） | **约 5 秒内热加载**——判定槽位链与其 route advisor 原地替换，**无需重启**；想立刻生效：`curl -X POST http://127.0.0.1:8787/api/reload` |
-| 其余段落（`[server]` / `[policy]` / `[[models]]` / `[discovery]` …） | 需重启——菜单栏面板 **Stop → Start**，或 LaunchAgent 模式 `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway`，或前台进程 Ctrl-C 后重新 `evo-router serve` |
+| 其余段落（`[server]` / `[policy]` / `[[models]]` / `[discovery]` …） | 需重启——菜单栏面板 **Stop → Start**，或 LaunchAgent 模式 `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway`，或前台进程 Ctrl-C 后重新 `evo-router serve`。重启是**优雅的**：SIGINT/SIGTERM 后停止接新请求、**等在飞请求（含正在进行的 SSE 流）收尾**、flush 飞轮再退出——重启不会切断正在生成的流（上游卡死时 60s 上限兜底并记 WARN） |
 
 `/api/live` 会如实下发状态，不用猜：
 

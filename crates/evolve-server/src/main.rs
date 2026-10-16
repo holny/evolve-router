@@ -358,23 +358,53 @@ fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Re
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         tracing::info!("evolve gateway listening on http://{addr}");
-        // 优雅关闭：SIGINT/SIGTERM 后停止接新请求，flush 飞轮聚合再退出
-        // （此前 SIGINT 直接杀进程，flush 永远执行不到，每次重启丢 30s 聚合）
-        let shutdown = async {
-            let _ = tokio::signal::ctrl_c().await;
+        // 优雅关闭：SIGINT/SIGTERM 后停止接新请求、**等在飞请求（含流式）收尾**，
+        // flush 飞轮聚合再退出。
+        // ⚠ 曾经写成 `ctrl_c().await` 再注册 SIGTERM —— 顺序反了，`ctrl_c` 永远等不到时
+        // SIGTERM 处理器根本没注册，于是 SIGTERM 走默认动作**当场杀进程**：
+        // 在飞的流被硬切断（客户端只收到半句、无终止帧、也无事件落盘）、飞轮聚合丢失。
+        // 实测事故：一次部署重启切断了一个正在生成的流（用户观测"流被中断"）。
+        // 信号 → 通知；排空上限从**收到信号那一刻**起算（曾把 timeout 套在 serve 外层，
+        // 计时从进程启动开始 → 长得多的进程会被立刻判超时，白等一趟）
+        let (sig_tx, sig_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async move {
             #[cfg(unix)]
             {
-                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("SIGTERM handler");
-                if term.recv().await.is_some() {
-                    return;
+                let mut term = tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                )
+                .expect("SIGTERM handler");
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => tracing::info!("SIGINT received"),
+                    _ = term.recv() => tracing::info!("SIGTERM received"),
                 }
+            }
+            #[cfg(not(unix))]
+            {
                 let _ = tokio::signal::ctrl_c().await;
             }
+            tracing::warn!("draining in-flight requests (streams are allowed to finish)");
+            let _ = sig_tx.send(());
         };
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        // 排空上限 60s：正常情况等在飞请求自然收尾；卡死（上游挂住）也要能退出，
+        // 但要留一条明确的 WARN，别让"流被切断"变成无迹可查的静默行为
+        let serve = axum::serve(listener, app).with_graceful_shutdown(shutdown);
+        // 收到信号后最多再等 60s（卡死的上游也不能让进程永不退出；超时会明确记 WARN）
+        let drain_cap = async move {
+            let _ = sig_rx.await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        };
+        tokio::select! {
+            r = serve => {
+                if let Err(e) = r {
+                    return Err(e.into());
+                }
+                tracing::info!("all connections drained");
+            }
+            _ = drain_cap => {
+                tracing::warn!("drain timeout (60s from signal) — remaining streams are being cut by shutdown");
+            }
+        }
         state.flywheel.flush();
         tracing::info!("flywheel flushed, shutting down");
         anyhow::Ok(())

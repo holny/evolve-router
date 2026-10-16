@@ -213,7 +213,7 @@ So: nothing is required in the config file to get started (discovery finds your 
 | Section | How it takes effect |
 |---|---|
 | `decision` / `decision.slots` | **hot-reloaded within ~5 s** — the judge chain (and its route advisor) is swapped in place, no restart. Force it immediately with `curl -X POST http://127.0.0.1:8787/api/reload` |
-| any other section (`[server]`, `[policy]`, `[[models]]`, `[discovery]`, …) | needs a restart — the menu-bar panel's **Stop / Start**, or `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway` for the LaunchAgent, or Ctrl-C the foreground process |
+| any other section (`[server]`, `[policy]`, `[[models]]`, `[discovery]`, …) | needs a restart — the menu-bar panel's **Stop / Start**, or `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway` for the LaunchAgent, or Ctrl-C the foreground process. Restarts are **graceful**: SIGINT/SIGTERM stops accepting new requests, lets in-flight ones (including live SSE streams) finish, flushes the flywheel, then exits — so restarting never truncates a running generation (a 60 s cap applies to a stuck upstream and is logged) |
 
 `/api/live` reports the live state so you never have to guess:
 
