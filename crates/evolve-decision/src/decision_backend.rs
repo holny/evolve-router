@@ -52,7 +52,7 @@ pub enum DecisionProtocol {
 /// - NotFound：404（端点不存在 / 模型不存在）
 /// - Unreachable：无法建立连接（服务未起 / DNS / 拒绝连接）
 /// - Timeout/Server/Parse：暂时性——限流、5xx、双端时序、模型输出不合预期
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub enum SlotFail {
     Auth,
     NotFound,
@@ -65,6 +65,18 @@ pub enum SlotFail {
 impl SlotFail {
     pub fn fatal(&self) -> bool {
         matches!(self, SlotFail::Auth | SlotFail::NotFound | SlotFail::Unreachable)
+    }
+
+    /// 人读标签（面板/网页横幅直接显示原因，省得翻日志）
+    pub fn label(&self) -> &'static str {
+        match self {
+            SlotFail::Auth => "auth failed (401/403)",
+            SlotFail::NotFound => "endpoint/model not found (404)",
+            SlotFail::Unreachable => "endpoint unreachable",
+            SlotFail::Timeout => "timeout",
+            SlotFail::Server => "upstream error (5xx)",
+            SlotFail::Parse => "unparseable response",
+        }
     }
 }
 

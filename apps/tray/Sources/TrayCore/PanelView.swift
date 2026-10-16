@@ -58,30 +58,42 @@ public struct PanelView: View {
         HStack(spacing: 10) {
             // 品牌徽章 = 官方 v5 彩盘（与菜单栏/桌面图标同源）
             brandBadge
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(statusColor)
-                        .frame(width: 7, height: 7)
-                    Text(statusText)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                }
-                if state.lastSync != nil || !state.version.isEmpty {
-                    HStack(spacing: 6) {
-                        if let ts = state.lastSync {
-                            Text("\(t("last_sync")) \(ts.formatted(date: .omitted, time: .shortened))")
-                        }
-                        if !state.version.isEmpty {
-                            Text("v\(state.version)")
-                        }
-                        // 判定器实况常显（用户问"没配决策模型为啥没提示"）：
-                        // 显式 heuristic 是**主动选择**，所以不是告警，但状态必须看得见
-                        Text("\(t("judge")) \(judgeLabel)")
-                            .foregroundStyle(state.activeSlots.isEmpty ? .tertiary : .secondary)
+            // 头行定稿（第四版）：一行只放一件事，元信息压成一条安静的小字
+            //  ① 状态（绿点 + 13pt 主字）
+            //  ② 元信息（9.5pt tertiary，图标代替 "synced" 字样）：
+            //     🕐 11:48 · v0.1.7 · judged by decision model + rules
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 4) {
+                Text(statusText)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                HStack(spacing: 4) {
+                    if let ts = state.lastSync {
+                        Image(systemName: "clock")
+                            .font(.system(size: 8.5))
+                        Text(ts.formatted(date: .omitted, time: .shortened))
+                            .fixedSize()
+                        Text("·").opacity(0.6)
                     }
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
+                    if !state.version.isEmpty {
+                        Text("v\(state.version)")
+                            .fixedSize()
+                        Text("·").opacity(0.6)
+                    }
+                    Text("\(t("judge")) \(judgeLabel)")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                        .foregroundStyle(configuredJudge
+                                         ? Color.secondary
+                                         : Color.secondary.opacity(0.62))
+                }
+                .font(.system(size: 9.5))
+                .foregroundStyle(.tertiary)
                 }
             }
             Spacer()
@@ -116,6 +128,11 @@ public struct PanelView: View {
         return (backend == "decision_model" || backend == "typesafe") ? t("j_model_rules") : t("j_model")
     }
 
+    /// 是否配置了决策模型（头行用它决定配色；判定路径文案见 judgeLabel）
+    private var configuredJudge: Bool {
+        !state.activeSlots.isEmpty && state.decisionBackend.lowercased() != "heuristic"
+    }
+
     // MARK: - 决策模型横幅（missing/stale 提示；点按打开 Dashboard）
 
     @ViewBuilder
@@ -132,7 +149,11 @@ public struct PanelView: View {
                     Image(systemName: stale ? "checkmark.seal" : "exclamationmark.triangle")
                         .font(.system(size: 10, weight: .semibold))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(degraded ? t("dm_degraded") : (stale ? t("dm_stale") : t("dm_missing")))
+                        Text(degraded
+                             ? (state.decisionFailReason.isEmpty
+                                ? t("dm_degraded")
+                                : String(format: t("dm_degraded_reason"), state.decisionFailReason))
+                             : (stale ? t("dm_stale") : t("dm_missing")))
                             .font(.system(size: 10.5, weight: .semibold))
                             .lineLimit(1)
                         if !stale {

@@ -31,6 +31,8 @@ pub struct Inner {
     pub scan_progress: Mutex<ScanProgress>,
     /// 最近一次判定的实际来源（面板显示 "judge by …" + 配了模型却回退规则时告警）
     pub last_judge: Mutex<LastJudge>,
+    /// 判定槽位链的健康句柄（含"最近一次失败原因"）——热加载后替换
+    pub slot_health: Mutex<Option<std::sync::Arc<evolve_decision::slots::SlotHealth>>>,
     /// ⑧ 能力卡蒸馏器（decision_model/auto 后端才有；None = 蒸馏停用）
     pub distiller: Option<evolve_decision::decision_backend::DecisionModelBackend>,
     /// A3 completion cache（逻辑请求指纹 → 响应，本地内存 TTL 缓存）
@@ -248,6 +250,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         .build()
         .expect("http client");
 
+    let slot_health = chain.as_ref().map(|c| c.health.clone());
     // 当前生效的判定配置（api_live 的状态来源；热加载后由 reload_config 更新）
     let active_slots: Vec<String> = chain
         .as_ref()
@@ -299,6 +302,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         plan_budgets: Mutex::new(plan_budgets),
         scan_progress: Mutex::new(ScanProgress::default()),
         last_judge: Mutex::new(LastJudge::default()),
+        slot_health: Mutex::new(slot_health.clone()),
         distiller,
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
@@ -360,6 +364,9 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) -> bool {
         .map(|c| c.slots.iter().map(|s| s.kind.label()).collect())
         .unwrap_or_default();
     st.engine.set_judge(judge);
+    if let Ok(mut g) = st.slot_health.lock() {
+        *g = chain.as_ref().map(|c| c.health.clone());
+    }
     st.engine.set_route_advisor(
         chain
             .as_ref()

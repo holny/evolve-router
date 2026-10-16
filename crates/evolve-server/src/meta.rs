@@ -329,6 +329,12 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
     // 于是"auto + 无槽位"永远报 stale，面板再也弹不出"未配置决策模型"（用户实测反馈）
     let slots_configured = !st.config.decision.slots.is_empty() || !watch_cfg.active_slots.is_empty();
     let status = decision_status(&cfg, started_active, slots_configured, last_model_used);
+    // 最近一次槽位失败（含瞬态）：横幅直接说明"为什么不可达"
+    let last_fail = st
+        .slot_health
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|h| h.last_fail()));
     let watch = watch_cfg.clone();
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
@@ -351,6 +357,9 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
             "last_judge": last_judge.source,
             "last_judge_at_ms": last_judge.at_ms,
             "last_model_used": last_model_used,
+            "last_fail": last_fail.map(|f| json!({
+                "slot": f.slot, "kind": f.kind, "label": f.label, "at_ms": f.at_ms,
+            })),
         },
     }))
     .into_response()

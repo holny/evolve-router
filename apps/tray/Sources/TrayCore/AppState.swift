@@ -162,6 +162,8 @@ public final class AppState: ObservableObject {
     @Published public var configReloadedAt: Int64?
     /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
     @Published public var activeSlots: [String] = []
+    /// 最近一次槽位失败的人读原因（如 "timeout" / "auth failed (401/403)"；空 = 没失败过）
+    @Published public var decisionFailReason: String = ""
     /// 决策模型配置的**路径**（backend 字符串：auto / decision_model / heuristic …）
     /// —— 头行显示"配置了什么"，而不是"最近一次发生了什么"（后者在每条 request 的行内标签）
     @Published public var decisionBackend: String = "auto"
@@ -220,6 +222,7 @@ public final class AppState: ObservableObject {
             activeSlots = (cfgObj?["active_slots"] as? [String]) ?? []
             let decObj = obj["decision"] as? [String: Any]
             decisionBackend = (decObj?["backend"] as? String) ?? decisionBackend
+            decisionFailReason = ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? ""
         } else {
             inflight = 0
         }

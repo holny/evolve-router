@@ -66,13 +66,51 @@ impl ChainSlot {
     }
 }
 
-/// 进程内寿命的槽位死亡标记（重启复位）
+/// 进程内寿命的槽位死亡标记（重启复位）+ **最近一次失败**（含瞬态，供界面显示原因）
 #[derive(Default)]
 pub struct SlotHealth {
     dead: Mutex<HashMap<&'static str, SlotFail>>,
+    last_fail: Mutex<Option<LastSlotFail>>,
+}
+
+/// 最近一次槽位失败（面板/网页横幅显示"为什么不可达"）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LastSlotFail {
+    pub slot: String,
+    pub kind: SlotFail,
+    /// 人读原因（如 "timeout" / "auth failed (401/403)"）
+    pub label: String,
+    pub at_ms: u64,
 }
 
 impl SlotHealth {
+    /// 记录一次失败（瞬态也记：横幅要显示"最近为什么不可达"）
+    pub fn note_fail(&self, kind: SlotKind, why: SlotFail) {
+        if let Ok(mut g) = self.last_fail.lock() {
+            *g = Some(LastSlotFail {
+                slot: kind.label().to_string(),
+                kind: why,
+                label: match why {
+                    SlotFail::Auth => "auth failed (401/403)".into(),
+                    SlotFail::NotFound => "endpoint/model not found (404)".into(),
+                    SlotFail::Unreachable => "endpoint unreachable".into(),
+                    SlotFail::Timeout => "timeout".into(),
+                    SlotFail::Server => "upstream error (5xx)".into(),
+                    SlotFail::Parse => "unparseable response".into(),
+                },
+                at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            });
+        }
+    }
+
+    /// 最近一次失败（读；空 = 没失败过）
+    pub fn last_fail(&self) -> Option<LastSlotFail> {
+        self.last_fail.lock().ok().and_then(|g| g.clone())
+    }
+
     pub fn mark_dead(&self, kind: SlotKind, why: SlotFail) {
         let mut m = self.dead.lock().unwrap_or_else(|e| e.into_inner());
         if m.contains_key(kind.label()) {
@@ -150,9 +188,11 @@ impl Judge for SlotChainJudge {
                     tracing::warn!(slot = slot.kind.label(), "answers shape mismatch, trying next slot");
                 }
                 Some(Err(f)) if f.fatal() => {
+                    self.health.note_fail(slot.kind, f);
                     self.health.mark_dead(slot.kind, f);
                 }
                 Some(Err(f)) => {
+                    self.health.note_fail(slot.kind, f);
                     tracing::warn!(slot = slot.kind.label(), ?f, "slot transient failure, trying next slot");
                 }
                 None => {
@@ -215,9 +255,11 @@ impl evolve_core::types::RouteAdvisor for SlotAdvisor {
                     }
                 }
                 Some(Err(f)) if f.fatal() => {
+                    self.0.health.note_fail(slot.kind, f);
                     self.0.health.mark_dead(slot.kind, f);
                 }
                 Some(Err(f)) => {
+                    self.0.health.note_fail(slot.kind, f);
                     tracing::warn!(slot = slot.kind.label(), ?f, "advisor transient failure, trying next slot");
                 }
                 None => {}
