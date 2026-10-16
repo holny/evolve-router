@@ -564,7 +564,10 @@ pub fn fuse_judgments(jev: &JudgmentSet, heur: &JudgmentSet) -> JudgmentSet {
         // 会话相关性取严：任一判官认为跑题即按跑题处理
         session_relevance: jev.session_relevance.min(heur.session_relevance),
         session_depth: take_max(jev.session_depth, heur.session_depth),
-        judge_source: "decision_model+rules",
+        // ⚠ 只有**主判官真的走了模型**才标 "decision_model+rules"：槽位链在冷却/失败时
+        // 会回退成启发式（judge_source = "heuristic"），此时融合结果必须如实标 heuristic，
+        // 否则界面判定不出"配了模型但当前没在用"（用户实测：超时后状态仍 ok）
+        judge_source: if jev.judge_source == "heuristic" { "heuristic" } else { "decision_model+rules" },
     route_recommendation: jev.route_recommendation.clone(),
     route_recommendation_confidence: jev.route_recommendation_confidence,
     }
@@ -598,5 +601,40 @@ mod currency_tests {
         for p in ["opencode-go", "openai", "anthropic", "zen"] {
             assert_eq!(infer_currency(p), "USD", "{p} 应计美元");
         }
+    }
+}
+
+#[cfg(test)]
+mod fusion_tests {
+    use super::*;
+
+    fn mk(source: &'static str) -> JudgmentSet {
+        JudgmentSet {
+            domain: Domain::Code,
+            domain_confidence: 1.0,
+            difficulty: 1.0,
+            difficulty_confidence: 1.0,
+            needs_vision: 0.0,
+            is_trivial: 0.0,
+            tool_heavy: 0.0,
+            high_stakes: 0.0,
+            session_relevance: 0.0,
+            session_depth: 0.0,
+            route_recommendation: None,
+            route_recommendation_confidence: 0.0,
+            judge_source: source,
+        }
+    }
+
+    /// 回归：槽位链回退成启发式时，双判官融合不得声称"模型判定"（否则界面无法识别降级）
+    #[test]
+    fn fusion_reports_when_the_model_was_not_used() {
+        let heur = mk("heuristic");
+        assert_eq!(
+            fuse_judgments(&mk("heuristic"), &heur).judge_source,
+            "heuristic",
+            "model not used → must not claim model+rules"
+        );
+        assert_eq!(fuse_judgments(&mk("decision_model"), &heur).judge_source, "decision_model+rules");
     }
 }
