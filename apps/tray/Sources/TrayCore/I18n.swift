@@ -44,6 +44,7 @@ let T: [String: String] = [
         "dm_degraded": "Decision model unreachable",
     "dm_degraded_reason": "Decision model unreachable (%@)",
     "dm_degraded_hint": "Check the slot endpoint / api_key in evo-router-config.jsonc (details: ~/.evo-router/logs/gateway-child.log)",
+    "top6_by_usage": "top 6 by usage",
     "restart": "Restart",
     "restart_help": "Restart the gateway (applies [server]/[policy]/[[models]] changes)",
     "cfg_dirty": "Config changed — restart to apply",

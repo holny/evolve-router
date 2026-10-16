@@ -73,10 +73,10 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, tokens24h: Int, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = []) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = []) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
-        self.pct = pct; self.tokens24h = tokens24h; self.planKind = planKind
+        self.pct = pct; self.planKind = planKind
         self.tokensWin = tokensWin; self.avgTtftMs = avgTtftMs; self.avgRate = avgRate; self.cachePctWin = cachePctWin
         self.paygBalance = paygBalance
         self.quotaUsed = quotaUsed; self.quotaScope = quotaScope
@@ -100,7 +100,6 @@ public struct ProviderRow: Identifiable {
     /// w3 永久黑名单模型（上游 404 且不在模型列表）——仅 Web 手动恢复
     public let blockedModels: [String]
     public let pct: Int?
-    public let tokens24h: Int
     public let planKind: String
     public let tokensWin: Int
     public let avgTtftMs: Int?
@@ -309,11 +308,8 @@ public final class AppState: ObservableObject {
         if case (200, let data)? = try? await get("/api/providers"),
            let wrapper = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let arr = wrapper["providers"] as? [[String: Any]] {
-            // 配额告警阈值与 Web 同源（每行的 soft_pct = 服务端 plan_soft_pct）；
-            // 此前面板硬编码 85，调 plan_soft_pct 时两端配色不同步
-            if let sp = (wrapper["soft_pct"] as? Double) ?? (wrapper["soft_pct"] as? Int).map(Double.init) {
-                softPct = Int(sp)
-            }
+            // 配额告警阈值与 Web 同源：**逐行** soft_pct（= 服务端 plan_soft_pct）。
+            // 顶层没有该字段（旧代码在此读 wrapper["soft_pct"]，永不命中，已删）
             for p in arr {
                 if let sp = (p["soft_pct"] as? Double) ?? (p["soft_pct"] as? Int).map(Double.init) {
                     softPct = Int(sp)
@@ -337,11 +333,10 @@ public final class AppState: ObservableObject {
                 let quotaExhausted = (binding?["exhausted"] as? Bool) ?? false
                 let quotaReset = (binding?["reset_epoch_ms"] as? Double)
                     .map { Date(timeIntervalSince1970: $0 / 1000) }
-                let tok24 = (p["tokens_24h"] as? Int) ?? Int((p["tokens_24h"] as? Double) ?? 0)
                 let mergedKeys = ((p["merged_from"] as? [Any])?.compactMap { $0 as? String }) ?? [key]
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: usedPct,
-                                        tokens24h: tok24, planKind: kind,
+                                        planKind: kind,
                                         paygBalance: AppState.payg(from: p),
                                         quotaUsed: usedPct, quotaScope: quotaScope,
                                         quotaExhausted: quotaExhausted, quotaReset: quotaReset,
@@ -392,7 +387,7 @@ public final class AppState: ObservableObject {
             // 配额/冷却等派生量已在服务端算好（见上），此处只叠加 /api/stats 的指标
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
-                               pct: r.pct, tokens24h: r.tokens24h, planKind: r.planKind,
+                               pct: r.pct, planKind: r.planKind,
                                tokensWin: e.tok,
                                avgTtftMs: e.ttftN > 0 ? Int(e.ttftW / Double(e.ttftN)) : nil,
                                avgRate: e.rateN > 0 ? e.rateW / Double(e.rateN) : nil,

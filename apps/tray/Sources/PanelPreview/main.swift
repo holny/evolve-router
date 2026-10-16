@@ -30,10 +30,10 @@ enum PanelPreview {
                            tags: DecisionTags(difficulty: "medium", domain: "lookup", flags: ["trivial"], mode: "rules", fit: "under")),
         ]
         state.providers = [
-            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, tokens24h: 92_000, planKind: "go"),
-            ProviderRow(key: "deepseek", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 26, tokens24h: 51_000, planKind: "api"),
-            ProviderRow(key: "MiniMax", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(6_720), cooldownCause: "quota window exhausted (5h)", pct: 100, tokens24h: 12_400, planKind: "coding"),
-            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, tokens24h: 51_000, planKind: "coding"),
+            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, planKind: "go"),
+            ProviderRow(key: "deepseek", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 26, planKind: "api"),
+            ProviderRow(key: "MiniMax", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(6_720), cooldownCause: "quota window exhausted (5h)", pct: 100, planKind: "coding"),
+            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, planKind: "coding"),
         ]
         state.lastSync = Date()
         // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）

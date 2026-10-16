@@ -355,6 +355,11 @@ public struct PanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 sectionLabel("server.rack", t("providers"))
+                // 口径说明：本卡是**窗口用量 top 6** 快照（Web 面板是全量管理列表，
+                // 行序按 key 字母序）——标注清楚避免两端"看起来不一致"
+                Text(t("top6_by_usage"))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.quaternary)
                 Spacer(minLength: 0)
                 dimTabs
             }
