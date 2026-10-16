@@ -284,6 +284,17 @@ pub async fn api_reload(State(st): State<AppState>) -> Response {
     .into_response()
 }
 
+/// 决策模型横幅状态判定（面板/网页提示依据）
+fn decision_status(backend: &str, judge_active: bool, slots_configured: bool) -> &'static str {
+    if backend == "heuristic" || judge_active {
+        "ok" // 显式 heuristic = 主动选择；或槽位链已在跑
+    } else if slots_configured {
+        "stale" // 配了槽位但启动时没建成 → 重启/等热加载
+    } else {
+        "missing" // auto 但没有任何槽位
+    }
+}
+
 pub async fn api_live(State(st): State<AppState>) -> Response {
     // 状态以**实际生效**的判定配置为准（配置热加载后 st.config 还是启动快照）
     let watch_cfg = st.config_watch.lock().map(|w| w.clone()).unwrap_or_default();
@@ -293,16 +304,10 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
         watch_cfg.active_backend.clone()
     };
     let started_active = watch_cfg.judge_active || st.distiller.is_some();
-    let configured_now = !st.config.decision.slots.is_empty()
-        || !watch_cfg.active_slots.is_empty()
-        || st.config_path.is_some();
-    let status = if cfg == "heuristic" || started_active {
-        "ok"
-    } else if configured_now {
-        "stale"
-    } else {
-        "missing"
-    };
+    // ⚠ 只有"配置里真有槽位"才算 configured——早先把 `config_path.is_some()` 也算进去，
+    // 于是"auto + 无槽位"永远报 stale，面板再也弹不出"未配置决策模型"（用户实测反馈）
+    let slots_configured = !st.config.decision.slots.is_empty() || !watch_cfg.active_slots.is_empty();
+    let status = decision_status(&cfg, started_active, slots_configured);
     let watch = watch_cfg.clone();
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
@@ -2864,6 +2869,23 @@ pub async fn messages_stub() -> Response {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod decision_status_tests {
+    use super::decision_status;
+
+    #[test]
+    fn status_mapping_covers_the_three_cases() {
+        assert_eq!(decision_status("heuristic", false, false), "ok", "explicit heuristic is a choice");
+        assert_eq!(decision_status("auto", true, true), "ok", "slot chain running");
+        assert_eq!(decision_status("auto", false, true), "stale", "configured but not applied yet");
+        assert_eq!(
+            decision_status("auto", false, false),
+            "missing",
+            "auto without slots must warn (regression: config_path used to mask this)"
+        );
+    }
 }
 
 #[cfg(test)]
