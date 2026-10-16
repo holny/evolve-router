@@ -103,20 +103,17 @@ public struct PanelView: View {
         }
     }
 
-    /// 判定器展示（用户裁决：要么 "decision model + rules"，要么 "rules only"）
-    /// 依据**最近一次判定的实际来源**（last_judge）——配了模型但回退成规则时，
-    /// 头行如实显示 rules only（同时上面的横幅给降级告警）
+    /// 头行 = **配置情况**（用户裁决）：配置了哪条判定路径。
+    /// 每条 request 各自由谁判定 → 看该行行内标签（mode 胶囊），两者职责分开。
+    /// - 无槽位 / 显式 heuristic → rules only
+    /// - 有槽位 + backend=decision_model（双判官融合）→ decision model + rules
+    /// - 有槽位 + 其它 backend → decision model
     private var judgeLabel: String {
-        switch state.lastJudge {
-        case "decision_model": return t("j_model")
-        case "decision_model+rules": return t("j_model_rules")
-        case "heuristic": return t("j_rules")
-        case "sticky": return t("j_reused")
-        case "explicit": return t("j_pinned")
-        default:
-            // 还没判定过：按配置显示（有槽位 = 决策模型，无 = 规则）
-            return state.activeSlots.isEmpty ? t("j_rules") : state.activeSlots.joined(separator: "+")
+        let backend = state.decisionBackend.lowercased()
+        if state.activeSlots.isEmpty || backend == "heuristic" {
+            return t("j_rules")
         }
+        return (backend == "decision_model" || backend == "typesafe") ? t("j_model_rules") : t("j_model")
     }
 
     // MARK: - 决策模型横幅（missing/stale 提示；点按打开 Dashboard）

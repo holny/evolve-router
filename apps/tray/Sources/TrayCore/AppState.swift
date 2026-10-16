@@ -162,10 +162,9 @@ public final class AppState: ObservableObject {
     @Published public var configReloadedAt: Int64?
     /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
     @Published public var activeSlots: [String] = []
-    /// 最近一次判定的**实际来源**（decision_model / decision_model+rules / heuristic / sticky / explicit）
-    @Published public var lastJudge: String = ""
-    /// 该次判定是否走了决策模型（nil = 还没判定过）
-    @Published public var lastModelUsed: Bool?
+    /// 决策模型配置的**路径**（backend 字符串：auto / decision_model / heuristic …）
+    /// —— 头行显示"配置了什么"，而不是"最近一次发生了什么"（后者在每条 request 的行内标签）
+    @Published public var decisionBackend: String = "auto"
     /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
     @Published public var softPct = 60
     /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
@@ -220,8 +219,7 @@ public final class AppState: ObservableObject {
             configReloadedAt = (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) }
             activeSlots = (cfgObj?["active_slots"] as? [String]) ?? []
             let decObj = obj["decision"] as? [String: Any]
-            lastJudge = (decObj?["last_judge"] as? String) ?? ""
-            lastModelUsed = decObj?["last_model_used"] as? Bool
+            decisionBackend = (decObj?["backend"] as? String) ?? decisionBackend
         } else {
             inflight = 0
         }

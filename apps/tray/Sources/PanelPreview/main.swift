@@ -36,27 +36,25 @@ enum PanelPreview {
         state.lastSync = Date()
         // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）
         if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil {
-            // EV_PREVIEW_JUDGE=degraded|missing|rules|model → 切换判定横幅/头行，便于核对
+            // EV_PREVIEW_JUDGE=model|degraded|missing|rules → 切换"配置态 + 横幅"，便于核对
+            // 头行 = 配置情况（backend + slots）；行内标签 = 每条 request 的实际判定来源
             switch ProcessInfo.processInfo.environment["EV_PREVIEW_JUDGE"] ?? "model" {
             case "degraded":
                 state.decisionStatus = "degraded"
-                state.lastJudge = "heuristic"
-                state.lastModelUsed = false
                 state.activeSlots = ["jev"]
+                state.decisionBackend = "decision_model"
             case "missing":
                 state.decisionStatus = "missing"
-                state.lastJudge = ""
                 state.activeSlots = []
+                state.decisionBackend = "auto"
             case "rules":
                 state.decisionStatus = "ok"
-                state.lastJudge = "heuristic"
-                state.lastModelUsed = false
                 state.activeSlots = []
+                state.decisionBackend = "heuristic"
             default:
                 state.decisionStatus = "ok"
-                state.lastJudge = "decision_model+rules"
-                state.lastModelUsed = true
                 state.activeSlots = ["jev"]
+                state.decisionBackend = "decision_model"
             }
             state.configRestartRequired = ProcessInfo.processInfo.environment["EV_PREVIEW_DIRTY"] != nil
         }
