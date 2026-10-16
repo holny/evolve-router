@@ -344,6 +344,10 @@ pub fn to_jsonc(cfg: &FileConfig) -> String {
 //         "model": "<model-id>" }
 //     ]
 //   }
+//   Speed knobs (a remote 27B judge costs ~2.5-4 s per judged request; session
+//   stickiness means only the first request of a tool loop pays it):
+//     "judge_timeout_ms": 12000        // default 3000; raise it for internet relays
+//     per slot: "think_mode": "never"  // StartLux AutoThink: one pass, fastest
 //
 // ── Credentials: where providers come from ──────────────────────────────────
 //   "providers": entries below are the explicit list. "origin" says where each came from:
