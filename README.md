@@ -202,6 +202,17 @@ One canonical file: **`~/.evo-router/evo-router-config.jsonc`** — JSONC (JSON 
 }
 ```
 
+### Providers: tier · model list · quota · assignment
+
+A provider is more than a base URL. The **Providers card** (panel and dashboard alike) manages four things, and says so on the card:
+
+| Duty | How it works | Where you see it |
+|---|---|---|
+| **Plan tier** | The plan is detected from the base URL and the tier you pick (`lite` / `pro` / `max` / `go` / `go-plus`) drives that plan's window allowances | tier chip on every row; editable per plan in the dashboard |
+| **Model list** | The gateway fetches the provider's `/models` (and scans agent configs), and keeps the catalog in sync — new models appear, removed ones are pruned, protocol-unsupported ones are dropped in-process | `N models` on the row (endpoint-level, so two accounts on one endpoint agree), full list in the dashboard |
+| **Quota probing** | Quota numbers come from the official API or upstream response headers where the vendor reports them, and are *estimated* otherwise; a 90 s watchdog refreshes the ones we can query, and the rest are probed with real requests every 5–10 min | `quota obs` / `quota hdr` / `quota est` marker + the quota bar and `5h / monthly full` countdowns |
+| **Assignment** | An enabled, available provider's models join the routing candidates — subject to the active set, the price-tier gate and per-model quota. Disabled, cooling or exhausted providers are marked and stay out | `assigned` / `disabled` / `unavailable` badge on the row |
+
 ### Where provider credentials come from
 
 | Source | Contains | When |
