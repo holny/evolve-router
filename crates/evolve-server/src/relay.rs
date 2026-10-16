@@ -195,6 +195,7 @@ pub async fn chat_completions(
                 active: &active_ids,
             };
             let d = st.engine.decide(input);
+            crate::state::note_judge(&st, d.judgment.judge_source);
             // 粘性的度：仅非粘性的重新判定重置轮次；粘性延续扣减——
             // 否则每轮 put 满额轮次，turns_left 永不触 0，粘性无度
             let turns_left = if d.sticky {

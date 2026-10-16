@@ -36,8 +36,29 @@ enum PanelPreview {
         state.lastSync = Date()
         // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）
         if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil {
-            state.configRestartRequired = true
-            state.configRestartReason = "sections other than [decision] changed — restart the gateway to apply"
+            // EV_PREVIEW_JUDGE=degraded|missing|rules|model → 切换判定横幅/头行，便于核对
+            switch ProcessInfo.processInfo.environment["EV_PREVIEW_JUDGE"] ?? "model" {
+            case "degraded":
+                state.decisionStatus = "degraded"
+                state.lastJudge = "heuristic"
+                state.lastModelUsed = false
+                state.activeSlots = ["jev"]
+            case "missing":
+                state.decisionStatus = "missing"
+                state.lastJudge = ""
+                state.activeSlots = []
+            case "rules":
+                state.decisionStatus = "ok"
+                state.lastJudge = "heuristic"
+                state.lastModelUsed = false
+                state.activeSlots = []
+            default:
+                state.decisionStatus = "ok"
+                state.lastJudge = "decision_model+rules"
+                state.lastModelUsed = true
+                state.activeSlots = ["jev"]
+            }
+            state.configRestartRequired = ProcessInfo.processInfo.environment["EV_PREVIEW_DIRTY"] != nil
         }
 
         let win = NSWindow(

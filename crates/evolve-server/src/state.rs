@@ -29,6 +29,8 @@ pub struct Inner {
     pub plan_budgets: Mutex<HashMap<String, f64>>,
     /// 全局扫描进度（面板轮询展示：逐 provider 拉取日志）
     pub scan_progress: Mutex<ScanProgress>,
+    /// 最近一次判定的实际来源（面板显示 "judge by …" + 配了模型却回退规则时告警）
+    pub last_judge: Mutex<LastJudge>,
     /// ⑧ 能力卡蒸馏器（decision_model/auto 后端才有；None = 蒸馏停用）
     pub distiller: Option<evolve_decision::decision_backend::DecisionModelBackend>,
     /// A3 completion cache（逻辑请求指纹 → 响应，本地内存 TTL 缓存）
@@ -50,6 +52,17 @@ pub struct ScanProgress {
     pub running: bool,
     pub done: bool,
     pub log: Vec<String>,
+}
+
+/// 最近一次判定的实际来源（relay/anthropic 决策后写入）
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LastJudge {
+    /// judge_source（judgment 里的字符串）
+    pub source: String,
+    /// 写入时刻（epoch ms）
+    pub at_ms: u64,
+    /// 该次判定是否走了决策模型（decision_model / decision_model+rules）
+    pub model_used: bool,
 }
 
 /// 配置热加载状态（`[[decision.slots]]` 等判定配置可热替换；其余改动需重启）
@@ -285,6 +298,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         http,
         plan_budgets: Mutex::new(plan_budgets),
         scan_progress: Mutex::new(ScanProgress::default()),
+        last_judge: Mutex::new(LastJudge::default()),
         distiller,
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
@@ -368,6 +382,19 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) -> bool {
         "config hot-reloaded: decision slots swapped (no restart needed)"
     );
     true
+}
+
+/// 记录一次判定的实际来源（决策完成后调用；轻量，一次锁写入）
+pub fn note_judge(st: &AppState, judge_source: &str) {
+    let src = judge_source.trim();
+    if src.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = st.last_judge.lock() {
+        g.source = src.to_string();
+        g.at_ms = evolve_memory::health::now();
+        g.model_used = src.starts_with("decision_model");
+    }
 }
 
 /// 把配置文件里的 `providers` 合并进 overrides（**配置优先于 overrides.json**），

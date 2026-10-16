@@ -103,17 +103,31 @@ public struct PanelView: View {
         }
     }
 
-    /// 当前生效的判定器（/api/live 的 config.active_slots；空 = 内置启发式）
+    /// 判定器展示（用户裁决：要么 "decision model + rules"，要么 "rules only"）
+    /// 依据**最近一次判定的实际来源**（last_judge）——配了模型但回退成规则时，
+    /// 头行如实显示 rules only（同时上面的横幅给降级告警）
     private var judgeLabel: String {
-        state.activeSlots.isEmpty ? t("judge_heuristic") : state.activeSlots.joined(separator: "+")
+        switch state.lastJudge {
+        case "decision_model": return t("j_model")
+        case "decision_model+rules": return t("j_model_rules")
+        case "heuristic": return t("j_rules")
+        case "sticky": return t("j_reused")
+        case "explicit": return t("j_pinned")
+        default:
+            // 还没判定过：按配置显示（有槽位 = 决策模型，无 = 规则）
+            return state.activeSlots.isEmpty ? t("j_rules") : state.activeSlots.joined(separator: "+")
+        }
     }
 
     // MARK: - 决策模型横幅（missing/stale 提示；点按打开 Dashboard）
 
     @ViewBuilder
     private var decisionBanner: some View {
-        if state.decisionStatus == "missing" || state.decisionStatus == "stale" {
+        if state.decisionStatus == "missing"
+            || state.decisionStatus == "stale"
+            || state.decisionStatus == "degraded" {
             let stale = state.decisionStatus == "stale"
+            let degraded = state.decisionStatus == "degraded"
             Button {
                 openDashboard()
             } label: {
@@ -121,11 +135,12 @@ public struct PanelView: View {
                     Image(systemName: stale ? "checkmark.seal" : "exclamationmark.triangle")
                         .font(.system(size: 10, weight: .semibold))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(stale ? t("dm_stale") : t("dm_missing"))
+                        Text(degraded ? t("dm_degraded") : (stale ? t("dm_stale") : t("dm_missing")))
                             .font(.system(size: 10.5, weight: .semibold))
                             .lineLimit(1)
                         if !stale {
-                            Text(t("dm_missing_hint"))
+                            Text(degraded ? t("dm_degraded_hint")
+                                 : stale ? t("dm_stale_hint") : t("dm_missing_hint"))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.orange.opacity(0.85))
                                 .lineLimit(1)

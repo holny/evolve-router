@@ -327,6 +327,7 @@ const LOCALE = {zh:'zh-CN', en:'en-US', ko:'ko-KR', ja:'ja-JP', es:'es-ES', fr:'
 
 const T = {
   title:     {zh:'EvolveRouter Dashboard', en:'EvolveRouter Dashboard', ko:'EvolveRouter 대시보드', ja:'EvolveRouter ダッシュボード', es:'Panel de EvolveRouter', fr:'Tableau de bord EvolveRouter'},
+  dm_degraded:{zh:'决策模型不可达 — 本次由规则判定', en:'decision model unreachable — rules only', ko:'결정 모델 연결 불가 — 규칙 판정', ja:'判断モデル到達不可 — ルール判定', es:'modelo de decisión inaccesible — solo reglas', fr:'modèle de décision injoignable — règles seules'},
   dm_missing:{zh:'未配置决策模型 — 路由使用启发式兜底（仍然可用，但少了语义判断与直接推荐）', en:'Decision model not configured — routing falls back to the heuristic judge (usable, but no semantic judgment or direct recommendation)',
              ko:'결정 모델 미설정 — 라우팅이 휴리스틱으로 폴백(동작하나 시맨틱 판단·직접 추천 없음)', ja:'決定モデル未設定 — ルーティングはヒューリスティックにフォールバック（動作するが意味判断・直接推奨なし）',
              es:'Modelo de decisión no configurado — el enrutamiento usa el juez heurístico (funciona, sin juicio semántico ni recomendación directa)',
@@ -2029,7 +2030,8 @@ function renderDecisionBanner(){
   const b = document.getElementById('dm-banner');
   const d = (typeof state !== 'undefined' && state.decision) || null;
   if (!d || d.status === 'ok') { b.style.display = 'none'; return; }
-  const parts = [`<b>${t(d.status === 'stale' ? 'dm_stale' : 'dm_missing')}</b>`];
+  const parts = [`<b>${t(d.status === 'degraded' ? 'dm_degraded'
+      : d.status === 'stale' ? 'dm_stale' : 'dm_missing')}</b>`];
   if (d.status === 'stale') {
     parts.push(`<span class="dm-row">${t('dm_restart')}</span>`);
   } else {

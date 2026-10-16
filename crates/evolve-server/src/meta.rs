@@ -285,13 +285,27 @@ pub async fn api_reload(State(st): State<AppState>) -> Response {
 }
 
 /// 决策模型横幅状态判定（面板/网页提示依据）
-fn decision_status(backend: &str, judge_active: bool, slots_configured: bool) -> &'static str {
-    if backend == "heuristic" || judge_active {
-        "ok" // 显式 heuristic = 主动选择；或槽位链已在跑
-    } else if slots_configured {
-        "stale" // 配了槽位但启动时没建成 → 重启/等热加载
-    } else {
-        "missing" // auto 但没有任何槽位
+///
+/// - `ok`：显式 heuristic（主动选择）或槽位链在跑且**最近一次判定确实走了模型**
+/// - `degraded`：配了决策模型，但最近一次判定回退成规则（端点挂/鉴权失败/超时）
+///   —— 此前这种情况只写在日志里，界面静默按 ok 显示（用户反馈"没黄字提示"的真实原因）
+/// - `stale`：配了槽位但启动时/热加载后没建成
+/// - `missing`：auto 但没有任何槽位
+fn decision_status(
+    backend: &str,
+    judge_active: bool,
+    slots_configured: bool,
+    last_model_used: Option<bool>,
+) -> &'static str {
+    if backend == "heuristic" {
+        return "ok";
+    }
+    match (judge_active, slots_configured, last_model_used) {
+        // 配了模型却刚回退成规则 → 降级告警
+        (_, true, Some(false)) => "degraded",
+        (true, _, _) => "ok",
+        (false, true, _) => "stale",
+        (false, false, _) => "missing",
     }
 }
 
@@ -304,10 +318,17 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
         watch_cfg.active_backend.clone()
     };
     let started_active = watch_cfg.judge_active || st.distiller.is_some();
+    let last_judge = st.last_judge.lock().map(|g| g.clone()).unwrap_or_default();
+    // 只有"判定确实发生过"时 last_model_used 才是有效证据（避免刚启动就误报降级）
+    let last_model_used = if last_judge.source.is_empty() {
+        None
+    } else {
+        Some(last_judge.model_used)
+    };
     // ⚠ 只有"配置里真有槽位"才算 configured——早先把 `config_path.is_some()` 也算进去，
     // 于是"auto + 无槽位"永远报 stale，面板再也弹不出"未配置决策模型"（用户实测反馈）
     let slots_configured = !st.config.decision.slots.is_empty() || !watch_cfg.active_slots.is_empty();
-    let status = decision_status(&cfg, started_active, slots_configured);
+    let status = decision_status(&cfg, started_active, slots_configured, last_model_used);
     let watch = watch_cfg.clone();
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
@@ -322,7 +343,15 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
         },
         // 版本号（编译期常量）：面板与 web 面板已在轮询本端点 → 顺带下发，前端展示
         "version": env!("CARGO_PKG_VERSION"),
-        "decision": { "backend": cfg, "status": status },
+        "decision": {
+            "backend": cfg,
+            "status": status,
+            // 最近一次判定的**实际来源**（decision_model / decision_model+rules /
+            // heuristic / sticky / explicit）——面板显示 "judge by …" 用
+            "last_judge": last_judge.source,
+            "last_judge_at_ms": last_judge.at_ms,
+            "last_model_used": last_model_used,
+        },
     }))
     .into_response()
 }
@@ -2877,14 +2906,21 @@ mod decision_status_tests {
 
     #[test]
     fn status_mapping_covers_the_three_cases() {
-        assert_eq!(decision_status("heuristic", false, false), "ok", "explicit heuristic is a choice");
-        assert_eq!(decision_status("auto", true, true), "ok", "slot chain running");
-        assert_eq!(decision_status("auto", false, true), "stale", "configured but not applied yet");
+        assert_eq!(decision_status("heuristic", false, false, None), "ok", "explicit heuristic is a choice");
+        assert_eq!(decision_status("auto", true, true, Some(true)), "ok", "slot chain running");
         assert_eq!(
-            decision_status("auto", false, false),
+            decision_status("auto", true, true, Some(false)),
+            "degraded",
+            "slots configured but the last judge fell back to rules (was silent before)"
+        );
+        assert_eq!(decision_status("auto", false, true, None), "stale", "configured but not applied yet");
+        assert_eq!(
+            decision_status("auto", false, false, None),
             "missing",
             "auto without slots must warn (regression: config_path used to mask this)"
         );
+        // 刚启动还没判定过（last=None）时不能误报降级
+        assert_eq!(decision_status("auto", true, true, None), "ok");
     }
 }
 
