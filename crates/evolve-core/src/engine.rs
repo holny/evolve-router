@@ -52,8 +52,10 @@ pub struct Engine {
     /// 目录（可热更新：定期扫描合入 / 面板删除后整体替换，见 replace_catalog）
     pub catalog: std::sync::RwLock<Catalog>,
     pub policy: PolicyCfg,
-    judge: Box<dyn Judge>,
-    route_advisor: Option<std::sync::Arc<dyn RouteAdvisor>>,
+    /// 判定器与 route advisor 支持**热替换**（配置热加载：改 [[decision.slots]] 后
+    /// 无需重启网关；见 server 侧的 config watcher）
+    judge: std::sync::RwLock<Box<dyn Judge>>,
+    route_advisor: std::sync::RwLock<Option<std::sync::Arc<dyn RouteAdvisor>>>,
     tiers_overlay: std::sync::RwLock<HashMap<String, (Tiers, f32)>>,
     /// 面板可调的公式权重覆盖（quality/speed/cost/stability/headroom），
     /// 优先级：请求头 policy > 此覆盖 > 配置默认 profile
@@ -74,8 +76,8 @@ impl Engine {
         Self {
             catalog: std::sync::RwLock::new(catalog),
             policy,
-            judge,
-            route_advisor: None,
+            judge: std::sync::RwLock::new(judge),
+            route_advisor: std::sync::RwLock::new(None),
             tiers_overlay: std::sync::RwLock::new(HashMap::new()),
             weights_override: std::sync::RwLock::new(None),
             weight_overlay: std::sync::RwLock::new(HashMap::new()),
@@ -159,8 +161,18 @@ impl Engine {
         self.weight_overlay.read().ok().and_then(|o| o.get(id).copied())
     }
 
-    pub fn set_route_advisor(&mut self, advisor: std::sync::Arc<dyn RouteAdvisor>) {
-        self.route_advisor = Some(advisor);
+    /// 热替换 route advisor（None = 清空，例如槽位被移除）
+    pub fn set_route_advisor(&self, advisor: Option<std::sync::Arc<dyn RouteAdvisor>>) {
+        if let Ok(mut g) = self.route_advisor.write() {
+            *g = advisor;
+        }
+    }
+
+    /// 热替换判定器（配置热加载：`[[decision.slots]]` 改动后即时生效）
+    pub fn set_judge(&self, judge: Box<dyn Judge>) {
+        if let Ok(mut g) = self.judge.write() {
+            *g = judge;
+        }
     }
 
     /// Benchmark layer (decision record #23): refresh capability priors for
@@ -305,7 +317,10 @@ impl Engine {
                 .collect();
             (serde_json::to_string(&items).unwrap_or_default(), map)
         };
-        let mut j = self.judge.judge(&input.features, input.digest, &candidates_hint);
+        let mut j = match self.judge.read() {
+            Ok(g) => g.judge(&input.features, input.digest, &candidates_hint),
+            Err(p) => p.into_inner().judge(&input.features, input.digest, &candidates_hint),
+        };
         let judge_ms = now_epoch_ms().saturating_sub(judge_started);
         // 难度校准（2026-10）：判定器（尤其 heuristic）的系统性偏高由经验分位
         // 校准层归一——保证实际分布收敛目标 70/20/10；关闭时直通原值
@@ -696,7 +711,8 @@ impl Engine {
         // 分桶脱敏不受影响；advisor 只在 redact=false 或未来提供分桶摘要
         // 语义时才走独立调用）。Fan-Out 主路径（judge 合并返回）不受此限。
         if !input.redact {
-        if let Some(advisor) = &self.route_advisor {
+        let advisor_guard = self.route_advisor.read().ok();
+        if let Some(advisor) = advisor_guard.as_ref().and_then(|g| g.as_ref()) {
             let task_summary: String = input.digest.last_user_text.chars().take(600).collect();
             // 只送 top-8 候选，且 id 用本地占位符 candidate_N：
             // ①上游边缘 WAF 对真实 model id 的 token 模式间歇触发 451 地域拦截

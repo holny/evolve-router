@@ -11,6 +11,10 @@ use tokio::sync::broadcast;
 
 pub struct Inner {
     pub config: FileConfig,
+    /// 实际加载的配置文件路径（None = 内置默认）——配置热加载 watcher 用
+    pub config_path: Option<std::path::PathBuf>,
+    /// 配置热加载状态（面板/网页可读：热加载时间 + 是否需要重启）
+    pub config_watch: Mutex<ConfigWatch>,
     pub key_cursor: Mutex<HashMap<String, usize>>,
     pub engine: Engine,
     pub sessions: SessionStore,
@@ -48,9 +52,61 @@ pub struct ScanProgress {
     pub log: Vec<String>,
 }
 
+/// 配置热加载状态（`[[decision.slots]]` 等判定配置可热替换；其余改动需重启）
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct ConfigWatch {
+    /// 上次热加载成功的时刻（epoch ms）
+    pub reloaded_at_ms: Option<u64>,
+    /// 配置文件里**不可热加载**的部分发生了变化 → 面板/网页提示重启
+    pub restart_required: bool,
+    /// 触发 restart_required 的原因（人读）
+    pub restart_reason: Option<String>,
+    /// 启动时的"除 [decision] 之外"指纹（不可变基线：当前指纹与它不同 → 需重启，
+    /// 改回原样后告警自动消失，不会留假提醒）
+    #[serde(skip)]
+    pub static_fingerprint: String,
+    /// 当前配置文件的同口径指纹
+    #[serde(skip)]
+    pub current_fingerprint: String,
+    /// 当前**实际生效**的判定后端（热替换后即时更新——api_live 的状态以它为准，
+    /// 而不是启动时的配置快照）
+    pub active_backend: String,
+    /// 当前实际生效的槽位标签（如 ["jev"]）
+    pub active_slots: Vec<String>,
+    /// 是否有可用的判定槽位链在跑（heuristic-only 时为 false）
+    pub judge_active: bool,
+}
+
+/// 指纹：去掉 `[decision]` 段后的原始 TOML 文本（判定配置可热加载，其余不可）
+pub fn static_config_fingerprint(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_decision = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            // `[decision]` 与 `[[decision.slots]]` 都算判定段（前者是段头，后者是数组表）
+            in_decision = t.trim_start_matches('[').starts_with("decision");
+        }
+        if !in_decision {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 pub type AppState = Arc<Inner>;
 
+pub fn build_state_with_path(config: FileConfig, config_src: Option<std::path::PathBuf>) -> AppState {
+    // 兼容旧签名：无路径 = 不启用热加载 watcher
+    build_state_inner(config, config_src)
+}
+
 pub fn build_state(config: FileConfig) -> AppState {
+    build_state_inner(config, None)
+}
+
+fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>) -> AppState {
     let mut modelsdev_refresh_due = false;
     // overrides 提前加载：removed_base_urls 过滤初始发现（重启不复活已删 provider）
     let ov = load_overrides(&config.data.dir);
@@ -123,7 +179,7 @@ pub fn build_state(config: FileConfig) -> AppState {
     // 蒸馏器复用优先级最高的 Model 槽位（Jev > OpenAI）。
     let distiller = chain.as_ref().and_then(|c| c.first_model());
     if let Some(c) = &chain {
-        engine.set_route_advisor(std::sync::Arc::new(evolve_decision::slots::SlotAdvisor(c.clone())));
+        engine.set_route_advisor(Some(std::sync::Arc::new(evolve_decision::slots::SlotAdvisor(c.clone()))));
         tracing::info!("route_advisor: slot chain advisor connected");
     }
 
@@ -167,8 +223,43 @@ pub fn build_state(config: FileConfig) -> AppState {
         .build()
         .expect("http client");
 
+    // 当前生效的判定配置（api_live 的状态来源；热加载后由 reload_config 更新）
+    let active_slots: Vec<String> = chain
+        .as_ref()
+        .map(|c| c.slots.iter().map(|s| s.kind.label().to_string()).collect())
+        .unwrap_or_default();
+    // 热加载基线：读一遍原始配置文本，记录"除 [decision] 外"的指纹
+    let (config_path, watch) = match &config_src {
+        Some(p) => {
+            let text = std::fs::read_to_string(p).unwrap_or_default();
+            (
+                Some(p.clone()),
+                ConfigWatch {
+                    reloaded_at_ms: None,
+                    restart_required: false,
+                    restart_reason: None,
+                    static_fingerprint: static_config_fingerprint(&text),
+                    current_fingerprint: static_config_fingerprint(&text),
+                    active_backend: config.decision.backend.clone(),
+                    active_slots: active_slots.clone(),
+                    judge_active: !active_slots.is_empty(),
+                },
+            )
+        }
+        None => (
+            None,
+            ConfigWatch {
+                active_backend: config.decision.backend.clone(),
+                active_slots: active_slots.clone(),
+                judge_active: !active_slots.is_empty(),
+                ..Default::default()
+            },
+        ),
+    };
     Arc::new(Inner {
         config,
+        config_path,
+        config_watch: Mutex::new(watch),
         key_cursor: Mutex::new(HashMap::new()),
         engine,
         sessions: SessionStore::new(),
@@ -186,6 +277,78 @@ pub fn build_state(config: FileConfig) -> AppState {
         modelsdev_refresh_due,
         excluded_models: Mutex::new(HashMap::new()),
     })
+}
+
+/// 配置热加载 watcher（5s 轮询 mtime，改动即生效）：
+///
+/// - **可热加载**：`[[decision.slots]]`（判定槽位）→ 重建槽位链并替换引擎里的
+///   判定器 + route advisor，用户无需重启网关；
+/// - **需重启**：其余任何段落改动（模型目录/策略/服务端口/provider 等）→ 只置
+///   `config_watch.restart_required` 并在日志/接口里提示，**不会假装生效**。
+pub fn spawn_config_watcher(st: AppState) {
+    let Some(path) = st.config_path.clone() else { return };
+    tokio::spawn(async move {
+        let mut last = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            if now.is_none() || now == last {
+                continue;
+            }
+            last = now;
+            reload_config(&st, &path);
+        }
+    });
+}
+
+/// 立即重载配置（watcher 与 POST /api/reload 共用）
+pub fn reload_config(st: &AppState, path: &std::path::Path) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        tracing::warn!(path = %path.display(), "config reload: file unreadable, keeping the running config");
+        return;
+    };
+    let Ok(new_cfg) = evolve_core::config::FileConfig::parse(&text) else {
+        tracing::warn!(path = %path.display(), "config reload: parse failed, keeping the running config");
+        return;
+    };
+    // ① 不可热加载部分是否变了 → 只提示，不假装生效
+    let fingerprint = static_config_fingerprint(&text);
+    let restart_reason = Some(
+        "sections other than [decision] changed — restart the gateway to apply".to_string(),
+    );
+    // ② 判定槽位热替换
+    let (judge, chain) = evolve_decision::DecisionBackend::build_with_chain(
+        &new_cfg.decision.backend,
+        &new_cfg.decision.slots,
+    );
+    let slots: Vec<&str> = chain
+        .as_ref()
+        .map(|c| c.slots.iter().map(|s| s.kind.label()).collect())
+        .unwrap_or_default();
+    st.engine.set_judge(judge);
+    st.engine.set_route_advisor(
+        chain
+            .as_ref()
+            .map(|c| std::sync::Arc::new(evolve_decision::slots::SlotAdvisor(c.clone())) as std::sync::Arc<dyn evolve_core::types::RouteAdvisor>),
+    );
+    let now_ms = evolve_memory::health::now();
+    if let Ok(mut w) = st.config_watch.lock() {
+        w.reloaded_at_ms = Some(now_ms);
+        w.current_fingerprint = fingerprint;
+        w.active_backend = new_cfg.decision.backend.clone();
+        w.active_slots = slots.iter().map(|s| s.to_string()).collect();
+        w.judge_active = !slots.is_empty();
+        // 与启动基线比较：非判定段落改动 → 提示重启；改回原样 → 自动清除
+        w.restart_required = w.current_fingerprint != w.static_fingerprint;
+        w.restart_reason = if w.restart_required { restart_reason } else { None };
+    }
+    tracing::info!(
+        slots = ?slots,
+        backend = %new_cfg.decision.backend,
+        "config hot-reloaded: decision slots swapped (no restart needed)"
+    );
 }
 
 impl Inner {
@@ -553,6 +716,28 @@ impl Inner {
     }
 }
 
+#[cfg(test)]
+mod config_watch_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_ignores_only_the_decision_section() {
+        let base = "[server]\nport = 8787\n\n[decision]\nbackend = \"auto\"\n";
+        let slots_changed = "[server]\nport = 8787\n\n[decision]\nbackend = \"auto\"\n[[decision.slots]]\nkind = \"jev\"\n";
+        let policy_changed = "[server]\nport = 9999\n\n[decision]\nbackend = \"auto\"\n";
+        assert_eq!(
+            static_config_fingerprint(base),
+            static_config_fingerprint(slots_changed),
+            "changing [[decision.slots]] must stay hot-reloadable (fingerprint unchanged)"
+        );
+        assert_ne!(
+            static_config_fingerprint(base),
+            static_config_fingerprint(policy_changed),
+            "server/policy changes must ask for a restart"
+        );
+    }
+}
+
 pub fn build_router(state: AppState) -> axum::Router {
     axum::Router::new()
         // favicon：面板浏览器标签图标（SVG 编译进二进制）
@@ -592,6 +777,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/health", axum::routing::get(crate::meta::api_health))
         .route("/api/stats", axum::routing::get(crate::meta::api_stats_query))
         .route("/api/live", axum::routing::get(crate::meta::api_live))
+        .route("/api/reload", axum::routing::post(crate::meta::api_reload))
         .route("/api/feedback", axum::routing::post(crate::meta::api_feedback))
         .route("/api/quota", axum::routing::get(crate::meta::api_quota))
         .route("/api/events", axum::routing::get(crate::meta::api_events))

@@ -195,7 +195,7 @@ fn report(config_path: Option<PathBuf>, limit: usize) -> anyhow::Result<()> {
         print_report(&r);
         return Ok(());
     }
-    let state = state::build_state(cfg);
+    let state = state::build_state_with_path(cfg, path.clone());
     let r = evolve_server::meta::distribution_report(&state, limit);
     print_report(&r);
     Ok(())
@@ -343,7 +343,7 @@ fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Re
     }
     let port = port_override.unwrap_or(cfg.server.port);
     let host = cfg.server.host.clone();
-    let state = state::build_state(cfg);
+    let state = state::build_state_with_path(cfg, path.clone());
 
     let app = state::build_router(state.clone());
 
@@ -352,6 +352,8 @@ fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Re
         state.start_background();
         // w2 配额看门狗：官方端点定时刷新（90s），面板不开也维持 gate 状态新鲜
         evolve_server::meta::spawn_quota_watchdog(state.clone());
+        // 配置热加载 watcher：[[decision.slots]] 改动即时生效（其余段落提示重启）
+        evolve_server::state::spawn_config_watcher(state.clone());
 
         let addr = format!("{host}:{port}");
         let listener = tokio::net::TcpListener::bind(&addr).await?;

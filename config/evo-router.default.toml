@@ -1,5 +1,9 @@
-# EvolveRouter default configuration (M1)
+# EvolveRouter default configuration
 # Copy to evo-router.toml (next to the binary or ~/.evo-router/evo-router.toml)
+#
+# Reloading:
+#   * [decision] / [[decision.slots]]  -> hot-reloaded within ~5s (or POST /api/reload), no restart
+#   * any other section                -> restart the gateway to apply
 
 [server]
 host = "127.0.0.1"
@@ -46,5 +50,5 @@ dir = "~/.evo-router"
 # api_key_env = "ZHIPU_API_KEY"
 # upstream_model = "glm-5.3"
 # context_window = 1024000
-# cost = { input = 0.0, output = 0.0 }   # plan 模型边际成本 ≈ 0
-# （也可不配置任何模型——网关会自动扫描 opencode / codex 等本地 agent 配置）
+# cost = { input = 0.0, output = 0.0 }   # plan models: marginal cost ~ 0
+# (models are optional - the gateway also scans local agent configs: opencode / codex / ...)

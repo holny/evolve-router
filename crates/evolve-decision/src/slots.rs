@@ -415,8 +415,6 @@ mod slot_config_tests {
             _ => panic!("expected model slot"),
         }
     }
-}
-
 /// 测试用构造 helper（StartLux / Bamboo 决策端点）
 struct DecisionCfgHelper;
 impl DecisionCfgHelper {
@@ -430,6 +428,7 @@ impl DecisionCfgHelper {
             api_key_env: None,
         }
     }
+}
 }
 
 #[cfg(test)]

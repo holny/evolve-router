@@ -251,10 +251,37 @@ pub async fn api_stats(State(st): State<AppState>) -> Response {
 /// - stale: 配置里有 [[decision.slots]] 但启动时没建成（配置文件是启动后补的）
 ///   → 重启网关生效，避免误报 ok
 /// - missing: 配置里没有任何槽位
+/// `POST /api/reload`：立即重载配置文件（与 5s watcher 同一路径）。
+/// 只热替换判定槽位；其余段落改动会置 `restart_required` 提示重启。
+pub async fn api_reload(State(st): State<AppState>) -> Response {
+    let Some(path) = st.config_path.clone() else {
+        return (axum::Json(json!({"ok": false, "reason": "no config file (embedded defaults)"})))
+            .into_response();
+    };
+    crate::state::reload_config(&st, &path);
+    let watch = st.config_watch.lock().map(|w| w.clone()).unwrap_or_default();
+    (axum::Json(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "reloaded_at_ms": watch.reloaded_at_ms,
+        "restart_required": watch.restart_required,
+        "restart_reason": watch.restart_reason,
+    })))
+    .into_response()
+}
+
 pub async fn api_live(State(st): State<AppState>) -> Response {
-    let cfg = st.config.decision.backend.clone();
-    let started_active = st.distiller.is_some();
-    let configured_now = !st.config.decision.slots.is_empty();
+    // 状态以**实际生效**的判定配置为准（配置热加载后 st.config 还是启动快照）
+    let watch_cfg = st.config_watch.lock().map(|w| w.clone()).unwrap_or_default();
+    let cfg = if watch_cfg.active_backend.is_empty() {
+        st.config.decision.backend.clone()
+    } else {
+        watch_cfg.active_backend.clone()
+    };
+    let started_active = watch_cfg.judge_active || st.distiller.is_some();
+    let configured_now = !st.config.decision.slots.is_empty()
+        || !watch_cfg.active_slots.is_empty()
+        || st.config_path.is_some();
     let status = if cfg == "heuristic" || started_active {
         "ok"
     } else if configured_now {
@@ -262,9 +289,18 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
     } else {
         "missing"
     };
+    let watch = watch_cfg.clone();
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
         "ts": evolve_memory::health::now(),
+        // 配置热加载状态：reloaded_at_ms = 上次热加载时刻；restart_required = 有非判定配置改动待重启
+        "config": {
+            "reloaded_at_ms": watch.reloaded_at_ms,
+            "restart_required": watch.restart_required,
+            "restart_reason": watch.restart_reason,
+            "path": st.config_path.as_ref().map(|p| p.display().to_string()),
+            "active_slots": watch.active_slots,
+        },
         // 版本号（编译期常量）：面板与 web 面板已在轮询本端点 → 顺带下发，前端展示
         "version": env!("CARGO_PKG_VERSION"),
         "decision": { "backend": cfg, "status": status },

@@ -173,6 +173,22 @@ api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 
 ```
 Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
 
+### Reloading configuration
+
+| Section | How it takes effect |
+|---|---|
+| `[decision]` / `[[decision.slots]]` | **hot-reloaded within ~5 s** — the judge chain (and its route advisor) is swapped in place, no restart. Force it immediately with `curl -X POST http://127.0.0.1:8787/api/reload` |
+| any other section (`[server]`, `[policy]`, `[[models]]`, `[discovery]`, …) | needs a restart — the menu-bar panel's **Stop / Start**, or `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway` for the LaunchAgent, or Ctrl-C the foreground process |
+
+`/api/live` reports the live state so you never have to guess:
+
+```json
+"config": { "reloaded_at_ms": 1792116723449, "restart_required": false,
+            "restart_reason": null, "path": "~/.evo-router/evo-router.toml", "active_slots": ["jev"] }
+```
+
+`restart_required` turns on when a non-`[decision]` section changes and clears again if you revert it, so a stale reminder cannot stick.
+
 ### Data layout
 
 Everything the gateway writes lives under `~/.evo-router/` (override with `[data] dir`):

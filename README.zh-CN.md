@@ -173,6 +173,22 @@ api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 c
 ```
 配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。
 
+### 配置生效方式
+
+| 段落 | 生效方式 |
+|---|---|
+| `[decision]` / `[[decision.slots]]` | **约 5 秒内热加载**——判定槽位链与其 route advisor 原地替换，**无需重启**；想立刻生效：`curl -X POST http://127.0.0.1:8787/api/reload` |
+| 其余段落（`[server]` / `[policy]` / `[[models]]` / `[discovery]` …） | 需重启——菜单栏面板 **Stop → Start**，或 LaunchAgent 模式 `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway`，或前台进程 Ctrl-C 后重新 `evo-router serve` |
+
+`/api/live` 会如实下发状态，不用猜：
+
+```json
+"config": { "reloaded_at_ms": 1792116723449, "restart_required": false,
+            "restart_reason": null, "path": "~/.evo-router/evo-router.toml", "active_slots": ["jev"] }
+```
+
+非 `[decision]` 段落改动时 `restart_required` 置位；把文件改回原样它会自动清除（不留假提醒）。
+
 ### 数据目录
 
 网关写的一切都在 `~/.evo-router/`（可用 `[data] dir` 改）：
