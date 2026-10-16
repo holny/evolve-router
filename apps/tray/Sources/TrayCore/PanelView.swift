@@ -136,6 +136,19 @@ public struct PanelView: View {
         return (backend == "decision_model" || backend == "typesafe") ? t("j_model_rules") : t("j_model")
     }
 
+    /// degraded 横幅文案：原因 + **自动重试状态**（用户问"后续请求还会继续重试吗"）
+    private var degradedText: String {
+        var s = state.decisionFailReason.isEmpty
+            ? t("dm_degraded")
+            : String(format: t("dm_degraded_reason"), state.decisionFailReason)
+        if state.decisionRetryInMs > 0 {
+            s += " · " + String(format: t("dm_retrying"), max(1, state.decisionRetryInMs / 1000))
+        } else if state.decisionFails > 0 {
+            s += " · " + t("dm_retrying_now")
+        }
+        return s
+    }
+
     /// 是否配置了决策模型（头行用它决定配色；判定路径文案见 judgeLabel）
     private var configuredJudge: Bool {
         !state.activeSlots.isEmpty && state.decisionBackend.lowercased() != "heuristic"
@@ -157,11 +170,7 @@ public struct PanelView: View {
                     Image(systemName: stale ? "checkmark.seal" : "exclamationmark.triangle")
                         .font(.system(size: 10, weight: .semibold))
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(degraded
-                             ? (state.decisionFailReason.isEmpty
-                                ? t("dm_degraded")
-                                : String(format: t("dm_degraded_reason"), state.decisionFailReason))
-                             : (stale ? t("dm_stale") : t("dm_missing")))
+                        Text(degraded ? degradedText : (stale ? t("dm_stale") : t("dm_missing")))
                             .font(.system(size: 10.5, weight: .semibold))
                             .lineLimit(1)
                         if !stale {

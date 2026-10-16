@@ -336,6 +336,8 @@ const T = {
              ko:'결정 모델 설정됨 — 게이트웨이 재시작 필요', ja:'決定モデル設定済み — ゲートウェイ再起動で反映',
              es:'Modelo de decisión configurado — reinicie la puerta para aplicarlo',
              fr:'Modèle de décision configuré — redémarrez la passerelle pour appliquer'},
+  dm_retrying:{zh:'将在 {n}s 后自动重试', en:'auto-retry in {n}s', ko:'{n}초 후 자동 재시도', ja:'{n}秒後に自動再試行', es:'reintento automático en {n}s', fr:'nouvelle tentative dans {n} s'},
+  dm_retrying_now:{zh:'下一条请求即重试', en:'retries on the next request', ko:'다음 요청에서 재시도', ja:'次のリクエストで再試行', es:'reintenta en la próxima solicitud', fr:'réessaie à la requête suivante'},
   pv_from:{zh:'来源', en:'from', ko:'출처', ja:'出典', es:'origen', fr:'source'},
   pv_dup_hint:{zh:'与上面同账号的条目重复', en:'same account as the entry above', ko:'위 항목과 동일 계정', ja:'上の項目と同一アカウント', es:'misma cuenta que la entrada anterior', fr:'même compte que l\'entrée ci-dessus'},
   dm_cfgline:{zh:'在配置文件里加一条槽位（保存后约 5 秒热加载，无需重启）：~/.evo-router/evo-router-config.jsonc → decision.slots',
@@ -2074,7 +2076,10 @@ function renderDecisionBanner(){
   if (d.status === 'degraded') {
     // 已配置但最近一次判定回退：报告具体原因（与 macOS 面板同源 decision.last_fail）
     const reason = (d.last_fail && d.last_fail.label) || '';
-    parts.push(`<span class="dm-row">${t('dm_degraded_hint')}${reason ? ' — ' + esc(reason) : ''}</span>`);
+    // 自动重试状态：冷却中给倒计时，否则说明"下一条请求会重试"（成功一次即恢复）
+    const retry = d.retry_in_ms > 0 ? ' · ' + t('dm_retrying').replace('{n}', Math.max(1, Math.round(d.retry_in_ms/1000)))
+                : (d.consecutive_fails > 0 ? ' · ' + t('dm_retrying_now') : '');
+    parts.push(`<span class="dm-row">${t('dm_degraded_hint')}${reason ? ' — ' + esc(reason) : ''}${esc(retry)}</span>`);
     parts.push(`<span class="dim2">${t('dm_chain')}</span>`);
   } else if (d.status === 'stale') {
     parts.push(`<span class="dm-row">${t('dm_restart')}</span>`);

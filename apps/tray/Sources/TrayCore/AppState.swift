@@ -161,8 +161,11 @@ public final class AppState: ObservableObject {
     @Published public var configReloadedAt: Int64?
     /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
     @Published public var activeSlots: [String] = []
-    /// 最近一次槽位失败的人读原因（如 "timeout" / "auth failed (401/403)"；空 = 没失败过）
+    /// 最近一次槽位失败的人读原因（如 "timeout" / "auth failed (401/403)"；空 = 没失败过/已恢复）
     @Published public var decisionFailReason: String = ""
+    /// 瞬态失败后的指数回退剩余（ms；0 = 不在冷却）/ 连续失败次数——面板显示"自动重试中"
+    @Published public var decisionRetryInMs: Int = 0
+    @Published public var decisionFails: Int = 0
     /// 决策模型配置的**路径**（backend 字符串：auto / decision_model / heuristic …）
     /// —— 头行显示"配置了什么"，而不是"最近一次发生了什么"（后者在每条 request 的行内标签）
     @Published public var decisionBackend: String = "auto"
@@ -222,6 +225,8 @@ public final class AppState: ObservableObject {
             let decObj = obj["decision"] as? [String: Any]
             decisionBackend = (decObj?["backend"] as? String) ?? decisionBackend
             decisionFailReason = ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? ""
+            decisionRetryInMs = Int((decObj?["retry_in_ms"] as? Double) ?? 0)
+            decisionFails = Int((decObj?["consecutive_fails"] as? Double) ?? 0)
         } else {
             inflight = 0
         }

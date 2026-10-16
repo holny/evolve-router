@@ -330,11 +330,22 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
     let slots_configured = !st.config.decision.slots.is_empty() || !watch_cfg.active_slots.is_empty();
     let status = decision_status(&cfg, started_active, slots_configured, last_model_used);
     // 最近一次槽位失败（含瞬态）：横幅直接说明"为什么不可达"
-    let last_fail = st
+    let (last_fail, retry_in_ms, consecutive_fails) = st
         .slot_health
         .lock()
         .ok()
-        .and_then(|g| g.as_ref().and_then(|h| h.last_fail()));
+        .and_then(|g| g.clone())
+        .map(|h| {
+            let f = h.last_fail();
+            let slot = f.as_ref().map(|x| x.slot.as_str()).unwrap_or("");
+            let kind = match slot {
+                "jev" => evolve_decision::slots::SlotKind::Jev,
+                "laya" => evolve_decision::slots::SlotKind::Laya,
+                _ => evolve_decision::slots::SlotKind::OpenAI,
+            };
+            (f, h.backoff_remaining_ms(kind), h.consecutive_fails(kind))
+        })
+        .unwrap_or((None, 0, 0));
     let watch = watch_cfg.clone();
     axum::Json(json!({
         "inflight": crate::relay::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
@@ -360,6 +371,9 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
             "last_fail": last_fail.map(|f| json!({
                 "slot": f.slot, "kind": f.kind, "label": f.label, "at_ms": f.at_ms,
             })),
+            // 瞬态失败后的自动重试状态（指数回退中；成功一次即清零）
+            "retry_in_ms": retry_in_ms,
+            "consecutive_fails": consecutive_fails,
         },
     }))
     .into_response()

@@ -43,6 +43,8 @@ let T: [String: String] = [
     "j_rules": "rules only",
         "dm_degraded": "Decision model unreachable",
     "dm_degraded_reason": "Decision model unreachable (%@)",
+    "dm_retrying": "retrying in %ds",
+    "dm_retrying_now": "retrying on the next request",
     "dm_degraded_hint": "Check the slot endpoint / api_key in evo-router-config.jsonc (details: ~/.evo-router/logs/gateway-child.log)",
     "top6_by_usage": "top 6 by usage",
     "restart": "Restart",

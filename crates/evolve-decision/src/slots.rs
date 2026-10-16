@@ -71,6 +71,27 @@ impl ChainSlot {
 pub struct SlotHealth {
     dead: Mutex<HashMap<&'static str, SlotFail>>,
     last_fail: Mutex<Option<LastSlotFail>>,
+    /// 瞬态失败（超时/5xx/解析）的连续计数与冷却截止（指数回退）
+    transient: Mutex<HashMap<&'static str, Transient>>,
+}
+
+/// 瞬态失败状态（用户问："后续请求还会重试吗？有没有指数回退？成功就恢复吗？"）
+#[derive(Debug, Clone, Copy, Default)]
+struct Transient {
+    /// 连续失败次数
+    fails: u32,
+    /// 冷却截止（epoch ms）；冷却期内跳过该槽位，免得每次请求都白等一个超时
+    until_ms: u64,
+}
+
+/// 冷却阶梯：第 1 次失败**不冷却**（下一条请求立即重试）；之后 30s·2^(n-2)，上限 10 分钟。
+/// 成功一次立即清零 → 恢复使用。
+fn backoff_after(fails: u32) -> u64 {
+    if fails < 2 {
+        return 0;
+    }
+    let step = (fails - 2).min(5); // 30s, 60s, 120s, 240s, 480s, 600s(封顶)
+    (30_000u64 << step).min(600_000)
 }
 
 /// 最近一次槽位失败（面板/网页横幅显示"为什么不可达"）
@@ -84,8 +105,38 @@ pub struct LastSlotFail {
 }
 
 impl SlotHealth {
-    /// 记录一次失败（瞬态也记：横幅要显示"最近为什么不可达"）
+    /// 成功一次：清空失败记忆（含冷却）——"成功即恢复"，横幅随之消失
+    pub fn note_ok(&self, kind: SlotKind) {
+        if let Ok(mut t) = self.transient.lock() {
+            t.remove(kind.label());
+        }
+        if let Ok(mut g) = self.last_fail.lock() {
+            *g = None;
+        }
+    }
+
+    /// 记录一次失败（瞬态也记：横幅要显示"最近为什么不可达"）；瞬态按指数回退冷却
     pub fn note_fail(&self, kind: SlotKind, why: SlotFail) {
+        if !why.fatal()
+            && let Ok(mut t) = self.transient.lock()
+        {
+            let e = t.entry(kind.label()).or_default();
+            e.fails = e.fails.saturating_add(1);
+            let wait = backoff_after(e.fails);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            e.until_ms = if wait > 0 { now + wait } else { 0 };
+            if wait > 0 {
+                tracing::warn!(
+                    slot = kind.label(),
+                    fails = e.fails,
+                    retry_in_ms = wait,
+                    "decision slot backing off (transient failures); will retry automatically"
+                );
+            }
+        }
         if let Ok(mut g) = self.last_fail.lock() {
             *g = Some(LastSlotFail {
                 slot: kind.label().to_string(),
@@ -100,9 +151,33 @@ impl SlotHealth {
         }
     }
 
-    /// 最近一次失败（读；空 = 没失败过）
+    /// 最近一次失败（读；空 = 没失败过 / 已恢复）
     pub fn last_fail(&self) -> Option<LastSlotFail> {
         self.last_fail.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// 冷却剩余（ms）：>0 表示当前跳过该槽位（瞬态失败后的指数回退）
+    pub fn backoff_remaining_ms(&self, kind: SlotKind) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.transient
+            .lock()
+            .ok()
+            .and_then(|t| t.get(kind.label()).copied())
+            .map(|t| t.until_ms.saturating_sub(now))
+            .unwrap_or(0)
+    }
+
+    /// 连续瞬态失败次数（0 = 正常；供 /api/live 显示"重试中"）
+    pub fn consecutive_fails(&self, kind: SlotKind) -> u32 {
+        self.transient
+            .lock()
+            .ok()
+            .and_then(|t| t.get(kind.label()).copied())
+            .map(|t| t.fails)
+            .unwrap_or(0)
     }
 
     pub fn mark_dead(&self, kind: SlotKind, why: SlotFail) {
@@ -168,6 +243,12 @@ impl Judge for SlotChainJudge {
             if self.health.is_dead(slot.kind) {
                 continue;
             }
+            // 瞬态失败后的指数回退窗口内直接跳过：否则每条请求都要白等一个超时/5xx
+            let backoff = self.health.backoff_remaining_ms(slot.kind);
+            if backoff > 0 {
+                tracing::debug!(slot = slot.kind.label(), retry_in_ms = backoff, "slot in backoff, skipping");
+                continue;
+            }
             let result: Option<Result<serde_json::Value, SlotFail>> = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::try_current().ok().map(|h| {
                     h.block_on(async { slot.consult_raw(features, digest, candidates_hint, self.judge_timeout).await })
@@ -176,9 +257,12 @@ impl Judge for SlotChainJudge {
             match result {
                 Some(Ok(answers)) => {
                     if let Some(j) = crate::decision_backend::parse_judgment_answers(&answers) {
+                        // 成功一次 = 恢复：清空失败记忆与冷却（横幅随之消失）
+                        self.health.note_ok(slot.kind);
                         return j;
                     }
                     // answers 形状不合预期（模型输出漂移）——软错，尝试下一槽位
+                    self.health.note_fail(slot.kind, SlotFail::Parse);
                     tracing::warn!(slot = slot.kind.label(), "answers shape mismatch, trying next slot");
                 }
                 Some(Err(f)) if f.fatal() => {
@@ -229,6 +313,9 @@ impl evolve_core::types::RouteAdvisor for SlotAdvisor {
         });
         for slot in self.0.model_slots() {
             if self.0.health.is_dead(slot.kind) {
+                continue;
+            }
+            if self.0.health.backoff_remaining_ms(slot.kind) > 0 {
                 continue;
             }
             let SlotImpl::Model(b) = &slot.imp else { continue };
@@ -558,5 +645,30 @@ mod tests {
             panic!("expected model slot");
         }
         assert!(slot_from(SlotKind::OpenAI, None, Some("k".into()), Some("m".into())).is_none());
+    }
+
+    /// 用户问语义：第 1 次失败下一条请求**立即重试**（不冷却）；连续失败才指数回退；
+    /// 成功一次即清零恢复
+    #[test]
+    fn backoff_is_immediate_then_exponential_and_resets_on_success() {
+        assert_eq!(backoff_after(0), 0);
+        assert_eq!(backoff_after(1), 0, "first transient failure retries on the next request");
+        assert_eq!(backoff_after(2), 30_000);
+        assert_eq!(backoff_after(3), 60_000);
+        assert_eq!(backoff_after(4), 120_000);
+        assert_eq!(backoff_after(20), 600_000, "capped at 10 minutes");
+
+        let h = SlotHealth::default();
+        h.note_fail(SlotKind::Jev, SlotFail::Timeout);
+        assert_eq!(h.backoff_remaining_ms(SlotKind::Jev), 0, "no cooldown after the first failure");
+        assert_eq!(h.consecutive_fails(SlotKind::Jev), 1);
+        h.note_fail(SlotKind::Jev, SlotFail::Timeout);
+        assert!(h.backoff_remaining_ms(SlotKind::Jev) > 0, "second failure starts the cooldown");
+        assert_eq!(h.consecutive_fails(SlotKind::Jev), 2);
+        // 成功 → 清零（恢复使用、横幅消失）
+        h.note_ok(SlotKind::Jev);
+        assert_eq!(h.backoff_remaining_ms(SlotKind::Jev), 0);
+        assert_eq!(h.consecutive_fails(SlotKind::Jev), 0);
+        assert!(h.last_fail().is_none(), "recovery clears the reported failure");
     }
 }
