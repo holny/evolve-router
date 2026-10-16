@@ -336,6 +336,8 @@ const T = {
              ko:'결정 모델 설정됨 — 게이트웨이 재시작 필요', ja:'決定モデル設定済み — ゲートウェイ再起動で反映',
              es:'Modelo de decisión configurado — reinicie la puerta para aplicarlo',
              fr:'Modèle de décision configuré — redémarrez la passerelle pour appliquer'},
+  pv_from:{zh:'来源', en:'from', ko:'출처', ja:'出典', es:'origen', fr:'source'},
+  pv_dup_hint:{zh:'与上面同账号的条目重复', en:'same account as the entry above', ko:'위 항목과 동일 계정', ja:'上の項目と同一アカウント', es:'misma cuenta que la entrada anterior', fr:'même compte que l\'entrée ci-dessus'},
   dm_cfgline:{zh:'在配置文件里加一条槽位（保存后约 5 秒热加载，无需重启）：~/.evo-router/evo-router-config.jsonc → decision.slots',
              en:'Add a slot in the config file (hot-reloaded in ~5s, no restart): ~/.evo-router/evo-router-config.jsonc → decision.slots',
              ko:'설정 파일에 슬롯 추가(약 5초 내 핫 리로드, 재시작 불필요): ~/.evo-router/evo-router-config.jsonc → decision.slots',
@@ -1658,7 +1660,17 @@ function renderProviders(){
             + '">余额 '+esc(String(p.payg_balance.currency))+' '+esc(total)+(bad?' · 不可用':'')+'</span>';
         })()
       : '';
+    // 来源说明：provider 从哪来（用户配置 / 哪个 agent 配置 + **账号名**）。
+    // 同端点可挂多个账号（如 opencode-go 的 Go-gmail / Go-github），只显示 base_url 会
+    // 让人误以为是重复条目 —— 这一行把身份讲清楚
+    const prov = (p.origin || p.source_path)
+      ? '<div class="dim2" style="margin:-2px 0 6px 0">'
+        + esc(t('pv_from')) + ' ' + esc(p.source_path || p.origin || '-')
+        + (p.duplicate_of ? ' · ' + esc(t('pv_dup_hint')) : '')
+        + '</div>'
+      : '';
     return '<div style="border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px'+(p.disabled?';opacity:.5':'')+'">'
+      + prov
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
       +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge+unblockBtn
       +   ' <span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(kindBadge)+'</span>'

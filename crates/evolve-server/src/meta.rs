@@ -1259,6 +1259,12 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     let snap_all = st.engine.catalog_snapshot();
     let (tok24, last_used, credits5h) = provider_usage(&snap_all, &st.events, now_ms);
     for (key, pd) in &ov.providers {
+        // 自指条目（配置里指向本机网关自身）不是上游 → 不出现在 Provider 管理
+        let self_ep = format!("127.0.0.1:{}", st.config.server.port);
+        let self_ep2 = format!("localhost:{}", st.config.server.port);
+        if pd.base_url.contains(&self_ep) || pd.base_url.contains(&self_ep2) {
+            continue;
+        }
         // 禁用行仍展示（带 disabled 标记）——其发现型孪生已被身份遮蔽抑制，
         // 用户可在面板/网页一键恢复
         // 档位联动：显式窗口额度 > 注册表档位额度（选档位后配额条立即生效）
@@ -1495,6 +1501,12 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         for e in out.iter_mut() {
             let b = e.get("base_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let fp = e.get("key_fp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if b.is_empty() || fp.is_empty() {
+                // 没有身份指纹就没法判重：宁可不标，也不能把同端点的两个账号
+                // 误标成"重复"（此前指纹缺失时 ident 只剩 base_url，必误判）
+                e.as_object_mut().map(|o| o.remove("key_fp"));
+                continue;
+            }
             let ident = format!("{}\u{1f}{}", b, fp);
             let name = e.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
             if let Some(first) = seen.get(&ident) {
@@ -3118,5 +3130,36 @@ mod quota_derive_tests {
         assert_eq!(per["weekly"]["used_pct"], 0.0);
         assert_eq!(binding["scope"], "5h", "全 0% 时绑定首个窗口（5h），不得为 null");
         assert_eq!(binding["exhausted"], false);
+    }
+
+    /// 回归：身份指纹缺失时不得判重——否则同 base_url 的两个账号会被误标"重复"
+    ///（实测：配置回灌的 provider 条目曾丢掉 key → 指纹为空 → opencode-go 被标成
+    ///  opencode-go-github 的重复）
+    #[test]
+    fn empty_fingerprint_is_never_a_duplicate() {
+        let rows = serde_json::json!([
+            { "key": "opencode-go", "base_url": "https://opencode.ai/zen/go/v1" },
+            { "key": "opencode-go-github", "base_url": "https://opencode.ai/zen/go/v1" }
+        ]);
+        let mut out = rows.as_array().cloned().unwrap_or_default();
+        // 复刻判重逻辑（指纹为空 → 不标记）
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for e in out.iter_mut() {
+            let b = e.get("base_url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let fp = e.get("key_fp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if b.is_empty() || fp.is_empty() {
+                continue;
+            }
+            let ident = format!("{}\u{1f}{}", b, fp);
+            let name = e.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if let Some(first) = seen.get(&ident) {
+                e.as_object_mut().map(|o| o.insert("duplicate_of".into(), serde_json::json!(first)));
+            } else {
+                seen.insert(ident, name);
+            }
+        }
+        for e in &out {
+            assert!(e.get("duplicate_of").is_none(), "empty fingerprint must not mark duplicates: {e}");
+        }
     }
 }

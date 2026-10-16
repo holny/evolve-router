@@ -15,6 +15,8 @@ pub struct Inner {
     pub config_path: Option<std::path::PathBuf>,
     /// 配置热加载状态（面板/网页可读：热加载时间 + 是否需要重启）
     pub config_watch: Mutex<ConfigWatch>,
+    /// 配置文件里的 `providers` 段（热挂载：导出/手改后 5s 内生效，供 effective_overrides 合并）
+    pub cfg_providers: Mutex<Vec<evolve_core::config::ProviderCfg>>,
     pub key_cursor: Mutex<HashMap<String, usize>>,
     pub engine: Engine,
     pub sessions: SessionStore,
@@ -98,7 +100,10 @@ pub fn static_config_fingerprint(text: &str, path: Option<&std::path::Path>) -> 
     let cfg = evolve_core::config::FileConfig::parse_text(text, path).ok()?;
     let mut v = serde_json::to_value(&cfg).ok()?;
     if let Some(obj) = v.as_object_mut() {
+        // decision 与 providers 都是**可热加载**段（判定链 / provider 清单）——
+        // 只有其余段落改动才算"需要重启"
         obj.remove("decision");
+        obj.remove("providers");
     }
     Some(canonical_json(&v))
 }
@@ -250,6 +255,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         .build()
         .expect("http client");
 
+    let initial_providers = config.providers.clone();
     let slot_health = chain.as_ref().map(|c| c.health.clone());
     // 当前生效的判定配置（api_live 的状态来源；热加载后由 reload_config 更新）
     let active_slots: Vec<String> = chain
@@ -290,6 +296,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         config,
         config_path,
         config_watch: Mutex::new(watch),
+        cfg_providers: Mutex::new(initial_providers),
         key_cursor: Mutex::new(HashMap::new()),
         engine,
         sessions: SessionStore::new(),
@@ -372,6 +379,17 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) -> bool {
             .as_ref()
             .map(|c| std::sync::Arc::new(evolve_decision::slots::SlotAdvisor(c.clone())) as std::sync::Arc<dyn evolve_core::types::RouteAdvisor>),
     );
+    let prev_providers = st.cfg_providers.lock().map(|g| g.len()).unwrap_or(0);
+    if let Ok(mut g) = st.cfg_providers.lock() {
+        *g = new_cfg.providers.clone();
+    }
+    if prev_providers != new_cfg.providers.len() {
+        tracing::info!(
+            from = prev_providers,
+            to = new_cfg.providers.len(),
+            "config hot-reloaded: provider list updated"
+        );
+    }
     let now_ms = evolve_memory::health::now();
     if let Ok(mut w) = st.config_watch.lock() {
         w.reloaded_at_ms = Some(now_ms);
@@ -411,7 +429,12 @@ pub fn note_judge(st: &AppState, judge_source: &str) {
 /// 面板/网页读 provider 列表时必须走这里——直接用 `load_overrides` 会漏掉配置文件里的
 /// 来源标记（origin / source_path）与用户显式声明的 provider。
 pub fn effective_overrides(st: &AppState) -> Overrides {
-    merge_config_providers(&st.config.data.dir, &st.config.providers)
+    let providers = st
+        .cfg_providers
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    merge_config_providers(&st.config.data.dir, &providers)
 }
 
 pub fn merge_config_providers(
@@ -421,6 +444,12 @@ pub fn merge_config_providers(
     let mut ov = load_overrides(data_dir);
     for p in cfg_providers {
         if p.base_url.trim().is_empty() {
+            continue;
+        }
+        // 自指条目（base_url 指向本机网关自身）永不当成上游 provider
+        let self_hint = p.base_url.contains("127.0.0.1:") || p.base_url.contains("localhost:");
+        if self_hint {
+            tracing::debug!(key = %p.key, base = %p.base_url, "skip self-referential provider entry");
             continue;
         }
         let key = if p.key.trim().is_empty() {
@@ -472,6 +501,8 @@ pub fn export_providers_to_config(st: &AppState, path: &std::path::Path) -> anyh
     let mut cfg = evolve_core::config::FileConfig::parse_text(&text, Some(path))?;
     let snap = st.engine.catalog_snapshot();
     let ov = load_overrides(&st.config.data.dir);
+    let self_ep = format!("127.0.0.1:{}", st.config.server.port);
+    let self_ep2 = format!("localhost:{}", st.config.server.port);
 
     // 现网 provider（含发现来的）→ 按 key 归并；key 取目录里的 provider 名
     let mut entries: Vec<evolve_core::config::ProviderCfg> = Vec::new();
@@ -480,12 +511,27 @@ pub fn export_providers_to_config(st: &AppState, path: &std::path::Path) -> anyh
         if !seen.insert(m.provider.clone()) {
             continue;
         }
+        // 网关自身（agent 配置里指向本机的那个 provider）不是上游：不导出，
+        // 否则会被配置回灌成"手动 provider"，面板/网页出现自指条目（用户实测反馈）
+        if m.base_url.contains(&self_ep) || m.base_url.contains(&self_ep2) {
+            continue;
+        }
         let user_override = ov.providers.get(&m.provider);
         let discovered = matches!(m.source, evolve_core::types::Source::Discovered | evolve_core::types::Source::Remote);
+        // 发现来的条目**必须带上真实 key**：只写 base_url 会让配置回灌后
+        // has_key=false、身份指纹为空 → 面板把同端点的两个账号误判成"重复"
+        let discovered_key = m
+            .keys
+            .iter()
+            .find(|k| !k.value.trim().is_empty())
+            .map(|k| k.value.clone())
+            .or_else(|| m.api_key.clone().filter(|k| !k.trim().is_empty()));
         entries.push(evolve_core::config::ProviderCfg {
             key: m.provider.clone(),
             base_url: user_override.map(|p| p.base_url.clone()).unwrap_or_else(|| m.base_url.clone()),
-            api_key: user_override.and_then(|p| p.api_key.clone()),
+            api_key: user_override
+                .and_then(|p| p.api_key.clone())
+                .or(discovered_key),
             api_key_env: m.api_key_env.clone(),
             protocol: user_override.map(|p| p.protocol.clone()),
             plan_kind: user_override.map(|p| p.plan_kind.clone()),
@@ -503,7 +549,11 @@ pub fn export_providers_to_config(st: &AppState, path: &std::path::Path) -> anyh
     }
     entries.sort_by(|a, b| a.key.cmp(&b.key));
     let n = entries.len();
-    cfg.providers = entries;
+    cfg.providers = entries.clone();
+    // 立即生效：无需等 5s watcher，也不用重启
+    if let Ok(mut g) = st.cfg_providers.lock() {
+        *g = entries;
+    }
     std::fs::write(path, evolve_core::config::to_jsonc(&cfg))?;
     #[cfg(unix)]
     {
@@ -884,6 +934,30 @@ mod provider_merge_tests {
     use super::*;
     use evolve_core::config::ProviderCfg;
 
+    /// 自指条目（base_url 指向本机网关）不是上游 → 合并时跳过，不出现在 Provider 管理
+    #[test]
+    fn self_referential_provider_entry_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("er-selfprov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = vec![
+            ProviderCfg {
+                key: "evo-router".into(),
+                base_url: "http://127.0.0.1:8787/v1".into(),
+                ..Default::default()
+            },
+            ProviderCfg {
+                key: "real".into(),
+                base_url: "https://example.test/v1".into(),
+                ..Default::default()
+            },
+        ];
+        let ov = merge_config_providers(&dir.to_string_lossy(), &cfg);
+        assert!(!ov.providers.contains_key("evo-router"), "self-referential entry must not become a provider");
+        assert!(ov.providers.contains_key("real"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 配置文件里的 providers 必须以**配置优先**合并进 overrides，并保留来源标记
     #[test]
     fn config_providers_override_and_keep_provenance() {
@@ -940,6 +1014,13 @@ mod config_watch_tests {
         assert_eq!(
             static_config_fingerprint(jsonc, Some(std::path::Path::new("a.jsonc"))),
             static_config_fingerprint(toml, Some(std::path::Path::new("a.toml"))),
+        );
+        // providers 段也是可热加载的（与 decision 同）：改它不要求重启
+        let prov_changed = "{\"server\":{\"port\":8787},\"decision\":{\"backend\":\"auto\"},\"providers\":[{\"key\":\"p\",\"base_url\":\"https://x/v1\"}]}";
+        assert_eq!(
+            static_config_fingerprint(jsonc, Some(std::path::Path::new("a.jsonc"))),
+            static_config_fingerprint(prov_changed, Some(std::path::Path::new("a.jsonc"))),
+            "providers are hot-reloadable and must not ask for a restart"
         );
         // 判定段变化不触发重启；server 段变化触发
         let slots_changed = "{\"server\":{\"port\":8787},\"decision\":{\"backend\":\"auto\",\"slots\":[{\"kind\":\"jev\"}]}}";

@@ -126,16 +126,41 @@ pub fn discover_from_file(path: &Path) -> anyhow::Result<Vec<ModelRecord>> {
     discover_from_text(&text)
 }
 
+/// provider key → 配置里的账号名（opencode 的 `provider.<key>.name`，如 "OpenCode Go-github"）。
+/// 用于把"同一端点的两个账号"在界面/导出里区分开。
+fn provider_account_names(text: &str) -> std::collections::HashMap<String, String> {
+    let Ok(v) = serde_json::from_str::<Value>(&strip_jsonc(text)) else {
+        return Default::default();
+    };
+    let mut out = std::collections::HashMap::new();
+    if let Some(prov) = v.get("provider").and_then(|p| p.as_object()) {
+        for (k, pv) in prov {
+            if let Some(n) = pv.get("name").and_then(|n| n.as_str()).filter(|n| !n.trim().is_empty()) {
+                out.insert(k.clone(), n.trim().to_string());
+            }
+        }
+    }
+    out
+}
+
 pub fn discover_default() -> Vec<ModelRecord> {
     let mut out = Vec::new();
     for p in default_config_paths() {
         if p.is_file() {
-            match discover_from_file(&p) {
+            let Ok(text) = std::fs::read_to_string(&p) else { continue };
+            match discover_from_text(&text) {
                 Ok(mut models) => {
                     tracing::info!(path = %p.display(), count = models.len(), "discovered opencode models");
-                    // 出处带**加载路径**（导出 provider 清单/面板展示要知道从哪读来的）
+                    // 出处带**加载路径 + 账号名**：同端点可能挂多个账号
+                    //（如 opencode-go 的 "OpenCode Go-gmail" / "OpenCode Go-github"），
+                    // 只写路径两边分不出来，用户会以为是重复条目
+                    let accounts = provider_account_names(&text);
                     for m in models.iter_mut() {
-                        m.source_note = Some(format!("opencode @ {}", p.display()));
+                        let acct = accounts
+                            .get(&m.provider)
+                            .map(|n| format!(" ({n})"))
+                            .unwrap_or_default();
+                        m.source_note = Some(format!("opencode @ {}{}", p.display(), acct));
                     }
                     out.append(&mut models);
                 }
@@ -292,5 +317,21 @@ mod tests {
         let out = strip_jsonc(r#"{"url": "https://x.y//not-comment", "n": 1}"#);
         let v: Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["url"], "https://x.y//not-comment");
+    }
+
+    #[test]
+    fn account_names_are_captured() {
+        // 同端点两个账号：靠 provider.<key>.name 区分（OpenCode Go-gmail / -github）
+        let text = r#"{
+          "provider": {
+            "opencode-go": { "name": "OpenCode Go-gmail", "options": { "apiKey": "k1" } },
+            "opencode-go-github": { "name": "OpenCode Go-github", "options": { "apiKey": "k2" } },
+            "evo-router": { "options": { "baseURL": "http://127.0.0.1:8787/v1" } }
+          }
+        }"#;
+        let names = provider_account_names(text);
+        assert_eq!(names.get("opencode-go").map(String::as_str), Some("OpenCode Go-gmail"));
+        assert_eq!(names.get("opencode-go-github").map(String::as_str), Some("OpenCode Go-github"));
+        assert!(!names.contains_key("evo-router"), "provider without a name adds no label");
     }
 }
