@@ -520,8 +520,24 @@ fn extract_json(content: &str) -> Option<serde_json::Value> {
     }
 }
 
+/// 取 choice 答案的选项名：`choice` 可能是 **null**（端点开启 `allow_none` 时，
+/// "以上都不是" 胜出——StartLux / Bamboo 实测默认开启）→ 退化为概率最大的**已列**选项；
+/// 连概率都没有才返回 None。此前 null 会让整个判定解析失败并静默降级启发式。
+fn choice_of(answer: &serde_json::Value) -> Option<String> {
+    if let Some(c) = answer.get("choice").and_then(|c| c.as_str()) {
+        return Some(c.to_string());
+    }
+    let probs = answer.get("probabilities")?.as_object()?;
+    let (best, _) = probs
+        .iter()
+        .filter_map(|(k, v)| v.as_f64().map(|n| (k, n)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+    tracing::debug!(option = %best, "choice was null (none-of-the-above won); using the top listed option");
+    Some(best.clone())
+}
+
 pub(crate) fn parse_judgment_answers(a: &serde_json::Value) -> Option<JudgmentSet> {
-    let domain = match a.get("task_domain")?.get("choice")?.as_str()? {
+    let domain = match choice_of(a.get("task_domain")?).as_deref()? {
         "code" => Domain::Code,
         "math_logic" => Domain::MathLogic,
         "writing" => Domain::Writing,
@@ -534,7 +550,7 @@ pub(crate) fn parse_judgment_answers(a: &serde_json::Value) -> Option<JudgmentSe
     let noul = |k: &str| a.get(k).and_then(|x| x.get("noul")).and_then(|x| x.as_f64()).unwrap_or(0.5) as f32;
     let score = |k: &str| a.get(k).and_then(|x| x.get("score")).and_then(|x| x.as_f64()).unwrap_or(1.0) as f32;
     // 锚定量表：L1-L4 级别映射到数值（消双峰——模型选级别而非凭空打分）
-    let level = a.get("difficulty").and_then(|x| x.get("choice")).and_then(|x| x.as_str()).map(|s| s.to_string());
+    let level = a.get("difficulty").map(choice_of).unwrap_or(None);
     let difficulty = match level.as_deref() {
         Some("l1") => 0.5,
         Some("l2") => 1.4,
@@ -553,10 +569,7 @@ pub(crate) fn parse_judgment_answers(a: &serde_json::Value) -> Option<JudgmentSe
         high_stakes: noul("high_stakes"),
         session_relevance: noul("session_relevance"),
         session_depth: score("session_depth").clamp(0.0, 3.0),
-        route_recommendation: a.get("route_recommendation")
-            .and_then(|x| x.get("choice"))
-            .and_then(|x| x.as_str())
-            .map(|s| s.to_string()),
+        route_recommendation: a.get("route_recommendation").and_then(choice_of),
         route_recommendation_confidence: a.get("route_recommendation")
             .and_then(|x| x.get("confidence"))
             .and_then(|x| x.as_f64())
@@ -691,6 +704,44 @@ impl DecisionModelBackend {
 
     fn is_default_jev(endpoint: &str) -> bool {
         endpoint == "https://api.typesafe.ai/v1/systemone"
+    }
+}
+
+#[cfg(test)]
+mod startlux_answers_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// StartLux / Bamboo 默认开启 allow_none → task_domain.choice 可能是 null。
+    /// 必须退化为概率最大的已列选项，而不是整条判定失败（静默降级启发式）。
+    #[test]
+    fn null_choice_falls_back_to_top_listed_option() {
+        let a = json!({
+            "task_domain": {"type": "choice", "choice": null, "confidence": 0.4,
+                "probabilities": {"code": 0.71, "chitchat": 0.06, "other": 0.23},
+                "none_probability": 0.3},
+            "difficulty": {"type": "score", "score": 1.2, "confidence": 0.6},
+            "needs_vision": {"type": "noul", "noul": 0.02},
+            "is_trivial": {"type": "noul", "noul": 0.9},
+            "tool_heavy": {"type": "noul", "noul": 0.1},
+            "high_stakes": {"type": "noul", "noul": 0.05},
+            "session_relevance": {"type": "noul", "noul": 0.8},
+            "session_depth": {"type": "score", "score": 1.0},
+        });
+        let j = parse_judgment_answers(&a).expect("null choice must not abort the whole judgment");
+        assert_eq!(j.domain, Domain::Code);
+        assert_eq!(j.judge_source, "decision_model");
+        assert!((j.difficulty - 1.2).abs() < 1e-6);
+        assert!(j.is_trivial > 0.5);
+    }
+
+    #[test]
+    fn plain_choice_and_missing_answer_degrade_sanely() {
+        // 正常 choice 答案照旧
+        let a = json!({"task_domain": {"choice": "agent_ops"}, "difficulty": {"score": 2.0}});
+        assert_eq!(parse_judgment_answers(&a).unwrap().domain, Domain::AgentOps);
+        // 完全缺 task_domain → 无法判定（调用方降级启发式）
+        assert!(parse_judgment_answers(&json!({"difficulty": {"score": 1.0}})).is_none());
     }
 }
 
