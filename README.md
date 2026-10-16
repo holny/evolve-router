@@ -324,6 +324,19 @@ Every request and every model row is **tagged with the decision itself**, render
 
 Top metrics switch between **today** and **yesterday** (calendar windows, persisted in hourly buckets), and the Providers card toggles between provider and per-model views.
 
+### Everyday use (macOS)
+
+| What | How |
+|---|---|
+| Status & controls | click the **ER** badge → panel: **Stop/Start**, **Restart** (applies non-hot-reloadable config), Quit, autostart |
+| Full data view | <http://127.0.0.1:8787/> |
+| Point an agent here | `http://127.0.0.1:8787/v1`, model `auto` |
+| Edit settings | `~/.evo-router/evo-router-config.jsonc` — `decision` / `providers` hot-reload in ~5 s (`POST /api/reload` to force), everything else needs **Restart** |
+| Logs & data | `~/.evo-router/logs/` · `~/.evo-router/events/` · `~/.evo-router/state/` |
+| Health | `curl -s localhost:8787/healthz` · `curl -s localhost:8787/api/live` · `evo-router doctor` |
+
+Full walkthrough: **[docs/QUICKSTART-macos.md](docs/QUICKSTART-macos.md)**.
+
 ![EvolveRouter macOS menu bar panel — light & dark](docs/assets/panel.png)
 
 

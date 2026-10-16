@@ -322,6 +322,19 @@ evo-router service install   # 另有：start / stop / restart / status
 
 顶部指标可在**今天 / 昨天**之间切换（本地日历窗口，小时桶持久化），Providers 卡可在 Provider / 逐模型两个维度间切换。
 
+### 日常使用速查（macOS）
+
+| 想干什么 | 怎么做 |
+|---|---|
+| 看状态 / 控制 | 点菜单栏 **ER** 徽章 → 面板：**Stop/Start**、**Restart**（让不可热加载的配置生效）、Quit、autostart |
+| 看完整数据 | <http://127.0.0.1:8787/> |
+| 给 Agent 接入 | `http://127.0.0.1:8787/v1`，模型填 `auto` |
+| 改设置 | 编辑 `~/.evo-router/evo-router-config.jsonc`——`decision` / `providers` 约 5 秒热加载（`POST /api/reload` 可立即触发），其余段落需点 **Restart** |
+| 日志与数据 | `~/.evo-router/logs/` · `~/.evo-router/events/` · `~/.evo-router/state/` |
+| 自检 | `curl -s localhost:8787/healthz` · `curl -s localhost:8787/api/live` · `evo-router doctor` |
+
+完整步骤见 **[docs/QUICKSTART-macos.md](docs/QUICKSTART-macos.md)**。
+
 ![EvolveRouter macOS 菜单栏面板 —— 亮/暗双主题](docs/assets/panel.png)
 
 
