@@ -189,7 +189,7 @@ The decision model goes in the same file (`decision.slots`) — that is the only
 }
 ```
 
-Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Slots are tried in the order **jev > laya > openai**, a fatal error blacklists that slot for the process lifetime, and a whole-chain failure degrades to the heuristic — a decision-model outage never blocks routing. With a remote judge, `judge_timeout_ms` matters (a 27B judge behind a relay answers in ~2.5 s, so the 3 s default times out before the answer arrives).
+Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Slots are tried in the order **jev > laya > openai**, a fatal error (auth/404/unreachable) blacklists that slot for the process lifetime, and a whole-chain failure degrades to the heuristic — a decision-model outage never blocks routing. Transient failures (timeout / 5xx / unparseable) are **retried automatically**: the first one retries on the next request, repeats back off exponentially (30 s → 10 min) so no request pays the same timeout twice in a row, and a single success clears the failure state and the banner. `/api/live` reports `consecutive_fails` and `retry_in_ms` so the UI can say when the next attempt happens. With a remote judge, `judge_timeout_ms` matters (a 27B judge behind a relay answers in ~2.5 s, so the 3 s default times out before the answer arrives).
 
 ### Config format and where credentials live
 
