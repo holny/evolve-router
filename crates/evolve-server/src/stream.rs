@@ -117,6 +117,29 @@ fn quota_now_ms() -> u64 {
 }
 
 /// Wraps an upstream byte stream, capturing TTFT/bytes/usage/content/tool
+/// 流结束的性质（路由健康学习用）：
+/// - `Ok`：看到终止帧（正常结束）
+/// - `IncompleteUpstream`：上游**自己**结束了但没有 `finish_reason`（静默断流/截断）
+///   —— "200 + 无 usage + 无终止帧"绝不能被记成成功。实测事故：mimo-v2.6-flash 在
+///   24 万 token 上下文下 50s 首字节、347s 后只吐 840 字节就断流，客户端整轮空转
+/// - `ClientAborted`：响应体在流结束前被丢弃（客户端断开/进程收尾）——不惩罚上游
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEnd {
+    Ok,
+    IncompleteUpstream,
+    ClientAborted,
+}
+
+pub fn classify_stream_end(finish_reason: Option<&str>, upstream_eof: bool) -> StreamEnd {
+    if !upstream_eof {
+        return StreamEnd::ClientAborted;
+    }
+    match finish_reason {
+        Some(_) => StreamEnd::Ok,
+        None => StreamEnd::IncompleteUpstream,
+    }
+}
+
 /// calls while forwarding chunks untouched. At stream end (or drop) runs
 /// response-quality analysis, feeds the flywheel, and records pending tool
 /// calls for L3 session-loop matching.
@@ -131,10 +154,12 @@ pub fn telemetry_body<E>(
     bus: tokio::sync::broadcast::Sender<Value>,
     request: Value,
     anthropic_mode: bool,
+    health: Option<evolve_memory::health::HealthRegistry>,
 ) -> futures::stream::BoxStream<'static, Result<bytes::Bytes, axum::Error>>
 where
     E: std::error::Error + Send + Sync + 'static,
 {
+    let health_model = telem.lock().map(|t| t.chosen.clone()).unwrap_or_default();
     let inner = futures::TryStreamExt::map_err(inner, |e: E| axum::Error::new(e));
     let pinned: StateInner = Box::pin(inner);
     let state = (
@@ -148,6 +173,9 @@ where
             bus: Some(bus),
             request,
             acc: StreamAcc::new(anthropic_mode),
+            upstream_eof: false,
+            model_id: health_model.clone(),
+            health: health.clone(),
             // 流的整个生命期都算"在飞"（流结束/被丢弃时释放），并登记模型/会话
             _inflight: {
                 let (model, session, agent, started) = telem
@@ -389,6 +417,11 @@ struct Finalizer {
     bus: Option<tokio::sync::broadcast::Sender<Value>>,
     request: Value,
     acc: StreamAcc,
+    /// 是否看到了上游的正常结束（poll_next → None）：用于区分"上游截断"与"客户端放弃"
+    upstream_eof: bool,
+    /// 判定用的模型 id（截断时给健康注册表记账 → 该模型冷却，路由避开）
+    model_id: String,
+    health: Option<evolve_memory::health::HealthRegistry>,
 }
 
 const TAIL_CAP: usize = 16 * 1024;
@@ -405,6 +438,8 @@ impl Finalizer {
 impl Drop for Finalizer {
     fn drop(&mut self) {
         let Some(events) = self.events.take() else { return };
+        // 结束性质判定：上游截断必须**如实记成失败**（否则飞轮的可靠性把断流当成功学习）
+        let verdict = classify_stream_end(self.acc.finish_reason.as_deref(), self.upstream_eof);
         // 锁中毒也要落事件（曾经 `let Ok(..) else { return }` 会**静默丢失整条事件**：
         // 事故排查时"网关没有这条请求的记录"就是这么来的）
         let mut t = match self.telem.lock() {
@@ -444,6 +479,46 @@ impl Drop for Finalizer {
                 }
                 None => Some(json!({"quality": q})),
             };
+        }
+        match verdict {
+            StreamEnd::IncompleteUpstream => {
+                t.status = 599;
+                let total_ms = t.started.elapsed().as_millis() as u64;
+                tracing::warn!(
+                    model = %self.model_id,
+                    bytes = t.bytes,
+                    total_ms,
+                    "upstream stream ended without a finish_reason (truncated) — marking the model failed"
+                );
+                if let Some(h) = &self.health {
+                    h.mark_failure(
+                        &self.model_id,
+                        evolve_memory::health::Failure {
+                            kind: evolve_core::types::HealthKind::Transient,
+                            message: "stream truncated (no finish_reason)".into(),
+                            until_epoch_ms: None,
+                        },
+                    );
+                }
+                t.extra = match t.extra.take() {
+                    Some(mut ex) => {
+                        ex["stream_incomplete"] = json!(true);
+                        Some(ex)
+                    }
+                    None => Some(json!({"stream_incomplete": true})),
+                };
+            }
+            StreamEnd::ClientAborted => {
+                // 客户端/进程在流结束前放弃：不是上游的错，不记账、不改状态
+                t.extra = match t.extra.take() {
+                    Some(mut ex) => {
+                        ex["client_aborted"] = json!(true);
+                        Some(ex)
+                    }
+                    None => Some(json!({"client_aborted": true})),
+                };
+            }
+            StreamEnd::Ok => {}
         }
         // 统一收尾（与非流式同路径）：含订阅方案用量记账（quota 缺席时退化为仅落盘）
         if let (Some(fw), Some(q)) = (&self.flywheel, &self.quota) {
@@ -494,6 +569,10 @@ impl Stream for TelemetryStream {
                 Poll::Ready(Some(Err(axum::Error::new(e))))
             }
             Poll::Ready(None) => {
+                // 先标记"上游正常结束"，Drop 里据此区分截断 vs 客户端放弃
+                if let Some(f) = this.1.as_mut() {
+                    f.upstream_eof = true;
+                }
                 this.1 = None; // triggers Finalizer::drop
                 Poll::Ready(None)
             }
@@ -526,3 +605,25 @@ pub fn extract_usage_fields(usage: &Value) -> (Option<u64>, Option<u64>, Option<
         .or_else(|| usage.get("cache_creation_input_tokens").and_then(|v| v.as_u64()));
     (prompt, completion, cached, cache_write)
 }
+
+#[cfg(test)]
+mod stream_end_tests {
+    use super::{classify_stream_end, StreamEnd};
+
+    /// "上游自己结束但没有终止帧"必须判为截断——这类响应（200 + 无 usage + 无 finish_reason）
+    /// 曾被当成成功，飞轮学不到"这个模型会断流"（实测：mimo-v2.6-flash 24 万上下文下断流）
+    #[test]
+    fn stream_end_classification() {
+        assert_eq!(classify_stream_end(Some("stop"), true), StreamEnd::Ok);
+        assert_eq!(classify_stream_end(Some("tool_calls"), true), StreamEnd::Ok);
+        assert_eq!(
+            classify_stream_end(None, true),
+            StreamEnd::IncompleteUpstream,
+            "upstream EOF without a finish_reason is a truncation"
+        );
+        // 客户端/进程在流结束前放弃：不惩罚上游
+        assert_eq!(classify_stream_end(None, false), StreamEnd::ClientAborted);
+        assert_eq!(classify_stream_end(Some("stop"), false), StreamEnd::ClientAborted);
+    }
+}
+

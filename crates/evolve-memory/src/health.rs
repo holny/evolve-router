@@ -5,8 +5,10 @@ use evolve_core::types::*;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+#[derive(Clone, Default)]
 pub struct HealthRegistry {
-    inner: Mutex<HashMap<String, HealthEntry>>,
+    /// Arc 内部：注册表随 AppState 共享，且**流式收尾需要一份句柄**给截断的流记账
+    inner: std::sync::Arc<Mutex<HashMap<String, HealthEntry>>>,
 }
 
 #[derive(Clone)]
@@ -25,7 +27,7 @@ impl Default for Failure {
 
 impl HealthRegistry {
     pub fn new() -> Self {
-        Self { inner: Mutex::new(HashMap::new()) }
+        Self { inner: std::sync::Arc::new(Mutex::new(HashMap::new())) }
     }
 
     pub fn snapshot(&self) -> HealthMap {
@@ -107,12 +109,6 @@ impl HealthRegistry {
 
     pub fn is_permanent(until: u64) -> bool {
         until == Self::PERMANENT_UNTIL
-    }
-}
-
-impl Default for HealthRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

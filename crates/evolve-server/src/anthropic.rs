@@ -467,6 +467,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 // 时按 openai 形状解析会导致 choices/usage 全部丢失（用量不入
                 // 账、预算保护与 L3 确认对该链路失效）
                 !to_openai,
+                Some(st.health.clone()),
             );
             let client_stream: futures::stream::BoxStream<'static, Result<bytes::Bytes, axum::Error>> =
                 if to_openai {

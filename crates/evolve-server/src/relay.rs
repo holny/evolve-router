@@ -732,6 +732,7 @@ pub async fn chat_completions(
                     st.bus.clone(),
                     parsed.clone(),
                     true,
+                    Some(st.health.clone()),
                 );
                 let translated =
                     crate::translate::AnthropicToOpenaiStream::new(telem_body).boxed();
@@ -747,6 +748,7 @@ pub async fn chat_completions(
                 st.bus.clone(),
                 parsed.clone(),
                 false,
+                Some(st.health.clone()),
             );
             return out.body(axum::body::Body::from_stream(stream)).unwrap();
         }

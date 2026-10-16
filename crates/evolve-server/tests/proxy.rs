@@ -1117,3 +1117,72 @@ async fn event_carries_derived_tags() {
         assert!(eg["confidence_gate"].as_f64().unwrap_or(-1.0) > 0.0);
     }
 }
+
+/// 上游"静默断流"（200 + 若干 chunk + 无 finish_reason + 无 usage 直接关闭）的契约：
+/// 网关必须如实记成**失败**（status 599 + stream_incomplete）并冷却该模型，
+/// 否则飞轮会把断流当成功学习（实测事故：mimo-v2.6-flash 24 万上下文下只吐几百字节就断）
+#[tokio::test]
+async fn truncated_upstream_stream_is_marked_failed() {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|_b: axum::body::Bytes| async {
+            // 只有 reasoning 片段、没有 finish_reason、没有 usage，然后直接关闭
+            let sse = "data: {\"id\":\"1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n";
+            axum::http::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(Body::from(sse))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir()
+        .join(format!("mr-test-trunc-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let app = build_router(build_state(cfg));
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .header("x-ev-session", "trunc-session")
+        .body(Body::from(
+            json!({"model": "auto", "stream": true, "messages": [{"role": "user", "content": "hi"}]})
+                .to_string(),
+        ))
+        .unwrap();
+    let (status, headers, _raw) = send(app.clone(), req).await;
+    assert_eq!(status, StatusCode::OK, "headers already went out; the record must still be honest");
+
+    // 事件落盘是异步的：轮询到该 session 的 chat 事件
+    let mut ev: Option<Value> = None;
+    for _ in 0..40 {
+        let (_, _, raw) = send(app.clone(), get("/api/events?limit=20")).await;
+        let arr = json_body(&raw);
+        if let Some(e) = arr.as_array().and_then(|a| {
+            a.iter()
+                .find(|e| e["kind"] == "chat" && e["session"] == "trunc-session")
+        }) {
+            ev = Some(e.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let ev = ev.expect("truncated stream must still write an event");
+    assert_eq!(ev["status"], 599, "truncated stream must be recorded as a failure: {ev}");
+    // 事件字段是**拓扑扁平**的（extra 直接展开到顶层）
+    assert_eq!(ev["stream_incomplete"], true, "{ev}");
+
+    // 该模型应已被冷却（后续请求不会再选它）
+    let model = ev["chosen"].as_str().unwrap_or("");
+    let (_, _, raw) = send(app, get("/api/health")).await;
+    let h = json_body(&raw);
+    let entry = h["models"].get(model).cloned().unwrap_or(Value::Null);
+    assert_ne!(entry, Value::Null, "model {model} must appear in health after a truncation: {h}");
+    assert_eq!(entry["available"], false, "cooled model must be unavailable: {entry}");
+}
