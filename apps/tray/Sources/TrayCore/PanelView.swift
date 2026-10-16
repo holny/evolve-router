@@ -165,8 +165,8 @@ public struct PanelView: View {
                             .font(.system(size: 10.5, weight: .semibold))
                             .lineLimit(1)
                         if !stale {
-                            Text(degraded ? t("dm_degraded_hint")
-                                 : stale ? t("dm_stale_hint") : t("dm_missing_hint"))
+                            // degraded / missing 两态各自的引导（stale 在上面的分支里已 early-return）
+                            Text(degraded ? t("dm_degraded_hint") : t("dm_missing_hint"))
                                 .font(.system(size: 9))
                                 .foregroundStyle(.orange.opacity(0.85))
                                 .lineLimit(1)

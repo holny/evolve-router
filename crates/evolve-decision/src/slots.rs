@@ -90,14 +90,8 @@ impl SlotHealth {
             *g = Some(LastSlotFail {
                 slot: kind.label().to_string(),
                 kind: why,
-                label: match why {
-                    SlotFail::Auth => "auth failed (401/403)".into(),
-                    SlotFail::NotFound => "endpoint/model not found (404)".into(),
-                    SlotFail::Unreachable => "endpoint unreachable".into(),
-                    SlotFail::Timeout => "timeout".into(),
-                    SlotFail::Server => "upstream error (5xx)".into(),
-                    SlotFail::Parse => "unparseable response".into(),
-                },
+                // 人读标签只在 SlotFail::label() 定义一次（此前两处逐字重复）
+                label: why.label().to_string(),
                 at_ms: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)

@@ -336,6 +336,33 @@ const T = {
              ko:'결정 모델 설정됨 — 게이트웨이 재시작 필요', ja:'決定モデル設定済み — ゲートウェイ再起動で反映',
              es:'Modelo de decisión configurado — reinicie la puerta para aplicarlo',
              fr:'Modèle de décision configuré — redémarrez la passerelle pour appliquer'},
+  dm_cfgline:{zh:'在配置文件里加一条槽位（保存后约 5 秒热加载，无需重启）：~/.evo-router/evo-router-config.jsonc → decision.slots',
+             en:'Add a slot in the config file (hot-reloaded in ~5s, no restart): ~/.evo-router/evo-router-config.jsonc → decision.slots',
+             ko:'설정 파일에 슬롯 추가(약 5초 내 핫 리로드, 재시작 불필요): ~/.evo-router/evo-router-config.jsonc → decision.slots',
+             ja:'設定ファイルにスロットを追加（約5秒でホットリロード、再起動不要）：~/.evo-router/evo-router-config.jsonc → decision.slots',
+             es:'Añada un slot en el archivo de configuración (recarga en ~5s, sin reinicio): ~/.evo-router/evo-router-config.jsonc → decision.slots',
+             fr:'Ajoutez un slot dans le fichier de configuration (rechargé en ~5 s, sans redémarrage) : ~/.evo-router/evo-router-config.jsonc → decision.slots'},
+  dm_degraded_hint:{zh:'最近一次判定回退到规则：检查该槽位的端点与 api_key', en:'the last judge fell back to rules — check the slot endpoint and api_key',
+             ko:'최근 판정이 규칙으로 폴백: 슬롯 엔드포인트와 api_key 확인', ja:'直近の判定がルールにフォールバック：スロットのエンドポイントと api_key を確認',
+             es:'el último juicio cayó a reglas: revise el endpoint y la api_key del slot', fr:'le dernier jugement est retombé sur les règles : vérifiez l\'endpoint et l\'api_key du slot'},
+  dm_slot_jev:{zh:'① jev：{ "kind": "jev", "api_key": "<key>" }（无 base_url 即原生云端；或加 base_url 指向本地/第三方同契约端点）',
+             en:'① jev: { "kind": "jev", "api_key": "<key>" } (no base_url = native cloud; add base_url for a local or third-party endpoint of the same contract)',
+             ko:'① jev: { "kind": "jev", "api_key": "<key>" }(base_url 없으면 네이티브 클라우드; 동일 계약의 로컬/제3자 엔드포인트는 base_url 추가)',
+             ja:'① jev：{ "kind": "jev", "api_key": "<key>" }（base_url 省略でネイティブクラウド、同一契約のローカル/第三者端点は base_url を追加）',
+             es:'① jev: { "kind": "jev", "api_key": "<key>" } (sin base_url = nube nativa; añada base_url para un endpoint local o de terceros con el mismo contrato)',
+             fr:'① jev : { "kind": "jev", "api_key": "<key>" } (sans base_url = cloud natif ; ajoutez base_url pour un endpoint local ou tiers de même contrat)'},
+  dm_slot_laya:{zh:'② laya（本地 sidecar，免 key）：{ "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }',
+             en:'② laya (local sidecar, no key): { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }',
+             ko:'② laya(로컬 사이드카, key 불필요): { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }',
+             ja:'② laya（ローカル sidecar、key 不要）：{ "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }',
+             es:'② laya (sidecar local, sin key): { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }',
+             fr:'② laya (sidecar local, sans clé) : { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" }'},
+  dm_slot_openai:{zh:'③ openai（OpenAI 兼容端点）：{ "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }',
+             en:'③ openai (OpenAI-compatible endpoint): { "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }',
+             ko:'③ openai(OpenAI 호환): { "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }',
+             ja:'③ openai（OpenAI互換）：{ "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }',
+             es:'③ openai (compatible con OpenAI): { "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }',
+             fr:'③ openai (compatible OpenAI) : { "kind": "openai", "base_url": "<base-url>", "model": "<model-id>" }'},
   dm_envline:{zh:'统一接入 = 同一组进程环境变量（macOS / Windows / Linux 通用），配置后重启网关生效：',
              en:'One integration form: the same process env vars everywhere (macOS / Windows / Linux); restart the gateway to apply:',
              ko:'통합 접속 = 동일한 프로세스 환경변수(macOS / Windows / Linux 공통), 설정 후 게이트웨이 재시작:',
@@ -1296,7 +1323,7 @@ function renderAutopsy(e){
   if (hint) hint.style.display = 'none';
 }
 
-const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'overview', twin:'24h', providers:[] };
+const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[] };
 
 // 评分矩阵模型名 → 飞轮行高亮（事件委托，覆盖后续新增的矩阵单元格）
 feed.addEventListener('click', ev => {
@@ -2032,13 +2059,19 @@ function renderDecisionBanner(){
   if (!d || d.status === 'ok') { b.style.display = 'none'; return; }
   const parts = [`<b>${t(d.status === 'degraded' ? 'dm_degraded'
       : d.status === 'stale' ? 'dm_stale' : 'dm_missing')}</b>`];
-  if (d.status === 'stale') {
+  if (d.status === 'degraded') {
+    // 已配置但最近一次判定回退：报告具体原因（与 macOS 面板同源 decision.last_fail）
+    const reason = (d.last_fail && d.last_fail.label) || '';
+    parts.push(`<span class="dm-row">${t('dm_degraded_hint')}${reason ? ' — ' + esc(reason) : ''}</span>`);
+    parts.push(`<span class="dim2">${t('dm_chain')}</span>`);
+  } else if (d.status === 'stale') {
     parts.push(`<span class="dm-row">${t('dm_restart')}</span>`);
   } else {
-    parts.push(`<span class="dm-row">${t('dm_envline')}</span>`);
-    parts.push(`<span class="dm-row">${t('dm_row_jev')}</span>`);
-    parts.push(`<span class="dm-row">${t('dm_row_laya')}</span>`);
-    parts.push(`<span class="dm-row">${t('dm_row_openai')}</span>`);
+    // missing：引导写配置文件（槽位只读配置，不再读环境变量——旧文案已过期且与面板冲突）
+    parts.push(`<span class="dm-row">${t('dm_cfgline')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_slot_jev')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_slot_laya')}</span>`);
+    parts.push(`<span class="dm-row">${t('dm_slot_openai')}</span>`);
     parts.push(`<span class="dim2">${t('dm_chain')}</span>`);
   }
   b.innerHTML = parts.join('');

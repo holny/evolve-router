@@ -15,11 +15,8 @@ let T: [String: String] = [
     "reqs": "reqs",
     "success_rate": "success",
     "tokens": "tokens",
-    "last_24h": "last 5h",
     "last_sync": "synced",
-    "plan_5h": "Plan usage · 5h",
     "recent": "Recent requests",
-    "fail_short": "fail",
     "providers": "Providers",
     "cooldown": "cooldown",
     "disabled": "disabled",
@@ -47,11 +44,8 @@ let T: [String: String] = [
         "dm_degraded": "Decision model unreachable",
     "dm_degraded_reason": "Decision model unreachable (%@)",
     "dm_degraded_hint": "Check the slot endpoint / api_key in evo-router-config.jsonc (details: ~/.evo-router/logs/gateway-child.log)",
-    "dm_stale_hint": "Applying on the next decision",
     "restart": "Restart",
     "restart_help": "Restart the gateway (applies [server]/[policy]/[[models]] changes)",
-    "reload": "Reload",
-    "reload_help": "Reload config now (decision slots hot-reload automatically every ~5s)",
     "cfg_dirty": "Config changed — restart to apply",
 ]
 
