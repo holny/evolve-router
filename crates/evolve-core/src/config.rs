@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct ServerCfg {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PolicyCfg {
     pub default: String,
@@ -48,7 +48,7 @@ impl Default for PolicyCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct DecisionCfg {
     pub backend: String,
@@ -61,7 +61,7 @@ pub struct DecisionCfg {
 }
 
 /// 单个决策模型槽位（`[[decision.slots]]`）
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct DecisionSlotCfg {
     /// jev | laya | openai
@@ -80,7 +80,7 @@ pub struct DecisionSlotCfg {
     pub protocol: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct CatalogCfg {
     pub remote_fetch: bool,
@@ -89,14 +89,14 @@ pub struct CatalogCfg {
     pub modelsdev_reference: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct QuotaCfg {
     pub learn_from_headers: bool,
 }
 
 /// External benchmark feed source (decision record #23).
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct BenchSourceCfg {
     pub name: String,
@@ -109,7 +109,7 @@ pub struct BenchSourceCfg {
     pub max_score: Option<f32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct BenchmarksCfg {
     pub enabled: bool,
@@ -140,13 +140,13 @@ impl Default for BenchmarksCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct DataCfg {
     pub dir: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DiscoveryCfg {
     pub agents: Vec<String>,
@@ -158,7 +158,7 @@ impl Default for DiscoveryCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ModelEntry {
     pub id: String,
@@ -210,7 +210,7 @@ impl Default for ModelEntry {
 }
 
 /// agent/会话标识提取：自定义请求头 + 内置已知 agent 逻辑
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct TelemetryCfg {
     /// 会话提取的自定义请求头（优先级最高）
@@ -234,7 +234,36 @@ impl Default for TelemetryCfg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+/// 配置里的 provider 条目（`providers = [...]`）——**用户可定义的全部 provider 配置**
+/// 都写在这里（导出时会带上来源标记，见 `origin` / `source_path`）。
+/// 载入优先级：本表（origin=user）> overrides.json（面板/网页改动）> 自动发现（agent 配置）。
+/// 去重仍由网关内部的 base_url + api_key 身份指纹完成，本表不参与去重逻辑。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderCfg {
+    /// provider key（如 zhipuai-coding-plan）；留空则按 base_url 主机名推断
+    pub key: String,
+    pub base_url: String,
+    /// 内联 key（本文件 0600）
+    pub api_key: Option<String>,
+    /// 或引用环境变量名
+    pub api_key_env: Option<String>,
+    /// openai | anthropic
+    pub protocol: Option<String>,
+    /// coding | agent | go | api
+    pub plan_kind: Option<String>,
+    /// lite / pro / max / go / go-plus …
+    pub tier: Option<String>,
+    pub docs_url: Option<String>,
+    /// 软删（面板"禁用"）——保留条目但不出现在路由里
+    pub disabled: Option<bool>,
+    /// 来源：`user`（你自己写的）| `discovered`（从某个 Agent 配置读来的）
+    pub origin: Option<String>,
+    /// origin=discovered 时：**从哪个文件/环境读来的**（如 ~/.config/opencode/opencode.jsonc）
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct FileConfig {
     pub server: ServerCfg,
@@ -250,6 +279,8 @@ pub struct FileConfig {
     #[serde(default)]
     pub strategy: StrategyCfg,
     pub models: Vec<ModelEntry>,
+    /// 用户可定义的 provider 清单（导出时带 origin/source_path；见 ProviderCfg）
+    pub providers: Vec<ProviderCfg>,
 }
 
 /// ⑦ 飞轮策略参数的配置形态。Default = 编译默认（v2）。
@@ -278,6 +309,85 @@ impl Default for StrategyCfg {
     fn default() -> Self {
         Self { version: 2, ok_weight: 0.7, bias_gain: 0.6 }
     }
+}
+
+/// 把配置序列化成规范 JSONC 文本（带说明头）。迁移旧 TOML、导出 provider 清单共用。
+pub fn to_jsonc(cfg: &FileConfig) -> String {
+    let mut body = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".into());
+    // 内联 key 的字段能省则省，避免污染文件
+    body = body.replace("\n  \"api_key\": null,", "");
+    let header = r#"// EvolveRouter configuration (canonical: evo-router-config.jsonc)
+// data dir: ~/.evo-router/  ·  docs: https://github.com/holny/evolve-router
+//
+// ── Reloading ───────────────────────────────────────────────────────────────
+//   [decision] (+ decision.slots)      hot-reloaded within ~5 s (or POST /api/reload)
+//   anything else                      restart the gateway to apply
+//     menu-bar app: panel Stop then Start · LaunchAgent: launchctl kickstart -k gui/$UID/ai.evolve-router-gateway
+//   GET /api/live -> "config": { reloaded_at_ms, restart_required, restart_reason, active_slots }
+//
+// ── Decision model (the ONLY place it is configured) ────────────────────────
+//   priority jev > laya > openai; configure one and it is used; none -> heuristic judge.
+//   "decision": {
+//     "backend": "auto",
+//     "slots": [
+//       { "kind": "jev", "api_key": "<key>" },                                  // JEV cloud
+//       { "kind": "jev", "base_url": "https://api.bamboonode.dev/v1/systemone",  // StartLux-Decision 27B
+//         "model": "startlux-decision-27b-autothink", "api_key": "<bamboo-key>" },
+//       { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" },       // local sidecar
+//       { "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",            // ollama / vLLM
+//         "model": "<model-id>" }
+//     ]
+//   }
+//
+// ── Credentials: where providers come from ──────────────────────────────────
+//   "providers": entries below are the explicit list. "origin" says where each came from:
+//     "user"        you (or the dashboard/panel) defined it
+//     "discovered"  read from an agent's own config - see "source_path" for the file
+//                   (e.g. "opencode @ ~/.config/opencode/opencode.jsonc")
+//     "builtin"     shipped catalog default
+//   Rules: an entry here wins over discovery for the same account; deduplication
+//   inside the gateway keys on base_url + api_key, so the same account listed twice
+//   (config + agent config) is still one provider. Keys written here live on disk:
+//   keep this file at mode 600. Export the current merged list with
+//   POST /api/config/export  (or `evo-router config export`).
+//   "models" ([[models]]) is the per-model companion: base_url + api_key_env/api_key.
+//
+// ── Editing by hand is fine ─────────────────────────────────────────────────
+//   Unknown keys are ignored; every section is optional; the gateway writes this
+//   file back on migration and on /api/config/export (comments here are preserved
+//   only in the header - put your notes in this block).
+
+"#;
+    header.to_string() + &body + "\n"
+}
+
+/// 一次性迁移：读到旧名配置 → 写出规范名（旧文件保留为 .migrated）
+pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path::PathBuf> {
+    let dir = found.parent()?;
+    let target = dir.join(DEFAULT_CONFIG_NAME);
+    if found == target || target.exists() {
+        return None;
+    }
+    if std::fs::write(&target, to_jsonc(cfg)).is_err() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600));
+    }
+    let backup = found.with_extension(format!(
+        "{}migrated",
+        found.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
+    ));
+    let _ = std::fs::rename(found, &backup);
+    tracing::info!(
+        from = %found.display(),
+        to = %target.display(),
+        kept = %backup.display(),
+        "config migrated to the canonical evo-router-config.jsonc"
+    );
+    Some(target)
 }
 
 /// 剥掉 JSONC 注释（`//` 行注释与 `/* */` 块注释），**字符串内的注释符不动**。
@@ -352,7 +462,12 @@ impl FileConfig {
         for p in candidates {
             if p.is_file() {
                 let text = std::fs::read_to_string(p)?;
-                return Ok((Self::parse_text(&text, Some(p))?, Some(p.clone())));
+                let cfg = Self::parse_text(&text, Some(p))?;
+                // 旧名（含 TOML）→ 迁移成规范 JSONC；失败不影响启动
+                if let Some(new_path) = migrate_to_canonical(&cfg, p) {
+                    return Ok((cfg, Some(new_path)));
+                }
+                return Ok((cfg, Some(p.clone())));
             }
         }
         Ok((Self::parse(embedded_default)?, None))
@@ -435,20 +550,28 @@ impl FileConfig {
 
 /// 数据目录与配置文件名（对外命名铁律：不出现裸 `evolve`，用 evo-router / EvolveRouter / ER）
 pub const DEFAULT_DATA_DIR: &str = "~/.evo-router";
-pub const DEFAULT_CONFIG_NAME: &str = "evo-router.toml";
+pub const DEFAULT_CONFIG_NAME: &str = "evo-router-config.jsonc";
+/// 规范配置名的纯 JSON 变体（无注释需求/机器生成时用）
+pub const DEFAULT_CONFIG_NAME_JSON: &str = "evo-router-config.json";
+/// 旧名（只读兼容 + 一次性迁移到规范名）
+pub const LEGACY_CONFIG_NAMES: [&str; 3] = ["evo-router.toml", "evo-router.jsonc", "evo-router.json"];
 /// 改名前的旧默认值（仅用于兼容与一次性迁移）
 pub const LEGACY_DATA_DIR: &str = "~/.evolve";
 
 pub fn default_config_paths() -> Vec<std::path::PathBuf> {
-    // 同名多扩展名：TOML 优先（注释即文档），也支持 JSON / JSONC（机器生成友好）
+    // 规范名优先（JSONC = 带注释的 JSON，注释即文档）；旧名随后（升级兼容，读到即迁移）
     let mut paths = vec![Path::new(DEFAULT_CONFIG_NAME).to_path_buf()];
-    paths.push(Path::new("evo-router.jsonc").to_path_buf());
-    paths.push(Path::new("evo-router.json").to_path_buf());
+    paths.push(Path::new(DEFAULT_CONFIG_NAME_JSON).to_path_buf());
+    for n in LEGACY_CONFIG_NAMES {
+        paths.push(Path::new(n).to_path_buf());
+    }
     if let Ok(home) = std::env::var("HOME") {
         let dir = Path::new(&home).join(".evo-router");
         paths.push(dir.join(DEFAULT_CONFIG_NAME));
-        paths.push(dir.join("evo-router.jsonc"));
-        paths.push(dir.join("evo-router.json"));
+        paths.push(dir.join(DEFAULT_CONFIG_NAME_JSON));
+        for n in LEGACY_CONFIG_NAMES {
+            paths.push(dir.join(n));
+        }
         // 改名前的旧位置：新名优先，旧名兜底——升级用户配置不静默丢失
         // 新目录里的旧文件名（迁移后可能残留）→ 兜底读取
         paths.push(dir.join("evolve.toml"));
@@ -659,16 +782,29 @@ fn legacy_is_live(target: &Path, legacy: &Path) -> bool {
     }
 }
 
-/// 目录内的配置文件名规范化：`evolve.toml` → `evo-router.toml`（幂等）。
-/// ⚠ 必须做：迁移把整个目录搬过去后，配置会落在 `~/.evo-router/evolve.toml`，
-/// 而主候选路径是 `evo-router.toml`——不改名等于配置静默丢失（回退内置默认）
+/// 目录内的配置文件名规范化 → 规范 JSONC（幂等）。
+/// ⚠ 必须**转换**而不是改名：旧版是 TOML，直接改名成 `.jsonc` 会让解析器按 JSON 读而失败
+/// （等于配置静默丢失、回退内置默认）。这里统一走 `migrate_to_canonical`（解析 + 序列化）。
 fn tidy_config_name(dir: &Path) {
-    let new = dir.join(DEFAULT_CONFIG_NAME);
-    let old = dir.join("evolve.toml");
-    if !new.exists() && old.is_file() {
-        match std::fs::rename(&old, &new) {
-            Ok(()) => tracing::info!(config = %new.display(), "config renamed to the evo-router naming"),
-            Err(e) => tracing::warn!(error = %e, old = %old.display(), "config rename failed"),
+    let canonical = dir.join(DEFAULT_CONFIG_NAME);
+    if canonical.exists() {
+        return;
+    }
+    let mut legacy: Vec<std::path::PathBuf> = vec![dir.join("evolve.toml"), dir.join("evo-router.toml")];
+    for n in LEGACY_CONFIG_NAMES {
+        legacy.push(dir.join(n));
+    }
+    for old in legacy {
+        if !old.is_file() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&old) else { continue };
+        let Ok(cfg) = FileConfig::parse_text(&text, Some(&old)) else {
+            tracing::warn!(path = %old.display(), "legacy config unparsable, left as-is");
+            continue;
+        };
+        if migrate_to_canonical(&cfg, &old).is_some() {
+            return;
         }
     }
 }
@@ -686,9 +822,9 @@ mod data_dir_tests {
     fn default_config_paths_prefer_new_names() {
         let paths = default_config_paths();
         let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
-        assert!(names[0].ends_with("evo-router.toml"), "cwd name first: {names:?}");
+        assert!(names[0].ends_with("evo-router-config.jsonc"), "canonical name first: {names:?}");
         assert!(
-            names.iter().any(|n| n.contains(".evo-router/evo-router.toml")),
+            names.iter().any(|n| n.contains(".evo-router/evo-router-config.jsonc")),
             "home dir candidate missing: {names:?}"
         );
         // 旧名仍在候选链里（升级用户配置不静默丢失）
@@ -719,8 +855,11 @@ mod data_dir_tests {
         assert_eq!(got, home.join(".evo-router"), "must migrate to the new dir");
         assert!(got.join("events/events.jsonl").exists(), "data must survive the move");
         assert!(!legacy.exists(), "legacy dir is moved, not copied");
-        // 配置文件也要改名：否则移动后主候选路径找不到 → 静默回退内置默认
-        assert!(got.join("evo-router.toml").is_file(), "config must be renamed in the new dir");
+        // 配置文件要**转换**成规范 JSONC：否则移动后主候选路径找不到 → 静默回退内置默认
+        assert!(
+            got.join("evo-router-config.jsonc").is_file(),
+            "config must be converted to the canonical jsonc in the new dir"
+        );
         assert!(!got.join("evolve.toml").exists());
 
         // 再次调用（新目录已在）保持幂等
@@ -836,7 +975,10 @@ mod data_dir_tests {
             None => unsafe { std::env::remove_var("HOME") },
         }
         assert_eq!(got, target);
-        assert!(got.join("evo-router.toml").is_file(), "migrated config must be renamed");
+        assert!(
+            got.join("evo-router-config.jsonc").is_file(),
+            "migrated config must be converted to the canonical jsonc"
+        );
         assert!(!legacy.exists());
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -934,5 +1076,29 @@ api_key = "inline-key"
         assert!(!out.contains("trailing comment"));
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["base_url"], "https://example.test/v1");
+    }
+
+    /// 旧 TOML 在数据目录里必须被**转换**成规范 JSONC——直接改名会让解析器按 JSON 读而失败
+    #[test]
+    fn legacy_toml_is_converted_not_renamed() {
+        let base = std::env::temp_dir().join(format!("er-canon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(
+            base.join("evo-router.toml"),
+            "[server]\nport = 8787\n\n[decision]\nbackend = \"heuristic\"\n",
+        )
+        .unwrap();
+        tidy_config_name(&base);
+        let canonical = base.join(DEFAULT_CONFIG_NAME);
+        assert!(canonical.is_file(), "canonical jsonc must be written");
+        let text = std::fs::read_to_string(&canonical).unwrap();
+        assert!(text.trim_start().starts_with("//"), "canonical file carries a header comment");
+        let parsed = FileConfig::parse_text(&text, Some(&canonical)).unwrap();
+        assert_eq!(parsed.server.port, 8787);
+        assert_eq!(parsed.decision.backend, "heuristic");
+        // 旧文件保留（带 .migrated 后缀），不丢内容
+        assert!(base.join("evo-router.toml.migrated").is_file());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

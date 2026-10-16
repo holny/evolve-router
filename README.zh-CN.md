@@ -175,7 +175,7 @@ api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 c
 
 ### 配置格式与凭据存放位置
 
-配置是**同一套 serde 结构**，可写成 **TOML**（`evo-router.toml`，规范形式——注释即文档）、**JSONC**（`evo-router.jsonc`，允许注释）或 **JSON**（`evo-router.json`）。查找顺序 `~/.evo-router/` 下 `.toml` → `.jsonc` → `.json`. 再退回工作目录，换格式就是改个文件名。
+配置是**同一套 serde 结构**。规范文件是 **`~/.evo-router/evo-router-config.jsonc`**（JSONC：带注释的 JSON，文件自解释），纯 JSON 变体为 `evo-router-config.json`。旧名（`evo-router.toml`、`evo-router.jsonc`、`evo-router.json`、`evolve.toml`）仍可读，并会在启动时**自动转换**（原文件保留为 `*.migrated`）。
 
 Provider 凭据到底从哪来：
 
@@ -183,7 +183,10 @@ Provider 凭据到底从哪来：
 |---|---|---|
 | 各 Agent 配置（`~/.config/opencode/opencode.jsonc`、`~/.codex/config.toml` …） | base_url + api_key，由发现器读取 | 每次启动读取，**从不复制**进我们的文件 |
 | `~/.evo-router/state/overrides.json` | 你在面板/网页新增或编辑的 provider（base_url、api_key、档位、协议…） | 由 UI 写入，启动时重放 |
-| `evo-router.toml` 的 `[[models]]` | 静态声明——`base_url`、`api_key_env`（环境变量名）或**内联 `api_key`**（chmod 600） | 静态生效，同 id 优先于发现结果 |
+| `evo-router-config.jsonc` 的 `providers` | 显式 provider 清单，每条带 `origin`（`user` / `discovered` / `builtin`），发现来的还带 `source_path`（从哪个 Agent 配置读的，如 `opencode @ ~/.config/opencode/opencode.jsonc`） | 配置 > overrides.json > 自动发现 |
+| `evo-router-config.jsonc` 的 `models` | 逐模型声明——`base_url`、`api_key_env`（环境变量名）或**内联 `api_key`**（chmod 600） | 静态生效，同 id 优先于发现结果 |
+
+用 **`POST /api/config/export`** 把当前生效的 provider 清单（含 key）落进配置文件——之后仅凭这个文件就能复现整套配置，不再依赖 Agent 配置。去重由网关内部按 `base_url + api_key` 完成，同一账号出现在两处也仍是一个 provider。
 
 结论：**配置文件里可以什么都不写**（发现器会接手你已有的 Agent 凭据）；也**可以全都写进去**，做成显式的单文件配置。
 

@@ -560,26 +560,45 @@ public struct PanelView: View {
                 }
                 .help(state.configRestartReason ?? t("restart_help"))
             }
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 gatewayChip
-                chip(icon: "arrow.clockwise", label: t("restart"), tint: .accentColor,
-                     help: t("restart_help")) {
+                textChip(label: t("restart"), tint: .accentColor, help: t("restart_help")) {
                     Task { await restartGateway() }
                 }
-                chip(icon: "power", label: t("quit"), tint: .red, help: t("quit"), danger: true) {
+                textChip(label: t("quit"), tint: .red, help: t("quit"), danger: true) {
                     showExitConfirm = true
                 }
-                Spacer(minLength: 2)
-                // 开关文字改由 tooltip 承载：控制行已有 Stop/Restart/Quit 三个文字按钮，
-                // 336pt 宽度下再放 "Autostart" 文字会把 Restart 挤成 "Res…"
+                // Autostart 与上面三个按钮**同一行**：为此收紧内距/字号
+                // （tooltip 在 MenuBarExtra 里不触发 → 文字必须可见，不能只留开关）
                 Toggle(isOn: $autostart) { EmptyView() }
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .labelsHidden()
-                    .help(t("autostart"))
                     .onChange(of: autostart) { on in applyAutostart(on) }
+                Text(t("autostart"))
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+                Spacer(minLength: 0)
             }
         }
+    }
+
+    /// 无图标文字胶囊（控制行用：336pt 宽度下图标会挤掉 Autostart 文字）
+    private func textChip(label: String, tint: Color, help: String,
+                          danger: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 6)
+                .frame(maxWidth: .infinity)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.055)))
+                .foregroundStyle(tint)
+        }
+        .buttonStyle(.plain)
+        .help(help)
     }
 
     private func chip(icon: String, label: String, tint: Color, help: String,
@@ -589,7 +608,7 @@ public struct PanelView: View {
                 Image(systemName: icon).font(.system(size: 10, weight: .semibold))
                 Text(label).font(.system(size: 11, weight: .medium)).lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.055)))
@@ -615,7 +634,7 @@ public struct PanelView: View {
                     .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, 8)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
             .background(RoundedRectangle(cornerRadius: 8)

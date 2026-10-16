@@ -175,15 +175,18 @@ Configure one slot and it is used; leave them all out and routing runs on the bu
 
 ### Config format and where credentials live
 
-The config is one **serde schema**, so you can write it as **TOML** (`evo-router.toml`, canonical — comments are the docs), **JSONC** (`evo-router.jsonc`, comments allowed) or **JSON** (`evo-router.json`). The lookup order is `.toml` → `.jsonc` → `.json` in `~/.evo-router/` then the working directory, so switching format is a rename.
+The config is one **serde schema**. The canonical file is **`~/.evo-router/evo-router-config.jsonc`** (JSONC: JSON with comments, so the file documents itself), with `evo-router-config.json` as the plain-JSON variant. Older names (`evo-router.toml`, `evo-router.jsonc`, `evo-router.json`, `evolve.toml`) are still read and are **converted automatically on startup** — the original is kept next to it as `*.migrated`.
 
 Where provider credentials actually come from:
 
 | Source | Contains | When |
 |---|---|---|
 | Agent configs (`~/.config/opencode/opencode.jsonc`, `~/.codex/config.toml`, …) | base_url + api_key, read by discovery | every startup — **never copied** into our files |
-| `~/.evo-router/state/overrides.json` | the providers you add/edit in the dashboard or panel (base_url, api_key, tier, protocol, …) | written by the UI, replayed at startup |
-| `evo-router.toml` `[[models]]` | static declarations — `base_url`, `api_key_env` (env var name), or **inline `api_key`** (chmod 600) | static, wins over discovery for the same id |
+| `~/.evo-router/state/overrides.json` | providers you add/edit in the dashboard or panel (base_url, api_key, tier, protocol, …) | written by the UI, replayed at startup |
+| `evo-router-config.jsonc` → `providers` | the explicit provider list, each entry tagged with `origin` (`user` / `discovered` / `builtin`) and, for discovered ones, `source_path` (the agent config it was read from, e.g. `opencode @ ~/.config/opencode/opencode.jsonc`) | config wins over `overrides.json`, which wins over discovery |
+| `evo-router-config.jsonc` → `models` | per-model declarations — `base_url`, `api_key_env` (env var name) or **inline `api_key`** (chmod 600) | static, wins over discovery for the same id |
+
+Materialise the live provider list (keys included) into the config file with **`POST /api/config/export`** — after that the file alone reproduces your setup, no agent configs needed. Deduplication is done inside the gateway on `base_url + api_key`, so the same account appearing in two places is still one provider.
 
 So: nothing is required in the config file to get started (discovery finds your agents), and everything *can* live there if you prefer an explicit, single-file setup.
 

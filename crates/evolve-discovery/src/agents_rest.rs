@@ -58,7 +58,7 @@ pub fn discover_default() -> Vec<ModelRecord> {
                 tiers: Tiers::default(),
                 speed_tier: 0.6,
                 source: Source::Discovered,
-                source_note: Some("dsh env".into()),
+                source_note: Some("dsh (env: DSH_*)".into()),
                 ..Default::default()
             });
         }
@@ -97,7 +97,7 @@ fn extract_openclaw(root: &Value) -> Vec<ModelRecord> {
                 tiers: Tiers::default(),
                 speed_tier: 0.6,
                 source: Source::Discovered,
-                source_note: Some("openclaw".into()),
+                source_note: Some("openclaw (env: OPENCLAW_*)".into()),
                 ..Default::default()
             });
         }
@@ -133,7 +133,7 @@ fn extract_hermes(v: &Value) -> Option<Vec<ModelRecord>> {
         tiers: Tiers::default(),
         speed_tier: 0.6,
         source: Source::Discovered,
-        source_note: Some("hermes".into()),
+        source_note: Some("hermes (env: HERMES_*)".into()),
         ..Default::default()
     }])
 }

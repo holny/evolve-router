@@ -77,22 +77,34 @@ pub struct ConfigWatch {
     pub judge_active: bool,
 }
 
-/// 指纹：去掉 `[decision]` 段后的原始 TOML 文本（判定配置可热加载，其余不可）
-pub fn static_config_fingerprint(text: &str) -> String {
-    let mut out = String::new();
-    let mut in_decision = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            // `[decision]` 与 `[[decision.slots]]` 都算判定段（前者是段头，后者是数组表）
-            in_decision = t.trim_start_matches('[').starts_with("decision");
-        }
-        if !in_decision {
-            out.push_str(line);
-            out.push('\n');
-        }
+/// 指纹：配置中**除 `decision` 段以外**的内容（判定配置可热加载，其余改动需重启）。
+/// 走解析后的结构而不是原始文本——同一份配置 TOML / JSONC 两种写法指纹一致。
+pub fn static_config_fingerprint(text: &str, path: Option<&std::path::Path>) -> Option<String> {
+    let cfg = evolve_core::config::FileConfig::parse_text(text, path).ok()?;
+    let mut v = serde_json::to_value(&cfg).ok()?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.remove("decision");
     }
-    out
+    Some(canonical_json(&v))
+}
+
+/// 稳定的 JSON 文本（对象键排序）——避免 HashMap 顺序导致指纹抖动
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<&String> = m.keys().collect();
+            keys.sort();
+            let body: Vec<String> = keys
+                .iter()
+                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), canonical_json(&m[*k])))
+                .collect();
+            format!("{{{}}}", body.join(","))
+        }
+        serde_json::Value::Array(a) => {
+            format!("[{}]", a.iter().map(canonical_json).collect::<Vec<_>>().join(","))
+        }
+        other => other.to_string(),
+    }
 }
 
 pub type AppState = Arc<Inner>;
@@ -109,7 +121,7 @@ pub fn build_state(config: FileConfig) -> AppState {
 fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>) -> AppState {
     let mut modelsdev_refresh_due = false;
     // overrides 提前加载：removed_base_urls 过滤初始发现（重启不复活已删 provider）
-    let ov = load_overrides(&config.data.dir);
+    let ov = merge_config_providers(&config.data.dir, &config.providers);
     let removed: std::collections::HashSet<String> =
         ov.removed_base_urls.iter().cloned().collect();
 
@@ -238,8 +250,10 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
                     reloaded_at_ms: None,
                     restart_required: false,
                     restart_reason: None,
-                    static_fingerprint: static_config_fingerprint(&text),
-                    current_fingerprint: static_config_fingerprint(&text),
+                    static_fingerprint: static_config_fingerprint(&text, Some(p))
+                        .unwrap_or_default(),
+                    current_fingerprint: static_config_fingerprint(&text, Some(p))
+                        .unwrap_or_default(),
                     active_backend: config.decision.backend.clone(),
                     active_slots: active_slots.clone(),
                     judge_active: !active_slots.is_empty(),
@@ -314,7 +328,7 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) {
         return;
     };
     // ① 不可热加载部分是否变了 → 只提示，不假装生效
-    let fingerprint = static_config_fingerprint(&text);
+    let fingerprint = static_config_fingerprint(&text, Some(path)).unwrap_or_default();
     let restart_reason = Some(
         "sections other than [decision] changed — restart the gateway to apply".to_string(),
     );
@@ -349,6 +363,116 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) {
         backend = %new_cfg.decision.backend,
         "config hot-reloaded: decision slots swapped (no restart needed)"
     );
+}
+
+/// 把配置文件里的 `providers` 合并进 overrides（**配置优先于 overrides.json**），
+/// 并保留来源标记（origin / source_path），供面板与网页展示"这个 provider 从哪来"。
+/// 去重依旧由网关内部按 base_url + api_key 指纹完成，这里只做条目级归并。
+/// 请求路径上的**生效配置**读取：overrides.json + 配置文件里的 providers（配置优先）。
+/// 面板/网页读 provider 列表时必须走这里——直接用 `load_overrides` 会漏掉配置文件里的
+/// 来源标记（origin / source_path）与用户显式声明的 provider。
+pub fn effective_overrides(st: &AppState) -> Overrides {
+    merge_config_providers(&st.config.data.dir, &st.config.providers)
+}
+
+pub fn merge_config_providers(
+    data_dir: &str,
+    cfg_providers: &[evolve_core::config::ProviderCfg],
+) -> Overrides {
+    let mut ov = load_overrides(data_dir);
+    for p in cfg_providers {
+        if p.base_url.trim().is_empty() {
+            continue;
+        }
+        let key = if p.key.trim().is_empty() {
+            // 没给 key：按 base_url 主机名推断（与目录侧 provider 命名习惯一致）
+            p.base_url
+                .split("//")
+                .nth(1)
+                .unwrap_or(&p.base_url)
+                .split('/')
+                .next()
+                .unwrap_or("provider")
+                .to_string()
+        } else {
+            p.key.clone()
+        };
+        let entry = ov.providers.entry(key).or_default();
+        entry.base_url = p.base_url.trim_end_matches('/').to_string();
+        if p.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false) {
+            entry.api_key = p.api_key.clone();
+        } else if entry.api_key.is_none()
+            && let Some(env) = p.api_key_env.as_deref()
+            && let Ok(v) = std::env::var(env)
+            && !v.trim().is_empty()
+        {
+            entry.api_key = Some(v);
+        }
+        if let Some(v) = &p.protocol { entry.protocol = v.clone(); }
+        if let Some(v) = &p.plan_kind { entry.plan_kind = v.clone(); }
+        if let Some(v) = &p.tier { entry.tier = v.clone(); }
+        if let Some(v) = &p.docs_url { entry.docs_url = v.clone(); }
+        if let Some(v) = p.disabled { entry.disabled = v; }
+        entry.origin = p.origin.clone();
+        entry.source_path = p.source_path.clone();
+    }
+    ov
+}
+
+/// 导出 provider 清单到规范配置（`POST /api/config/export` / `evo-router config export`）。
+///
+/// 逐条来源判定：
+/// - `origin = "user"`：用户在面板/网页新增或编辑过的（`overrides.json`）
+/// - `origin = "discovered"`：从某个 Agent 配置读来的，`source_path` 记下**加载路径**
+///   （发现器的 `source_note`，形如 `opencode @ ~/.config/opencode/opencode.jsonc`）
+///
+/// 不导出模型级目录（那是 `[[models]]` 的职责，且体量大）；只导出 provider 级凭据，
+/// 因为那才是"用户可定义、又散落在各处"的部分。返回写出的条数。
+pub fn export_providers_to_config(st: &AppState, path: &std::path::Path) -> anyhow::Result<usize> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    let mut cfg = evolve_core::config::FileConfig::parse_text(&text, Some(path))?;
+    let snap = st.engine.catalog_snapshot();
+    let ov = load_overrides(&st.config.data.dir);
+
+    // 现网 provider（含发现来的）→ 按 key 归并；key 取目录里的 provider 名
+    let mut entries: Vec<evolve_core::config::ProviderCfg> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for m in &snap {
+        if !seen.insert(m.provider.clone()) {
+            continue;
+        }
+        let user_override = ov.providers.get(&m.provider);
+        let discovered = matches!(m.source, evolve_core::types::Source::Discovered | evolve_core::types::Source::Remote);
+        entries.push(evolve_core::config::ProviderCfg {
+            key: m.provider.clone(),
+            base_url: user_override.map(|p| p.base_url.clone()).unwrap_or_else(|| m.base_url.clone()),
+            api_key: user_override.and_then(|p| p.api_key.clone()),
+            api_key_env: m.api_key_env.clone(),
+            protocol: user_override.map(|p| p.protocol.clone()),
+            plan_kind: user_override.map(|p| p.plan_kind.clone()),
+            tier: user_override.map(|p| p.tier.clone()),
+            docs_url: user_override.map(|p| p.docs_url.clone()),
+            disabled: user_override.map(|p| p.disabled),
+            origin: Some(if user_override.is_some() { "user".into() } else if discovered { "discovered".into() } else { "builtin".into() }),
+            // 发现来源的**加载路径**（opencode @ …, codex @ …）；用户配置则标明来自哪里
+            source_path: if user_override.is_some() {
+                Some("overrides.json (dashboard/panel)".into())
+            } else {
+                m.source_note.clone()
+            },
+        });
+    }
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+    let n = entries.len();
+    cfg.providers = entries;
+    std::fs::write(path, evolve_core::config::to_jsonc(&cfg))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    tracing::info!(count = n, path = %path.display(), "provider list exported to the config file");
+    Ok(n)
 }
 
 impl Inner {
@@ -717,23 +841,79 @@ impl Inner {
 }
 
 #[cfg(test)]
+mod provider_merge_tests {
+    use super::*;
+    use evolve_core::config::ProviderCfg;
+
+    /// 配置文件里的 providers 必须以**配置优先**合并进 overrides，并保留来源标记
+    #[test]
+    fn config_providers_override_and_keep_provenance() {
+        let dir = std::env::temp_dir().join(format!("er-cfgprov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // overrides.json 里已有同一 provider 的旧值
+        std::fs::write(
+            dir.join("overrides.json"),
+            r#"{"providers":{"p1":{"base_url":"https://old.test/v1","tier":"lite"}}}"#,
+        )
+        .unwrap();
+        let cfg = vec![
+            ProviderCfg {
+                key: "p1".into(),
+                base_url: "https://new.test/v1/".into(),
+                api_key: Some("k1".into()),
+                tier: Some("max".into()),
+                origin: Some("user".into()),
+                source_path: Some("evo-router-config.jsonc".into()),
+                ..Default::default()
+            },
+            ProviderCfg {
+                key: "p2".into(),
+                base_url: "https://agent.test/v1".into(),
+                origin: Some("discovered".into()),
+                source_path: Some("opencode @ ~/.config/opencode/opencode.jsonc".into()),
+                ..Default::default()
+            },
+        ];
+        let ov = merge_config_providers(&dir.to_string_lossy(), &cfg);
+        assert_eq!(ov.providers["p1"].base_url, "https://new.test/v1", "config wins over overrides.json");
+        assert_eq!(ov.providers["p1"].tier, "max");
+        assert_eq!(ov.providers["p1"].api_key.as_deref(), Some("k1"));
+        assert_eq!(ov.providers["p1"].origin.as_deref(), Some("user"));
+        assert_eq!(
+            ov.providers["p2"].source_path.as_deref(),
+            Some("opencode @ ~/.config/opencode/opencode.jsonc"),
+            "discovered entries carry their load path"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod config_watch_tests {
     use super::*;
 
     #[test]
     fn fingerprint_ignores_only_the_decision_section() {
-        let base = "[server]\nport = 8787\n\n[decision]\nbackend = \"auto\"\n";
-        let slots_changed = "[server]\nport = 8787\n\n[decision]\nbackend = \"auto\"\n[[decision.slots]]\nkind = \"jev\"\n";
-        let policy_changed = "[server]\nport = 9999\n\n[decision]\nbackend = \"auto\"\n";
+        // JSONC 与 TOML 两种写法指纹必须一致（同一份配置结构）
+        let jsonc = "{\"server\":{\"port\":8787},\"decision\":{\"backend\":\"auto\"}}";
+        let toml = "[server]\nport = 8787\n\n[decision]\nbackend = \"auto\"\n";
         assert_eq!(
-            static_config_fingerprint(base),
-            static_config_fingerprint(slots_changed),
-            "changing [[decision.slots]] must stay hot-reloadable (fingerprint unchanged)"
+            static_config_fingerprint(jsonc, Some(std::path::Path::new("a.jsonc"))),
+            static_config_fingerprint(toml, Some(std::path::Path::new("a.toml"))),
+        );
+        // 判定段变化不触发重启；server 段变化触发
+        let slots_changed = "{\"server\":{\"port\":8787},\"decision\":{\"backend\":\"auto\",\"slots\":[{\"kind\":\"jev\"}]}}";
+        let port_changed = "{\"server\":{\"port\":9999},\"decision\":{\"backend\":\"auto\"}}";
+        assert_eq!(
+            static_config_fingerprint(jsonc, Some(std::path::Path::new("a.jsonc"))),
+            static_config_fingerprint(slots_changed, Some(std::path::Path::new("a.jsonc"))),
+            "decision-slot changes must stay hot-reloadable"
         );
         assert_ne!(
-            static_config_fingerprint(base),
-            static_config_fingerprint(policy_changed),
-            "server/policy changes must ask for a restart"
+            static_config_fingerprint(jsonc, Some(std::path::Path::new("a.jsonc"))),
+            static_config_fingerprint(port_changed, Some(std::path::Path::new("a.jsonc"))),
+            "server changes must ask for a restart"
         );
     }
 }
@@ -778,6 +958,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/stats", axum::routing::get(crate::meta::api_stats_query))
         .route("/api/live", axum::routing::get(crate::meta::api_live))
         .route("/api/reload", axum::routing::post(crate::meta::api_reload))
+        .route("/api/config/export", axum::routing::post(crate::meta::api_config_export))
         .route("/api/feedback", axum::routing::post(crate::meta::api_feedback))
         .route("/api/quota", axum::routing::get(crate::meta::api_quota))
         .route("/api/events", axum::routing::get(crate::meta::api_events))
@@ -859,6 +1040,12 @@ pub struct ProviderDef {
     /// 档位：lite/pro/max/go/go-plus 等
     #[serde(default)]
     pub tier: String,
+    /// 来源标记（配置文件里的 origin）：user（你写的/面板改的）| discovered（agent 配置）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    /// origin=discovered 时的**加载路径**（如 "opencode @ ~/.config/opencode/opencode.jsonc"）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
     /// 各窗口额度（积分/次数）——5h/weekly/monthly
     #[serde(default)]
     pub window_5h: Option<f64>,

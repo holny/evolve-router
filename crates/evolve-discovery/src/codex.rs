@@ -91,6 +91,10 @@ pub fn discover_default() -> Vec<ModelRecord> {
             {
                 Ok(mut models) => {
                     tracing::info!(path = %p.display(), count = models.len(), "discovered codex models");
+                    // 出处带**加载路径**：provider 清单导出/面板展示要知道从哪读来的
+                    for m in models.iter_mut() {
+                        m.source_note = Some(format!("codex @ {}", p.display()));
+                    }
                     out.append(&mut models);
                 }
                 Err(e) => tracing::warn!(path = %p.display(), error = %e, "codex discovery failed"),

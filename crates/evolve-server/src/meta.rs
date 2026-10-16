@@ -253,6 +253,20 @@ pub async fn api_stats(State(st): State<AppState>) -> Response {
 /// - missing: 配置里没有任何槽位
 /// `POST /api/reload`：立即重载配置文件（与 5s watcher 同一路径）。
 /// 只热替换判定槽位；其余段落改动会置 `restart_required` 提示重启。
+/// `POST /api/config/export`：把**当前生效的 provider 清单**（合并了发现 + overrides）
+/// 写回规范配置文件，逐条标注 `origin`（user|discovered）与 `source_path`（从哪个
+/// agent 配置读来的）。目的：让配置文件成为**唯一事实来源**，之后即使不动 agent
+/// 配置也能复现同一套 provider。去重仍按网关内部的 base_url + api_key 指纹。
+pub async fn api_config_export(State(st): State<AppState>) -> Response {
+    let Some(path) = st.config_path.clone() else {
+        return axum::Json(json!({"ok": false, "reason": "no config file (embedded defaults)"})).into_response();
+    };
+    match crate::state::export_providers_to_config(&st, &path) {
+        Ok(n) => axum::Json(json!({"ok": true, "providers": n, "path": path.display().to_string()})).into_response(),
+        Err(e) => axum::Json(json!({"ok": false, "reason": e.to_string()})).into_response(),
+    }
+}
+
 pub async fn api_reload(State(st): State<AppState>) -> Response {
     let Some(path) = st.config_path.clone() else {
         return (axum::Json(json!({"ok": false, "reason": "no config file (embedded defaults)"})))
@@ -1178,7 +1192,7 @@ fn refresh_payg_balances_if_stale(st: &AppState) {
 }
 
 pub async fn api_providers(State(st): State<AppState>) -> Response {
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     // 积分制官方配额刷新：observed 过期（>60s）后台并行拉取（面板轮询自然驱动；
     // 另有 90s watchdog 兜底——面板不开也在刷）。配额指纹源自官方 API，
     // 无官方端点的 provider 用响应头/估算，消费侧按 quota_source 标注
@@ -1221,6 +1235,8 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         };
         out.push(json!({
             "key": key, "source": "manual",
+            "origin": ov.providers.get(key).and_then(|p| p.origin.clone()),
+            "source_path": ov.providers.get(key).and_then(|p| p.source_path.clone()),
             "base_url": pd.base_url, "protocol": pd.protocol,
             "disabled": pd.disabled,
             "plan_key": plan_key,
@@ -1304,6 +1320,9 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let model_ids: Vec<&str> = models_at_url.iter().map(|mm| mm.id.as_str()).collect();
         out.push(json!({
             "key": m.provider.clone(), "source": "discovered",
+            // provider 来源（用户要求可追溯）：user（配置/面板）| discovered（agent 配置 + 路径）
+            "origin": ov.providers.get(&m.provider).and_then(|p| p.origin.clone()),
+            "source_path": ov.providers.get(&m.provider).and_then(|p| p.source_path.clone()),
             "disabled": false,
             "base_url": m.base_url, "protocol": if m.protocol == evolve_core::types::Protocol::Anthropic { "anthropic" } else { "openai" },
             "plan_key": plan_key,
@@ -1570,7 +1589,7 @@ fn observed_for_provider(quota: &std::sync::Arc<evolve_memory::quota::QuotaLedge
 /// w3：该 provider 的模型列表是否仍包含此上游模型（404 语义二分）
 /// 来源优先级：手动 provider 的 fetched_models（/models 拉取结果）→ 目录记录
 pub fn provider_lists_model(st: &AppState, provider: &str, upstream_model: &str) -> bool {
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     if let Some(pd) = ov.providers.get(provider)
         && !pd.fetched_models.is_empty()
     {
@@ -1767,7 +1786,7 @@ pub fn active_models(
         .collect();
     by_used.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let active = evolve_core::recency::select_active(
         &by_release,
         &by_used,
@@ -1833,7 +1852,7 @@ pub async fn api_models_active(
 pub fn model_usability(st: &AppState) -> std::collections::HashMap<String, Option<&'static str>> {
     let now = evolve_memory::health::now();
     let health = st.health.snapshot();
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let deleted: std::collections::HashSet<&str> = ov.deleted_models.iter().map(|s| s.as_str()).collect();
     let gated: std::collections::HashSet<String> = st.quota.gate_blocked().into_iter().collect();
     st.engine
@@ -2029,7 +2048,7 @@ pub(crate) fn tags_for_catalog(
 pub fn price_tier_map(st: &AppState) -> std::collections::HashMap<String, u8> {
     let snap = st.engine.catalog_snapshot();
     let assigned = tags_for_catalog(&st, &snap);
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let mut out = std::collections::HashMap::new();
     for m in &snap {
         let auto_tier = assigned
@@ -2060,7 +2079,7 @@ pub fn distribution_report(st: &AppState, limit: usize) -> Value {
     let snap = st.engine.catalog_snapshot();
     let assigned = tags_for_catalog(st, &snap);
     let usability = model_usability(st);
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let dsnap = st.engine.difficulty_snapshot();
     let rsnap = st.engine.ratio_snapshot();
     let by_id: std::collections::HashMap<&str, &evolve_core::types::ModelRecord> =
@@ -2173,7 +2192,7 @@ pub fn recent_distribution(st: &AppState, n: usize) -> Value {
     let assigned = tags_for_catalog(&st, &snap);
     let by_id: std::collections::HashMap<&str, &evolve_core::types::ModelRecord> =
         snap.iter().map(|m| (m.id.as_str(), m)).collect();
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
 
     let mut diff = [0u32; 3];
     let mut cap = [0u32; 3];   // basic/standard/powerful
@@ -2360,7 +2379,7 @@ pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
             }
         }
     };
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     for (k, p) in ov.providers.iter().filter(|(_, p)| !p.disabled) {
         push_due(k, &p.base_url, p.api_key.clone());
     }
@@ -2559,7 +2578,7 @@ pub async fn api_providers_reconcile(
     };
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let (base_url, api_key) = if let Some(pd) = ov.providers.get(&key) {
         (pd.base_url.clone(), pd.api_key.clone())
     } else {
@@ -2697,7 +2716,7 @@ pub async fn api_providers_refresh(
 
 /// 配额方案注册表：按 baseUrl 匹配 provider 官方接入方案 + 用户订正
 pub async fn api_plans(State(st): State<AppState>) -> Response {
-    let ov = crate::state::load_overrides(&st.config.data.dir);
+    let ov = crate::state::effective_overrides(&st);
     let health = st.health.snapshot();
     let now_ms = evolve_memory::health::now();
     let budgets = st

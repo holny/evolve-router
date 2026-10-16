@@ -133,6 +133,10 @@ pub fn discover_default() -> Vec<ModelRecord> {
             match discover_from_file(&p) {
                 Ok(mut models) => {
                     tracing::info!(path = %p.display(), count = models.len(), "discovered opencode models");
+                    // 出处带**加载路径**（导出 provider 清单/面板展示要知道从哪读来的）
+                    for m in models.iter_mut() {
+                        m.source_note = Some(format!("opencode @ {}", p.display()));
+                    }
                     out.append(&mut models);
                 }
                 Err(e) => tracing::warn!(path = %p.display(), error = %e, "opencode discovery failed"),

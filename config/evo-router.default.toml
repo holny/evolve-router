@@ -1,9 +1,8 @@
-# EvolveRouter default configuration
-# Copy to evo-router.toml (next to the binary or ~/.evo-router/evo-router.toml)
+# EvolveRouter built-in default configuration (TOML, parsed internally).
+# The user-facing file is generated as ~/.evo-router/evo-router-config.jsonc
+# (JSONC with a documentation header) - see README "Config format".
 #
-# Reloading:
-#   * [decision] / [[decision.slots]]  -> hot-reloaded within ~5s (or POST /api/reload), no restart
-#   * any other section                -> restart the gateway to apply
+# Reloading: [decision] hot-reloads in ~5s; other sections need a restart.
 
 [server]
 host = "127.0.0.1"
