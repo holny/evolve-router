@@ -32,6 +32,8 @@ pub struct DecisionModelBackend {
     pub model: String,
     pub endpoint: String,
     pub redact: bool,
+    /// StartLux 系 AutoThink 的思考开关（never = 单遍最快；None = 用服务端默认）
+    pub think_mode: Option<String>,
     /// w1 双协议：SystemOne = 原生 {state, questions}→{answers} 契约；
     /// OpenAIChat = 任意 chat/completions 兼容端点（vLLM/ollama/OpenRouter/各家云）——
     /// 契约问题内置为 prompt，回复内容解析出 {answers}
@@ -226,6 +228,11 @@ impl DecisionModelBackend {
 
     /// 强制走原生 SystemOne 契约（槽位配置 `protocol = "system-one"` 时用）：
     /// 端点路径不一定带 "systemone" 字样（如 StartLux / Bamboo 的 `/v1/decisions`）
+    pub fn with_think_mode(mut self, mode: Option<String>) -> Self {
+        self.think_mode = mode;
+        self
+    }
+
     pub fn with_systemone_protocol(mut self) -> Self {
         self.protocol = DecisionProtocol::SystemOne;
         self
@@ -499,7 +506,14 @@ impl DecisionModelBackend {
                 }
             }
         }
+        // StartLux 系 AutoThink：显式 think_mode（never = 单遍作答，路由判定要的是快）
+        if let Some(m) = &self.think_mode
+            && let Some(o) = payload.as_object_mut()
+        {
+            o.insert("think_mode".into(), serde_json::Value::String(m.clone()));
+        }
         payload
+
     }
 }
 
@@ -693,6 +707,7 @@ impl DecisionModelBackend {
             _ => {}
         }
         Ok(Self {
+            think_mode: None,
             client: reqwest::Client::new(),
             api_key: api_key.unwrap_or("").into(),
             model,

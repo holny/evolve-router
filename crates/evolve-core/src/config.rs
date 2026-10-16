@@ -53,6 +53,9 @@ impl Default for PolicyCfg {
 pub struct DecisionCfg {
     pub backend: String,
     pub redact: bool,
+    /// 判定调用超时（ms）。默认 3000；走远程中继/大模型判定端点时建议 8000-15000
+    /// （实测 Bamboo 中继单次往返 1.7-2.6s，3s 会在拿到响应前就超时降级）
+    pub judge_timeout_ms: Option<u64>,
     /// 决策模型槽位（JEV > LAYA > OPENAI 优先级，配一即用）。
     /// **决策模型配置的唯一来源**（2026-10-16 用户裁决：统一走 toml）——
     /// 此前只读环境变量，导致"开机自启的菜单栏 app 拉起的网关"拿不到 shell 里的
@@ -78,6 +81,9 @@ pub struct DecisionSlotCfg {
     /// 留空 = 按 base_url 自动判别。原生契约的第三方端点（如 StartLux / Bamboo 的
     /// `/v1/decisions`）建议显式写死，别依赖路径猜测
     pub protocol: Option<String>,
+    /// StartLux 系 AutoThink 的思考开关：`never` = 单遍作答（**最快**，路由判定推荐）、
+    /// `auto` = 不确定时先想再答（准但慢，秒级）、`always` = 总是先想。留空用服务端默认
+    pub think_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
@@ -1100,5 +1106,35 @@ api_key = "inline-key"
         // 旧文件保留（带 .migrated 后缀），不丢内容
         assert!(base.join("evo-router.toml.migrated").is_file());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 回归：热加载路径必须走 `parse_text`（按扩展名），否则 JSONC 配置永远解析失败
+    /// —— 实测用户写好 StartLux 槽位却不生效，日志只有 "config reload: parse failed"
+    #[test]
+    fn jsonc_file_parses_for_reload_path() {
+        let dir = std::env::temp_dir().join(format!("er-reload-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(DEFAULT_CONFIG_NAME);
+        std::fs::write(
+            &file,
+            r#"// header comment
+{
+  "decision": {
+    "backend": "auto",
+    "slots": [{ "kind": "jev", "base_url": "https://api.bamboonode.dev/v1/systemone",
+                "model": "startlux-decision-27b-autothink", "api_key": "bk-x" }]
+  }
+}"#,
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        let cfg = FileConfig::parse_text(&text, Some(&file)).expect("jsonc config must parse");
+        assert_eq!(cfg.decision.slots.len(), 1);
+        assert_eq!(cfg.decision.slots[0].kind, "jev");
+        assert_eq!(cfg.decision.slots[0].model.as_deref(), Some("startlux-decision-27b-autothink"));
+        // 同一份文本走 TOML 解析器必然失败（这正是曾经的 bug）
+        assert!(FileConfig::parse(&text).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

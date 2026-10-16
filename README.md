@@ -171,7 +171,7 @@ api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 
 # base_url = ""                     # optional for the JEV cloud; required for laya/openai
 # model = ""                        # required for openai
 ```
-Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
+Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Two speed knobs matter with a remote judge: `judge_timeout_ms` (default 3000; raise it for internet relays — a 27B judge behind a relay answers in ~2.5 s, so 3 s times out before the answer arrives) and a per-slot `think_mode: "never"` (StartLux AutoThink: one pass instead of reasoning when unsure). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
 
 ### Config format and where credentials live
 

@@ -272,10 +272,10 @@ pub async fn api_reload(State(st): State<AppState>) -> Response {
         return (axum::Json(json!({"ok": false, "reason": "no config file (embedded defaults)"})))
             .into_response();
     };
-    crate::state::reload_config(&st, &path);
+    let applied = crate::state::reload_config(&st, &path);
     let watch = st.config_watch.lock().map(|w| w.clone()).unwrap_or_default();
     (axum::Json(json!({
-        "ok": true,
+        "ok": applied,
         "path": path.display().to_string(),
         "reloaded_at_ms": watch.reloaded_at_ms,
         "restart_required": watch.restart_required,

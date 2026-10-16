@@ -63,7 +63,7 @@ fn test_config(upstream_port: u16) -> FileConfig {
     FileConfig {
         server: ServerCfg { host: "127.0.0.1".into(), port: 0 },
         policy: PolicyCfg { explore_ratio: 0.0, ..Default::default() },
-        decision: DecisionCfg { backend: "heuristic".into(), redact: true, slots: vec![] },
+        decision: DecisionCfg { backend: "heuristic".into(), redact: true, slots: vec![], judge_timeout_ms: None },
         providers: vec![],
         catalog: CatalogCfg::default(),
         quota: QuotaCfg::default(),

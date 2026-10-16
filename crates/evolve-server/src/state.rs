@@ -156,7 +156,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
     let catalog = Catalog::build_with_discovered(&config, discovered);
     let policy = config.policy.clone();
     // w2 槽位链（JEV > LAYA > OPENAI，配一即用；硬错进程内拉黑，重启复位）
-    let (backend, chain) = DecisionBackend::build_with_chain(&config.decision.backend, &config.decision.slots);
+    let (backend, chain) = DecisionBackend::build_with_chain(&config.decision.backend, &config.decision);
     let mut engine = Engine::new(catalog, policy, backend);
     // S5 层级比例控制器：目标 7:2:1（cheap/medium/premium），容忍带来自 [policy]
     engine.set_ratio_control(true, [0.7, 0.2, 0.1], engine.policy.ratio_band);
@@ -311,21 +311,25 @@ pub fn spawn_config_watcher(st: AppState) {
             if now.is_none() || now == last {
                 continue;
             }
-            last = now;
-            reload_config(&st, &path);
+            // 解析失败（编辑器半写/语法错）不推进 last → 5s 后自动重试，用户改好即生效
+            if reload_config(&st, &path) {
+                last = now;
+            }
         }
     });
 }
 
 /// 立即重载配置（watcher 与 POST /api/reload 共用）
-pub fn reload_config(st: &AppState, path: &std::path::Path) {
+pub fn reload_config(st: &AppState, path: &std::path::Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         tracing::warn!(path = %path.display(), "config reload: file unreadable, keeping the running config");
-        return;
+        return false;
     };
-    let Ok(new_cfg) = evolve_core::config::FileConfig::parse(&text) else {
+    // ⚠ 必须按扩展名解析：用 TOML-only 的 `parse` 会让 JSONC 配置永远"parse failed"
+    //（实测：用户写好 StartLux 槽位却迟迟不生效，日志里只有 parse failed）
+    let Ok(new_cfg) = evolve_core::config::FileConfig::parse_text(&text, Some(path)) else {
         tracing::warn!(path = %path.display(), "config reload: parse failed, keeping the running config");
-        return;
+        return false;
     };
     // ① 不可热加载部分是否变了 → 只提示，不假装生效
     let fingerprint = static_config_fingerprint(&text, Some(path)).unwrap_or_default();
@@ -335,7 +339,7 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) {
     // ② 判定槽位热替换
     let (judge, chain) = evolve_decision::DecisionBackend::build_with_chain(
         &new_cfg.decision.backend,
-        &new_cfg.decision.slots,
+        &new_cfg.decision,
     );
     let slots: Vec<&str> = chain
         .as_ref()
@@ -363,6 +367,7 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) {
         backend = %new_cfg.decision.backend,
         "config hot-reloaded: decision slots swapped (no restart needed)"
     );
+    true
 }
 
 /// 把配置文件里的 `providers` 合并进 overrides（**配置优先于 overrides.json**），

@@ -97,13 +97,23 @@ impl SlotHealth {
 pub struct SlotChainJudge {
     pub slots: Vec<ChainSlot>,
     pub health: Arc<SlotHealth>,
+    /// 单次判定超时（默认 3s）。走远程中继/大模型判定端点时配置调大——
+    /// 实测 Bamboo 中继单次往返 1.7-2.6s，3s 会在响应到达前就超时降级
+    pub judge_timeout: Duration,
 }
+
+/// 默认判定超时（与旧硬编码一致）
+pub const DEFAULT_JUDGE_TIMEOUT_MS: u64 = 3000;
 
 impl SlotChainJudge {
     pub fn new(slots: Vec<ChainSlot>) -> Self {
+        Self::with_timeout(slots, Duration::from_millis(DEFAULT_JUDGE_TIMEOUT_MS))
+    }
+
+    pub fn with_timeout(slots: Vec<ChainSlot>, judge_timeout: Duration) -> Self {
         let labels: Vec<&'static str> = slots.iter().map(|s| s.kind.label()).collect();
-        tracing::info!(slots = ?labels, "decision slot chain built (priority order)");
-        Self { slots, health: Arc::new(SlotHealth::default()) }
+        tracing::info!(slots = ?labels, timeout_ms = judge_timeout.as_millis() as u64, "decision slot chain built (priority order)");
+        Self { slots, health: Arc::new(SlotHealth::default()), judge_timeout }
     }
 
     /// 优先级最高的 Model 型槽位（蒸馏器/直推 advisor 用，laya 不参与）
@@ -128,7 +138,7 @@ impl Judge for SlotChainJudge {
             }
             let result: Option<Result<serde_json::Value, SlotFail>> = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::try_current().ok().map(|h| {
-                    h.block_on(async { slot.consult_raw(features, digest, candidates_hint, Duration::from_secs(3)).await })
+                    h.block_on(async { slot.consult_raw(features, digest, candidates_hint, self.judge_timeout).await })
                 })
             });
             match result {
@@ -190,7 +200,7 @@ impl evolve_core::types::RouteAdvisor for SlotAdvisor {
             let SlotImpl::Model(b) = &slot.imp else { continue };
             let result: Option<Result<serde_json::Value, crate::decision_backend::SlotFail>> = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::try_current().ok().map(|h| {
-                    h.block_on(async { b.consult(state.clone(), questions.clone(), Duration::from_secs(5)).await })
+                    h.block_on(async { b.consult(state.clone(), questions.clone(), self.0.judge_timeout + Duration::from_secs(2)).await })
                 })
             });
             match result {
@@ -229,6 +239,7 @@ pub fn slot_from_with_protocol(
     api_key: Option<String>,
     model: Option<String>,
     protocol: Option<String>,
+    think_mode: Option<String>,
 ) -> Option<SlotImpl> {
     let explicit = protocol.map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty());
     let kind = match explicit.as_deref() {
@@ -236,7 +247,10 @@ pub fn slot_from_with_protocol(
         Some(p) if p.contains("openai") || p.contains("chat") => SlotKind::OpenAI,
         _ => kind,
     };
-    let imp = slot_from(kind, base.clone(), api_key.clone(), model.clone())?;
+    let mut imp = slot_from(kind, base.clone(), api_key.clone(), model.clone())?;
+    if let SlotImpl::Model(b) = imp {
+        imp = SlotImpl::Model(b.with_think_mode(think_mode.clone()));
+    }
     match explicit.as_deref() {
         // 显式原生契约：即使 kind 是 OpenAI 也强制走 SystemOne 形状
         Some(p) if p.contains("system") || p.contains("decision") => match imp {
@@ -308,6 +322,7 @@ pub fn build_slots(cfg: &[DecisionSlotCfg]) -> Vec<ChainSlot> {
             key,
             entry.model.clone(),
             entry.protocol.clone(),
+            entry.think_mode.clone(),
         ) {
             Some(imp) => out.push(ChainSlot { kind, imp }),
             None => tracing::warn!(
@@ -332,6 +347,7 @@ mod slot_config_tests {
             base_url: base.map(String::from),
             model: model.map(String::from),
             protocol: None,
+            think_mode: None,
         }
     }
 
@@ -383,6 +399,44 @@ mod slot_config_tests {
     }
 
     #[test]
+    fn think_mode_reaches_the_payload_and_timeout_is_configurable() {
+        use evolve_core::types::{DigestSignals, RequestFeatures};
+        let cfg = DecisionSlotCfg {
+            kind: "jev".into(),
+            api_key: Some("bk-x".into()),
+            base_url: Some("https://api.bamboonode.dev/v1/systemone".into()),
+            model: Some("startlux-decision-27b-autothink".into()),
+            think_mode: Some("never".into()),
+            protocol: None,
+            api_key_env: None,
+        };
+        let slots = build_slots(&[cfg]);
+        match &slots[0].imp {
+            SlotImpl::Model(b) => {
+                let f = RequestFeatures {
+                    est_input_tokens: 100,
+                    user_text_chars: 12,
+                    code_density: 0.0,
+                    tool_count: 0,
+                    tool_ratio: 0.0,
+                    has_images: false,
+                    turn_count: 1,
+                    cjk_ratio: 0.0,
+                };
+                let d = DigestSignals::default();
+                let payload = b.build_payload(&f, &d, "");
+                assert_eq!(payload["think_mode"], "never", "think_mode must reach the request body");
+            }
+            _ => panic!("expected model slot"),
+        }
+        // 超时可配：默认 3s，配置可调大（远程中继往返就 1.7-2.6s）
+        let chain = SlotChainJudge::new(vec![]);
+        assert_eq!(chain.judge_timeout.as_millis(), 3000);
+        let chain = SlotChainJudge::with_timeout(vec![], std::time::Duration::from_millis(12_000));
+        assert_eq!(chain.judge_timeout.as_millis(), 12_000);
+    }
+
+    #[test]
     fn startlux_decisions_endpoint_is_systemone() {
         use crate::decision_backend::DecisionProtocol;
         // StartLux / Bamboo 的原生路径（不带 systemone 字样）也必须判为原生契约
@@ -408,6 +462,7 @@ mod slot_config_tests {
             base_url: Some("http://127.0.0.1:8090/api".into()),
             model: None,
             protocol: Some("system-one".into()),
+            think_mode: None,
             api_key_env: None,
         };
         match &build_slots(&[cfg])[0].imp {
@@ -425,6 +480,7 @@ impl DecisionCfgHelper {
             base_url: Some("https://api.bamboonode.dev/v1/decisions".into()),
             model: Some("startlux-decision-27b-autothink".into()),
             protocol: None,
+            think_mode: None,
             api_key_env: None,
         }
     }
