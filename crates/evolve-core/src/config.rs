@@ -53,6 +53,27 @@ impl Default for PolicyCfg {
 pub struct DecisionCfg {
     pub backend: String,
     pub redact: bool,
+    /// 决策模型槽位（JEV > LAYA > OPENAI 优先级，配一即用）。
+    /// **决策模型配置的唯一来源**（2026-10-16 用户裁决：统一走 toml）——
+    /// 此前只读环境变量，导致"开机自启的菜单栏 app 拉起的网关"拿不到 shell 里的
+    /// key，面板显示"未配置决策模型"（env 只在终端启动时才存在）。
+    pub slots: Vec<DecisionSlotCfg>,
+}
+
+/// 单个决策模型槽位（`[[decision.slots]]`）
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(default)]
+pub struct DecisionSlotCfg {
+    /// jev | laya | openai
+    pub kind: String,
+    /// 直接内联 key（建议配合 chmod 600 的配置文件）
+    pub api_key: Option<String>,
+    /// 间接引用：启动时读取该环境变量的值（key 值不落配置文件）
+    pub api_key_env: Option<String>,
+    /// 槽位端点（laya/openai 必填；jev 云端可省，本地部署填本地地址）
+    pub base_url: Option<String>,
+    /// 模型名（openai 槽必填）
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -332,16 +353,301 @@ impl FileConfig {
     }
 }
 
+/// 数据目录与配置文件名（对外命名铁律：不出现裸 `evolve`，用 evo-router / EvolveRouter / ER）
+pub const DEFAULT_DATA_DIR: &str = "~/.evo-router";
+pub const DEFAULT_CONFIG_NAME: &str = "evo-router.toml";
+/// 改名前的旧默认值（仅用于兼容与一次性迁移）
+pub const LEGACY_DATA_DIR: &str = "~/.evolve";
+
 pub fn default_config_paths() -> Vec<std::path::PathBuf> {
-    let mut paths = vec![Path::new("evolve.toml").to_path_buf()];
+    let mut paths = vec![Path::new(DEFAULT_CONFIG_NAME).to_path_buf()];
     if let Ok(home) = std::env::var("HOME") {
-        // review#7 修复：改名前用户配置在 ~/.evolve/evo-router.toml——
-        // 候选链保留旧名（新名优先），升级用户配置不静默丢失
-        let evolve_dir = Path::new(&home).join(".evolve");
-        paths.push(evolve_dir.join("evolve.toml"));
-        paths.push(evolve_dir.join("evo-router.toml"));
+        let dir = Path::new(&home).join(".evo-router");
+        paths.push(dir.join(DEFAULT_CONFIG_NAME));
+        // 改名前的旧位置：新名优先，旧名兜底——升级用户配置不静默丢失
+        // 新目录里的旧文件名（迁移后可能残留）→ 兜底读取
+        paths.push(dir.join("evolve.toml"));
+        let legacy = Path::new(&home).join(".evolve");
+        paths.push(legacy.join("evo-router.toml"));
+        paths.push(legacy.join("evolve.toml"));
+        // 更早的 cwd 位置
+        paths.push(Path::new("evolve.toml").to_path_buf());
     }
     paths
 }
 
+/// 解析并（必要时）迁移数据目录。
+///
+/// - 配置里是**旧默认值**（`~/.evolve`）或未设置 → 目标为 `~/.evo-router`；
+///   目标不存在而旧目录存在 → 一次性 `rename` 迁移（失败则退回旧目录并告警，
+///   绝不丢数据）；
+/// - 用户显式指定的其他路径 → 原样使用（尊重用户选择）。
+pub fn resolve_data_dir(configured: &str) -> std::path::PathBuf {
+    let expand = |d: &str| -> std::path::PathBuf {
+        if let Some(rest) = d.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return Path::new(&home).join(rest);
+            }
+        }
+        Path::new(d).to_path_buf()
+    };
+    let t = configured.trim();
+    let legacy = expand(LEGACY_DATA_DIR);
+    let target = expand(DEFAULT_DATA_DIR);
+    // 只对"默认目录名"（旧默认 / 新默认 / 未设置）做核对与迁移；
+    // 用户显式指定的其他目录一律尊重、不碰
+    if !t.is_empty() && t != LEGACY_DATA_DIR && t != DEFAULT_DATA_DIR {
+        return expand(t);
+    }
+    // 两个目录都在时，以 events.jsonl 心跳判断谁是活的：
+    // 若旧目录才是活的（新目录是历次改名留下的空壳），把空壳挪到 .stale-<ts> 后继续迁移
+    if target.exists() && legacy.exists() && legacy_is_live(&target, &legacy) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let aside = target.with_file_name(format!(".evo-router.stale-{ts}"));
+        match std::fs::rename(&target, &aside) {
+            Ok(()) => tracing::warn!(
+                stale = %aside.display(),
+                "stale data dir moved aside before migration"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not move the stale data dir aside; staying on it");
+                return target;
+            }
+        }
+    }
+    if !target.exists() && legacy.exists() {
+        match std::fs::rename(&legacy, &target) {
+            Ok(()) => tracing::info!(
+                from = %legacy.display(),
+                to = %target.display(),
+                "data dir migrated to the evo-router naming"
+            ),
+            Err(e) => {
+                // 跨设备/权限问题：退回旧目录继续跑，不阻塞启动、不动用户数据
+                tracing::warn!(
+                    error = %e,
+                    legacy = %legacy.display(),
+                    "data dir migration failed, staying on the legacy directory"
+                );
+                return legacy;
+            }
+        }
+    }
+    let resolved = if target.exists() {
+        target
+    } else if legacy.exists() {
+        legacy
+    } else {
+        target
+    };
+    tidy_config_name(&resolved);
+    resolved
+}
+
+/// events.jsonl 的修改时间 = 该目录的"心跳"（不存在 → None）
+fn heartbeat(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir.join("events.jsonl"))
+        .and_then(|m| m.modified())
+        .ok()
+}
+
+/// 旧目录是否才是"活的那个"：
+/// - 旧有心跳、新无心跳 → 旧活；
+/// - 两者都有 → 比较心跳新旧；
+/// - 旧无心跳 → 新目录（哪怕是空壳）优先，避免把用户的新目录搬走
+fn legacy_is_live(target: &Path, legacy: &Path) -> bool {
+    match (heartbeat(legacy), heartbeat(target)) {
+        (Some(l), Some(t)) => l > t,
+        (Some(_), None) => true,
+        (None, _) => {
+            // 旧目录没事件文件：只在新目录完全是空壳时才迁移
+            std::fs::read_dir(target).map(|mut d| d.next().is_none()).unwrap_or(true)
+        }
+    }
+}
+
+/// 目录内的配置文件名规范化：`evolve.toml` → `evo-router.toml`（幂等）。
+/// ⚠ 必须做：迁移把整个目录搬过去后，配置会落在 `~/.evo-router/evolve.toml`，
+/// 而主候选路径是 `evo-router.toml`——不改名等于配置静默丢失（回退内置默认）
+fn tidy_config_name(dir: &Path) {
+    let new = dir.join(DEFAULT_CONFIG_NAME);
+    let old = dir.join("evolve.toml");
+    if !new.exists() && old.is_file() {
+        match std::fs::rename(&old, &new) {
+            Ok(()) => tracing::info!(config = %new.display(), "config renamed to the evo-router naming"),
+            Err(e) => tracing::warn!(error = %e, old = %old.display(), "config rename failed"),
+        }
+    }
+}
+
 fn ratio_band_default() -> f32 { 0.05 }
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    /// HOME 是进程级全局变量：并行测试会互相污染（踩到过），统一串行化
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn default_config_paths_prefer_new_names() {
+        let paths = default_config_paths();
+        let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        assert!(names[0].ends_with("evo-router.toml"), "cwd name first: {names:?}");
+        assert!(
+            names.iter().any(|n| n.contains(".evo-router/evo-router.toml")),
+            "home dir candidate missing: {names:?}"
+        );
+        // 旧名仍在候选链里（升级用户配置不静默丢失）
+        assert!(names.iter().any(|n| n.contains(".evolve/evolve.toml")), "{names:?}");
+    }
+
+    #[test]
+    fn explicit_data_dir_is_respected() {
+        let got = resolve_data_dir("/tmp/er-explicit");
+        assert_eq!(got, Path::new("/tmp/er-explicit").to_path_buf());
+    }
+
+    #[test]
+    fn legacy_default_migrates_once() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // 用假 HOME 隔离：旧目录存在、新目录不存在 → rename 迁移
+        let base = std::env::temp_dir().join(format!("er-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let legacy = home.join(".evolve");
+        std::fs::create_dir_all(legacy.join("sub")).unwrap();
+        std::fs::write(legacy.join("events.jsonl"), "{}").unwrap();
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+
+        std::fs::write(legacy.join("evolve.toml"), "[data]\ndir = \"~/.evolve\"\n").unwrap();
+        let got = resolve_data_dir(LEGACY_DATA_DIR);
+        assert_eq!(got, home.join(".evo-router"), "must migrate to the new dir");
+        assert!(got.join("events.jsonl").exists(), "data must survive the move");
+        assert!(!legacy.exists(), "legacy dir is moved, not copied");
+        // 配置文件也要改名：否则移动后主候选路径找不到 → 静默回退内置默认
+        assert!(got.join("evo-router.toml").is_file(), "config must be renamed in the new dir");
+        assert!(!got.join("evolve.toml").exists());
+
+        // 再次调用（新目录已在）保持幂等
+        assert_eq!(resolve_data_dir(LEGACY_DATA_DIR), home.join(".evo-router"));
+        // 空配置 = 默认值，同样迁移（幂等）
+        assert_eq!(resolve_data_dir(""), home.join(".evo-router"));
+
+        match old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 目标目录已存在但更陈旧（改名遗留的空壳）→ 挪到 .stale-<ts> 后照常迁移，
+    /// 不能因为一个残留目录就放弃迁移（本机实测踩到：~/.evo-router 是 10-10 的残留）
+    #[test]
+    fn stale_target_dir_is_moved_aside_then_migrated() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("er-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let legacy = home.join(".evolve");
+        let target = home.join(".evo-router");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("events.jsonl"), "{\"ts\":2}\n").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("events.jsonl"), "old\n").unwrap();
+        // 让目标文件时间早于旧目录（陈旧空壳）
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        let f = std::fs::File::options().write(true).open(target.join("events.jsonl")).unwrap();
+        f.set_modified(old_time).unwrap();  // 旧心跳 → 判定目标为残留空壳
+
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+        let got = resolve_data_dir(LEGACY_DATA_DIR);
+        match old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(got, target, "must migrate into the new dir");
+        assert!(got.join("events.jsonl").exists());
+        let stale: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".evo-router.stale-"))
+            .collect();
+        assert_eq!(stale.len(), 1, "stale dir must be kept aside, not deleted");
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 目标目录心跳更新（真的在被使用）→ 不动它，避免搬走用户的活动目录
+    #[test]
+    fn live_target_dir_wins_over_legacy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("er-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let legacy = home.join(".evolve");
+        let target = home.join(".evo-router");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("events.jsonl"), "{\"ts\":1}\n").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("events.jsonl"), "{\"ts\":2}\n").unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(legacy.join("events.jsonl"))
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+        let got = resolve_data_dir(LEGACY_DATA_DIR);
+        match old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(got, target);
+        assert!(legacy.exists(), "the older legacy dir must be left untouched");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 新默认目录被**残留空壳**占位（配置里写的已是新默认名）时也要核对：
+    /// 否则空壳会一直遮蔽旧目录的真实数据（本机实测踩到）
+    #[test]
+    fn stale_target_with_new_default_config_still_reconciles() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("er-stale2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let home = base.join("home");
+        let legacy = home.join(".evolve");
+        let target = home.join(".evo-router");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("events.jsonl"), "{\"ts\":9}\n").unwrap();
+        std::fs::write(legacy.join("evolve.toml"), "[data]\n").unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("events.jsonl"), "old\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(target.join("events.jsonl"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+            .unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &home) };
+        let got = resolve_data_dir(DEFAULT_DATA_DIR);
+        match old_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+        assert_eq!(got, target);
+        assert!(got.join("evo-router.toml").is_file(), "migrated config must be renamed");
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}

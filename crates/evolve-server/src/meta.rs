@@ -246,19 +246,18 @@ pub async fn api_stats(State(st): State<AppState>) -> Response {
 
 /// /api/live：菜单栏伴侣的轻量实时状态（1s 轮询）——in-flight 请求计数。
 /// 计数由 relay/anthropic 入口的 RAII LiveGuard 维护，覆盖全部 return 路径。
-/// `decision.status`：决策模型可用性（面板/网页横幅定时检测依据，每次调用现读 env）。
-/// - ok: 蒸馏器在 = 启动时已按 decision_model/hybrid 建 backend；或显式 heuristic； laya 有 env
-/// - stale: 网络起后 env 才补上——重启网关生效
-/// - missing: 未配置
+/// `decision.status`：决策模型可用性（面板/网页横幅定时检测依据，现读配置）。
+/// - ok: 启动时已建成槽位链（或显式 heuristic）
+/// - stale: 配置里有 [[decision.slots]] 但启动时没建成（配置文件是启动后补的）
+///   → 重启网关生效，避免误报 ok
+/// - missing: 配置里没有任何槽位
 pub async fn api_live(State(st): State<AppState>) -> Response {
     let cfg = st.config.decision.backend.clone();
-    // w2 槽位链 + 评审 #5：distiller 是**启动时**快照——env 现在有但启动时没建成
-    // 后端时报 "stale"（面板/网页提示"已配置，重启生效"），避免误报 ok
     let started_active = st.distiller.is_some();
-    let env_now = evolve_decision::slots::any_slot_configured();
+    let configured_now = !st.config.decision.slots.is_empty();
     let status = if cfg == "heuristic" || started_active {
         "ok"
-    } else if env_now {
+    } else if configured_now {
         "stale"
     } else {
         "missing"

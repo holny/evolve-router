@@ -1,4 +1,4 @@
-pub const EMBEDDED_DEFAULT_CONFIG: &str = include_str!("../../../config/evolve.default.toml");
+pub const EMBEDDED_DEFAULT_CONFIG: &str = include_str!("../../../config/evo-router.default.toml");
 
 pub fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(evolve_core::config::FileConfig, Option<std::path::PathBuf>)> {
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -11,5 +11,11 @@ pub fn load_config(explicit: Option<&std::path::Path>) -> anyhow::Result<(evolve
         candidates.push(p.to_path_buf());
     }
     candidates.extend(evolve_core::config::default_config_paths());
-    evolve_core::config::FileConfig::from_paths(&candidates, EMBEDDED_DEFAULT_CONFIG)
+    let (mut cfg, path) = evolve_core::config::FileConfig::from_paths(&candidates, EMBEDDED_DEFAULT_CONFIG)?;
+    // 数据目录在此定稿（含 ~/.evolve → ~/.evo-router 的一次性迁移）：
+    // 下游一律直接用 config.data.dir，不再各自 shellexpand（免得迁移只生效一半）
+    cfg.data.dir = evolve_core::config::resolve_data_dir(&cfg.data.dir)
+        .to_string_lossy()
+        .into_owned();
+    Ok((cfg, path))
 }

@@ -1,7 +1,9 @@
 import Foundation
 
 public enum Config {
-    public static let baseURL = ProcessInfo.processInfo.environment["EVOLVE_URL"] ?? "http://127.0.0.1:8787"
+    public static let baseURL = ProcessInfo.processInfo.environment["EVO_ROUTER_URL"]
+        ?? ProcessInfo.processInfo.environment["EVOLVE_URL"]   // 旧名兜底
+        ?? "http://127.0.0.1:8787"
     public static let githubURL = URL(string: "https://github.com/holny/evolve-router")!
     public static let trayLabel = "ai.evolve-router.tray"
 
@@ -14,7 +16,7 @@ public enum Config {
     /// 网关子进程日志（追加）
     static let gatewayLogURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".evolve", isDirectory: true)
+            .appendingPathComponent(".evo-router", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("gateway-child.log")
     }()

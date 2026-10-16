@@ -2,7 +2,7 @@
 //!
 //! Provider 悄悄更新模型（同名不同版本）会让静态 tiers 过期。飞轮积累的
 //! 观测统计达标后（每 50 个成功），由决策模型重估 tiers；结果经保守收缩
-//! （单次变化 ≤ 0.15）写入 ~/.evolve/distilled.json，叠加到 catalog。
+//! （单次变化 ≤ 0.15）写入 ~/.evo-router/distilled.json，叠加到 catalog。
 //! 红线：用户显式声明（tiers_explicit）不被蒸馏覆盖；回滚 = 删除该文件。
 
 use crate::types::{ModelRecord, Tiers};

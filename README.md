@@ -40,7 +40,7 @@ and mapped onto **capability and price tiers** so the expensive models only serv
 
 ## Decision-model slots: JEV > LAYA > OPENAI
 
-The judge is pluggable and configurable per slot (`DECISION_MODEL_*` env vars); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
+The judge is pluggable and configurable per slot (`[[decision.slots]]` in `evo-router.toml` — the single place it is read from); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
 
 ## Why not another proxy
 
@@ -145,7 +145,7 @@ cargo build --release
 # gateway listening on http://127.0.0.1:8787
 ```
 
-Configuration lives at `~/.evolve/evolve.toml` (a default is embedded and written on first run). Point providers with their base URLs and API keys:
+Configuration lives at `~/.evo-router/evo-router.toml` (a default is embedded and written on first run). Point providers with their base URLs and API keys:
 
 ```toml
 [server]
@@ -161,6 +161,17 @@ upstream_model = "glm-5.3"
 context_window = 1024000
 cost = { input = 0.0, output = 0.0 }   # plan models: marginal cost ≈ 0
 ```
+
+The decision model is configured in the same file — this is the only place it is read from (a gateway started by the menu-bar app at login has no shell environment, so environment-only configuration silently degraded to the heuristic judge):
+
+```toml
+[[decision.slots]]
+kind = "jev"                        # jev | laya | openai (priority order)
+api_key_env = "TYPESAFE_API_KEY"    # or inline api_key = "..." (then chmod 600 this file)
+# base_url = ""                     # optional for the JEV cloud; required for laya/openai
+# model = ""                        # required for openai
+```
+Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). The slots are tried in the order **jev > laya > openai**, with fatal errors blacklisting a slot for the life of the process and the heuristic taking over if the whole chain fails — a decision-model outage never blocks routing.
 
 ### Connect your agents
 

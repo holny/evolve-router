@@ -88,7 +88,7 @@ pub fn build_state(config: FileConfig) -> AppState {
     let catalog = Catalog::build_with_discovered(&config, discovered);
     let policy = config.policy.clone();
     // w2 槽位链（JEV > LAYA > OPENAI，配一即用；硬错进程内拉黑，重启复位）
-    let (backend, chain) = DecisionBackend::build_with_chain(&config.decision.backend);
+    let (backend, chain) = DecisionBackend::build_with_chain(&config.decision.backend, &config.decision.slots);
     let mut engine = Engine::new(catalog, policy, backend);
     // S5 层级比例控制器：目标 7:2:1（cheap/medium/premium），容忍带来自 [policy]
     engine.set_ratio_control(true, [0.7, 0.2, 0.1], engine.policy.ratio_band);

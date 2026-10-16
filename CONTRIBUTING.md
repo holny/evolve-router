@@ -76,7 +76,7 @@ When filing a bug, include:
 
 - EvolveRouter version (`evo-router --version` or commit hash)
 - Your OS and how you run the gateway (binary / LaunchAgent / systemd)
-- The relevant `~/.evolve/gateway.log` tail and `x-ev-*` response headers if you have them
+- The relevant `~/.evo-router/gateway.log` tail and `x-ev-*` response headers if you have them
 - Config snippet — **redact API keys and request content before pasting**
 
 Feature requests: describe the routing problem you're hitting, not just the solution. "My subscription quota burns too fast on easy tasks" is more actionable than "add rate limiting".

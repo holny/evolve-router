@@ -126,7 +126,7 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// ⑦ 策略回放验证：在 events.jsonl 上 A/B 对比当前参数与候选参数，
-/// 报告裁决（采纳/保持）。采纳动作 = 编辑 evolve.toml [strategy] 段；
+/// 报告裁决（采纳/保持）。采纳动作 = 编辑 evo-router.toml [strategy] 段；
 /// 回滚 = 删除该段（回到编译默认）。
 fn backtest(
     config_path: Option<PathBuf>,
@@ -164,11 +164,13 @@ fn backtest(
         };
         anyhow::ensure!(
             has_digest,
-            "--judge-samples 需要 resp_digest 数据：先在 evolve.toml 开启 \
+            "--judge-samples 需要 resp_digest 数据：先在 evo-router.toml 开启 \
              [telemetry] response_digest = true 积累事件后再用"
         );
-        let backend = evolve_decision::decision_backend::DecisionModelBackend::from_env()
-            .ok_or_else(|| anyhow::anyhow!("--judge-samples requires a decision model: set DECISION_API_KEY (+ DECISION_BASE_URL / DECISION_MODEL)"))?;
+        let backend = evolve_decision::decision_backend::DecisionModelBackend::from_slots(&cfg.decision.slots)
+            .ok_or_else(|| anyhow::anyhow!(
+                "--judge-samples requires a decision model: configure [[decision.slots]] in evo-router.toml"
+            ))?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
         let asker = move |query: &str, response: &str| -> Option<f32> {
             runtime.block_on(backend.judge_response_quality(query, response))

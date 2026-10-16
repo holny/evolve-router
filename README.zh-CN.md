@@ -40,7 +40,7 @@
 
 ## 决策模型槽位：JEV > LAYA > OPENAI
 
-判官可插拔、按槽位配置（`DECISION_MODEL_*` 环境变量）；按优先级尝试，任一失败即降级启发式——**路由永不阻塞**。`/api/live` 与面板横幅会显示当前生效槽位与"未配置"提示。各 provider 的官方配额端点、价目与峰谷时段收在一张按 hostname 索引的注册表（`provider_info`）里，数据过期会提醒复核。
+判官可插拔、按槽位配置（`evo-router.toml` 的 `[[decision.slots]]`，这是唯一的读取来源）；按优先级尝试，任一失败即降级启发式——**路由永不阻塞**。`/api/live` 与面板横幅会显示当前生效槽位与"未配置"提示。各 provider 的官方配额端点、价目与峰谷时段收在一张按 hostname 索引的注册表（`provider_info`）里，数据过期会提醒复核。
 
 ## 为什么不是另一个 proxy
 
@@ -145,7 +145,7 @@ cargo build --release
 # 网关监听 http://127.0.0.1:8787
 ```
 
-配置位于 `~/.evolve/evolve.toml`（内置默认配置，首次运行自动写出）。填入 Provider 的 base URL 与 API key：
+配置位于 `~/.evo-router/evo-router.toml`（内置默认配置，首次运行自动写出）。填入 Provider 的 base URL 与 API key：
 
 ```toml
 [server]
@@ -159,8 +159,19 @@ base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
 api_key_env = "ZHIPU_API_KEY"
 upstream_model = "glm-5.3"
 context_window = 1024000
-cost = { input = 0.0, output = 0.0 }   # 订阅方案：边际成本 ≈ 0
+cost = { input = 0.0, output = 0.0 }   # plan 模型边际成本 ≈ 0
 ```
+
+决策模型在**同一份配置**里声明——这是它唯一的读取来源（登录后由菜单栏 app 拉起的网关没有 shell 环境变量，只靠 env 配置会静默降级成启发式判官）：
+
+```toml
+[[decision.slots]]
+kind = "jev"                        # jev | laya | openai（按此优先级）
+api_key_env = "TYPESAFE_API_KEY"    # 或内联 api_key = "..."（此时建议 chmod 600 本文件）
+# base_url = ""                     # JEV 云端可省；laya/openai 必填
+# model = ""                        # openai 槽必填
+```
+配任一槽位即启用；全都不配则退回内置多语言启发式判官（功能完整）。槽位按 **jev > laya > openai** 顺序尝试，硬错（鉴权/404/无法连接）在进程内拉黑该槽位，全链失败由启发式兜底——决策模型故障永不阻塞路由。
 
 ### 接入你的 Agent
 

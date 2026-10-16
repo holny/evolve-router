@@ -10,6 +10,7 @@
 
 use crate::decision_backend::{DecisionModelBackend, SlotFail};
 use crate::laya::LayaBackend;
+use evolve_core::config::DecisionSlotCfg;
 use evolve_core::types::{DigestSignals, Judge, JudgmentSet, RequestFeatures};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -217,8 +218,8 @@ impl evolve_core::types::RouteAdvisor for SlotAdvisor {
 }
 
 /// 决策横幅状态判定：任一槽位配置即 ok；否则 missing
-pub fn any_slot_configured() -> bool {
-    !build_slots().is_empty()
+pub fn any_slot_configured(cfg: &[DecisionSlotCfg]) -> bool {
+    !build_slots(cfg).is_empty()
 }
 
 /// 纯函数：槽位配置规则（测试友好；build_slots 只读 env 后调用）
@@ -250,27 +251,102 @@ pub fn slot_from(kind: SlotKind, base: Option<String>, api_key: Option<String>, 
     }
 }
 
-/// 读 env 组装三槽位（优先级顺序 JEV > LAYA > OPENAI）
-pub fn build_slots() -> Vec<ChainSlot> {
-    let env = |names: &[&str]| names.iter().find_map(|n| std::env::var(n).ok());
+/// 按配置组装三槽位（优先级顺序 JEV > LAYA > OPENAI）。
+///
+/// **配置唯一来源 = `~/.evo-router/evo-router.toml` 的 `[[decision.slots]]`**
+/// （2026-10-16 用户裁决：统一走 toml）。此前只读环境变量，于是"菜单栏 app /
+/// 开机自启"拉起的网关拿不到 shell 里的 key → 面板显示"未配置决策模型"；
+/// 现在 key 可内联（`api_key`）或经 `api_key_env` 显式引用环境变量。
+pub fn build_slots(cfg: &[DecisionSlotCfg]) -> Vec<ChainSlot> {
     let mut out = Vec::new();
-
-    if let Some(imp) = slot_from(
-        SlotKind::Jev,
-        env(&["DECISION_JEV_BASE_URL", "DECISION_BASE_URL", "DECISION_MODEL_ENDPOINT", "TYPESAFE_ENDPOINT"]),
-        env(&["DECISION_JEV_API_KEY", "DECISION_API_KEY", "DECISION_MODEL_API_KEY", "TYPESAFE_API_KEY"]),
-        env(&["DECISION_JEV_MODEL", "DECISION_MODEL", "DECISION_MODEL_MODEL", "TYPESAFE_MODEL"]),
-    ) {
-        out.push(ChainSlot { kind: SlotKind::Jev, imp });
+    for kind in [SlotKind::Jev, SlotKind::Laya, SlotKind::OpenAI] {
+        // 同一 kind 取配置里的第一项；不合法（如 openai 缺 base/model）→ 告警跳过
+        let Some(entry) = cfg.iter().find(|s| s.kind.trim().eq_ignore_ascii_case(kind.label())) else {
+            continue;
+        };
+        let key = match (&entry.api_key, &entry.api_key_env) {
+            (Some(k), _) if !k.trim().is_empty() => Some(k.clone()),
+            (_, Some(env_name)) => match std::env::var(env_name) {
+                Ok(v) if !v.trim().is_empty() => Some(v),
+                _ => {
+                    tracing::warn!(slot = kind.label(), env = env_name, "decision slot: api_key_env is not set");
+                    None
+                }
+            },
+            _ => None,
+        };
+        match slot_from(kind, entry.base_url.clone(), key, entry.model.clone()) {
+            Some(imp) => out.push(ChainSlot { kind, imp }),
+            None => tracing::warn!(
+                slot = kind.label(),
+                "decision slot skipped (incomplete config: see [[decision.slots]] in evo-router.toml)"
+            ),
+        }
     }
-    if let Some(imp) = slot_from(SlotKind::Laya, env(&["DECISION_LAYA_BASE_URL", "LAYA_URL"]), env(&["DECISION_LAYA_API_KEY"]), None) {
-        out.push(ChainSlot { kind: SlotKind::Laya, imp });
-    }
-    if let Some(imp) = slot_from(SlotKind::OpenAI, env(&["DECISION_OPENAI_BASE_URL"]), env(&["DECISION_OPENAI_API_KEY"]), env(&["DECISION_OPENAI_MODEL"])) {
-        out.push(ChainSlot { kind: SlotKind::OpenAI, imp });
-    }
-    // 用户裁决优先级：JEV > LAYA > OPENAI（slot_from 顺序即序）
     out
+}
+
+#[cfg(test)]
+mod slot_config_tests {
+    use super::*;
+    use evolve_core::config::DecisionSlotCfg;
+
+    fn cfg(kind: &str, key: Option<&str>, key_env: Option<&str>, base: Option<&str>, model: Option<&str>) -> DecisionSlotCfg {
+        DecisionSlotCfg {
+            kind: kind.into(),
+            api_key: key.map(String::from),
+            api_key_env: key_env.map(String::from),
+            base_url: base.map(String::from),
+            model: model.map(String::from),
+        }
+    }
+
+    #[test]
+    fn slots_come_from_config_only() {
+        // 空配置 → 无槽位（**不再**回退环境变量：统一走 toml，用户裁决 2026-10-16）
+        assert!(build_slots(&[]).is_empty());
+        // 内联 key 即可（jev 云端）
+        let slots = build_slots(&[cfg("jev", Some("k"), None, None, None)]);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].kind, SlotKind::Jev);
+    }
+
+    #[test]
+    fn slots_keep_priority_order_regardless_of_config_order() {
+        // 配置里倒序书写，输出仍须 JEV > LAYA > OPENAI
+        let slots = build_slots(&[
+            cfg("openai", Some("k"), None, Some("http://127.0.0.1:9/v1"), Some("m")),
+            cfg("laya", None, None, Some("http://127.0.0.1:8/judge"), None),
+            cfg("jev", Some("k"), None, None, None),
+        ]);
+        let kinds: Vec<&str> = slots.iter().map(|s| s.kind.label()).collect();
+        assert_eq!(kinds, vec!["jev", "laya", "openai"]);
+    }
+
+    #[test]
+    fn api_key_env_is_resolved_and_missing_env_degrades() {
+        // 间接引用：读环境变量取值（key 值不落配置文件）
+        unsafe { std::env::set_var("EV_TEST_SLOT_KEY", "from-env") };
+        let slots = build_slots(&[cfg("jev", None, Some("EV_TEST_SLOT_KEY"), None, None)]);
+        assert_eq!(slots.len(), 1, "api_key_env must resolve");
+        unsafe { std::env::remove_var("EV_TEST_SLOT_KEY") };
+        // 变量缺失且无 base → 槽位不成立（告警跳过，不 panic、不阻塞路由）
+        assert!(build_slots(&[cfg("jev", None, Some("EV_TEST_SLOT_KEY"), None, None)]).is_empty());
+    }
+
+    #[test]
+    fn invalid_slots_are_skipped_not_fatal() {
+        // openai 缺 base/model、laya 缺 base → 跳过；同配置里的 jev 仍生效
+        let slots = build_slots(&[
+            cfg("openai", Some("k"), None, None, None),
+            cfg("laya", None, None, None, None),
+            cfg("jev", Some("k"), None, None, None),
+        ]);
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].kind, SlotKind::Jev);
+        assert!(any_slot_configured(&[cfg("jev", Some("k"), None, None, None)]));
+        assert!(!any_slot_configured(&[]));
+    }
 }
 
 #[cfg(test)]

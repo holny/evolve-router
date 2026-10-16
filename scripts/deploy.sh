@@ -47,5 +47,5 @@ for _ in $(seq 1 25); do
         exit 0
     fi
 done
-echo "警告: 健康检查未通过（10s 内无 200），查看 ~/.evolve/gateway.log" >&2
+echo "警告: 健康检查未通过（10s 内无 200），查看 ~/.evo-router/gateway.log" >&2
 exit 1

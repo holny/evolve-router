@@ -66,7 +66,7 @@
   - **离线先验**: 我们的 plans.rs 注册表就是离线先验（tier/allowance/credit multipliers）✓
   - **在线后验**: 我们的飞轮 learned_bias + reliability 就是后验更新 ✓
   - **改进方向**: 将 Thompson 探索从简化版（score + noise ∝ 1/√samples）升级为完整 NIG 后验
-  - **priors.json 概念**: `~/.evolve/priors.json` 存储离线先验，启动时加载——类似我们的 snapshot.json 但更结构化
+  - **priors.json 概念**: `~/.evo-router/priors.json` 存储离线先验，启动时加载——类似我们的 snapshot.json 但更结构化
 
 ### 5. RouteLLM (ICLR)
 
@@ -173,7 +173,7 @@
 **当前命名**：
 - GitHub repo: `holny/evolve-router`
 - binary: `evolve`
-- 数据: `~/.evolve/`
+- 数据: `~/.evo-router/`
 - 面板标题: EvolveRouter
 
 **建议**: binary 可用 `evolve`（短且不在学术命名泥潭中）。GitHub repo 名 `evolve-router` 保品类识别。
@@ -240,7 +240,7 @@
 **方案**：
 1. 滚动基线中心化：`r_i = rolling_mean - outcome_i`（BaRP Eq.6——学的是"优势"不是"绝对值"）
 2. 20/80 分位数钳制到 [0,1]：低于 P20 → 0，高于 P80 → 1，中间线性映射（BayesianRouter App.B）
-3. 需要：环形缓冲区存最近 N 条 outcome（`~/.evolve/ring-buffer.json`）
+3. 需要：环形缓冲区存最近 N 条 outcome（`~/.evo-router/ring-buffer.json`）
 
 **来源**: BaRP (2510.07429) Eq.6 + BayesianRouter Appendix B
 

@@ -191,49 +191,31 @@ impl DecisionModelBackend {
         parsed
     }
 
-    /// env 读取：DECISION_* 为标准名（DECISION_API_KEY / DECISION_BASE_URL /
-    /// DECISION_MODEL / DECISION_PROTOCOL / DECISION_REDACT）；DECISION_MODEL_* /
-    /// TYPESAFE_* 为历史名（回退兼容，已部署环境无需改动）。
-    /// w2 两大协议族统一接入 = baseURL + apiKey + modelId(可选) +
-    /// protocol（自动判别）：
-    /// - 原生 System One（TypeSafe Jev 云 / Laya sidecar / 未来新端点）：
-    ///   请求 {state, questions} → {answers}，API key 可选（仅默认 Jev 云必填）；
-    ///   BASE_URL 以 /judge 结尾识别为 Laya 型判定端点
-    /// - OpenAI 兼容（chat/completions）：判定契约编译为 prompt（模板内置），
-    ///   约定输出 {answers} JSON，此时 DECISION_MODEL 必填
-    fn env_var(names: &[&str]) -> Option<String> {
-        for n in names {
-            if let Ok(v) = std::env::var(n) {
-                return Some(v);
+    /// 从配置槽位构造（`--judge-samples` 离线回放用）。
+    ///
+    /// 配置唯一来源 = `[[decision.slots]]`（2026-10-16 用户裁决：统一走 toml）；
+    /// 早先的 `from_env()` 已移除——同一台机器上"终端启动有决策模型、
+    /// 菜单栏自启动没有"的漂移就是从 env 读取引起的
+    pub fn from_slots(cfg: &[evolve_core::config::DecisionSlotCfg]) -> Option<Self> {
+        for kind in ["jev", "laya", "openai"] {
+            let entry = cfg.iter().find(|s| s.kind.trim().eq_ignore_ascii_case(kind))?;
+            let key = match (&entry.api_key, &entry.api_key_env) {
+                (Some(k), _) if !k.trim().is_empty() => Some(k.clone()),
+                (_, Some(env_name)) => std::env::var(env_name).ok().filter(|v| !v.trim().is_empty()),
+                _ => None,
+            };
+            let base = entry.base_url.clone();
+            let model = entry.model.clone();
+            let protocol_hint = match kind {
+                "laya" => Some("system-one"),
+                "openai" => Some("openai"),
+                _ => None,
+            };
+            if let Ok(b) = Self::from_parts(key.as_deref(), base.as_deref(), model.as_deref(), protocol_hint) {
+                return Some(b);
             }
         }
         None
-    }
-
-    pub fn from_env() -> Option<Self> {
-        let api_key = Self::env_var(&["DECISION_API_KEY", "DECISION_MODEL_API_KEY", "TYPESAFE_API_KEY"])
-            .filter(|k| !k.is_empty());
-        let base = Self::env_var(&["DECISION_BASE_URL", "DECISION_MODEL_ENDPOINT", "TYPESAFE_ENDPOINT"]);
-        let model = Self::env_var(&["DECISION_MODEL", "DECISION_MODEL_MODEL", "TYPESAFE_MODEL"]);
-        let protocol_hint = Self::env_var(&["DECISION_PROTOCOL"]);
-        let redact = Self::env_var(&["DECISION_REDACT", "DECISION_MODEL_REDACT", "TYPESAFE_REDACT"])
-            .map(|v| v != "0")
-            .unwrap_or(true);
-        let mut b = match base {
-            Some(ref b) if Self::is_judge_style(b) => {
-                // Laya 型判定端点：key 可选、model 无关
-                Self::from_parts(api_key.as_deref(), Some(b), None, protocol_hint.as_deref()).ok()?
-            }
-            Some(ref b) => {
-                Self::from_parts(api_key.as_deref(), Some(b), model.as_deref(), protocol_hint.as_deref()).ok()?
-            }
-            None => {
-                // 默认 TypeSafe Jev 云：不设 BASE_URL 时 key 必填
-                Self::from_parts(api_key.as_deref(), None, model.as_deref(), protocol_hint.as_deref()).ok()?
-            }
-        };
-        b.redact = redact;
-        Some(b)
     }
 
     /// Laya 型判定端点识别（/judge 结尾）——决策选型与蒸馏器门槛共用

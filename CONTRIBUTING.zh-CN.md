@@ -76,7 +76,7 @@ Rust `f32` 序列化有精度毛刺（如 `1.4000000000000001`）。所有进面
 
 - EvolveRouter 版本（`evo-router --version` 或 commit hash）
 - 操作系统与运行方式（二进制 / LaunchAgent / systemd）
-- `~/.evolve/gateway.log` 尾部日志；如有 `x-ev-*` 响应头一并附上
+- `~/.evo-router/gateway.log` 尾部日志；如有 `x-ev-*` 响应头一并附上
 - 配置片段——**粘贴前隐去 API key 与请求内容**
 
 功能请求：描述你遇到的路由问题，而不是直接给方案。"我的订阅配额在简单任务上烧太快"比"加个限流"更有信息量。

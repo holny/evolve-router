@@ -1,5 +1,5 @@
 # EvolveRouter default configuration (M1)
-# Copy to evolve.toml next to the binary or ~/.evolve/evolve.toml
+# Copy to evo-router.toml (next to the binary or ~/.evo-router/evo-router.toml)
 
 [server]
 host = "127.0.0.1"
@@ -15,6 +15,14 @@ confidence_gate = 0.35
 backend = "auto"            # auto | heuristic | decision_model (alias: typesafe) | laya
 redact = true
 
+# Decision-model slots — THE ONLY place a decision model is configured
+# (priority: jev > laya > openai; configure one and it is used; none → heuristic fallback).
+# [[decision.slots]]
+# kind = "jev"                 # jev | laya | openai
+# api_key_env = "TYPESAFE_API_KEY"   # or inline api_key = "..." (chmod 600 this file)
+# base_url = ""                # optional for the JEV cloud; required for laya/openai
+# model = ""                   # required for openai
+
 [catalog]
 remote_fetch = false        # M3
 
@@ -22,7 +30,7 @@ remote_fetch = false        # M3
 learn_from_headers = true   # M2
 
 [data]
-dir = "~/.evolve"
+dir = "~/.evo-router"
 
 # ---------------------------------------------------------------------------
 # Models: declare every upstream model the router may pick.

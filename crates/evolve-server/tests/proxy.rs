@@ -63,7 +63,7 @@ fn test_config(upstream_port: u16) -> FileConfig {
     FileConfig {
         server: ServerCfg { host: "127.0.0.1".into(), port: 0 },
         policy: PolicyCfg { explore_ratio: 0.0, ..Default::default() },
-        decision: DecisionCfg { backend: "heuristic".into(), redact: true },
+        decision: DecisionCfg { backend: "heuristic".into(), redact: true, slots: vec![] },
         catalog: CatalogCfg::default(),
         quota: QuotaCfg::default(),
         // 每测试独立 data 目录（活跃集/事件/覆盖读同一目录会跨测试污染：

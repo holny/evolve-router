@@ -28,7 +28,7 @@ cat > "$APP_DIR/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key><string>${APP_NAME}</string>
-    <key>CFBundleIdentifier</key><string>ai.evolve.router.tray</string>
+    <key>CFBundleIdentifier</key><string>ai.evolve-router.tray</string>
     <key>CFBundleExecutable</key><string>${APP_NAME}</string>
     <key>CFBundleIconFile</key><string>${APP_NAME}</string>
     <key>CFBundlePackageType</key><string>APPL</string>
