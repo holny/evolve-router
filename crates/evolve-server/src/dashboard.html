@@ -303,7 +303,7 @@ table.mx tr.win td { color:var(--green); }
         <button class="lang-btn" id="pv-scan-btn" data-i18n="pv_scan">全局扫描</button>
       </span>
     </h2>
-    <div class="sub" style="margin-bottom:8px" data-i18n="provider_sub">手动维护 provider 凭据 / 档位 / 窗口额度 · 扫描发现自动展示</div>
+    <div class="sub" style="margin-bottom:8px" data-i18n="provider_sub">管理 provider：按方案档位（tier）· 拉取各自模型清单 · 探测配额窗口 · 决定是否参与路由分配</div>
     <div id="pv-scan-progress" style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;font-size:11px;font-family:monospace;white-space:pre-wrap;max-height:200px;overflow:auto;color:var(--dim)"></div>
     <div id="providers-list"></div>
   </section>
@@ -343,6 +343,15 @@ const T = {
   dm_retrying_now:{zh:'下一条请求即重试', en:'retries on the next request', ko:'다음 요청에서 재시도', ja:'次のリクエストで再試行', es:'reintenta en la próxima solicitud', fr:'réessaie à la requête suivante'},
   chip_inflight:{zh:'在飞', en:'in flight', ko:'진행 중', ja:'処理中', es:'en vuelo', fr:'en cours'},
   chip_inflight_hint:{zh:'正在处理的请求（含流式生成）：现在重启网关会**先排空**它们（最多 60s）再退出，不会截断正在生成的流', en:'requests currently being processed (including live streams): restarting the gateway drains them first (up to 60s) and never truncates a running generation', ko:'처리 중인 요청(스트리밍 포함): 게이트웨이 재시작은 먼저 배수(최대 60초)하며 생성 중인 스트림을 끊지 않습니다', ja:'処理中のリクエスト（ストリーミング含む）：ゲートウェイ再起動は先にドレイン（最大60秒）し、生成中のストリームを切断しません', es:'solicitudes en curso (incluye streaming): reiniciar la puerta las drena antes (hasta 60 s) sin cortar la generación', fr:'requêtes en cours (streaming inclus) : redémarrer la passerelle les draine d\'abord (60 s max) sans couper la génération'},
+  pv_assigned:{zh:'参与路由', en:'assigned', ko:'라우팅 참여', ja:'ルーティング参加', es:'asignado', fr:'affecté'},
+  pv_unassigned:{zh:'已禁用', en:'disabled', ko:'비활성', ja:'無効', es:'deshabilitado', fr:'désactivé'},
+  pv_unavailable:{zh:'暂不可用', en:'unavailable', ko:'일시 불가', ja:'利用不可', es:'no disponible', fr:'indisponible'},
+  pv_assign_on_hint:{zh:'已启用且可用：其模型参与路由候选（受活跃集与价位闸约束）', en:'enabled and available: its models join the routing candidates (subject to the active set and price-tier gate)', ko:'활성·사용 가능: 해당 모델이 라우팅 후보에 포함(활성 세트·가격 티어 게이트 적용)', ja:'有効かつ利用可能：そのモデルはルーティング候補に入ります（アクティブセットと価格ティアのゲート適用）', es:'activo y disponible: sus modelos entran en los candidatos de enrutado (sujeto al conjunto activo y a la puerta de nivel de precio)', fr:'actif et disponible : ses modèles rejoignent les candidats de routage (sous réserve de l\'ensemble actif et du palier de prix)'},
+  pv_assign_off_hint:{zh:'未参与路由：禁用、健康冷却或配额耗尽时，其模型不进候选', en:'not routed: disabled, cooling down or quota-exhausted models stay out of the candidate set', ko:'라우팅 제외: 비활성·쿨다운·쿼터 소진 시 후보에서 제외', ja:'ルーティング対象外：無効・クールダウン・クォータ枯渇の場合、候補に入りません', es:'no enrutado: deshabilitado, en enfriamiento o sin cuota queda fuera de los candidatos', fr:'non routé : désactivé, en refroidissement ou quota épuisé reste hors des candidats'},
+  pv_quota_src_hint:{zh:'配额数据来源：官方 API / 上游响应头 / 网关推算（决定配额执行的准确性）', en:'where the quota numbers come from: official API / upstream headers / gateway estimate', ko:'쿼터 출처: 공식 API / 업스트림 헤더 / 게이트웨이 추정', ja:'クォータの出所：公式 API / 上流ヘッダー / ゲートウェイ推定', es:'origen de la cuota: API oficial / cabeceras del upstream / estimación de la puerta', fr:'origine du quota : API officielle / en-têtes amont / estimation de la passerelle'},
+  pv_quota_official:{zh:'配额·官方', en:'quota·official', ko:'쿼터·공식', ja:'クォータ·公式', es:'cuota·oficial', fr:'quota·officiel'},
+  pv_quota_official_headers:{zh:'配额·响应头', en:'quota·headers', ko:'쿼터·헤더', ja:'クォータ·ヘッダー', es:'cuota·cabeceras', fr:'quota·en-têtes'},
+  pv_quota_estimated:{zh:'配额·推算', en:'quota·est', ko:'쿼터·추정', ja:'クォータ·推定', es:'cuota·est', fr:'quota·est'},
   pv_from:{zh:'来源', en:'from', ko:'출처', ja:'出典', es:'origen', fr:'source'},
   pv_dup_hint:{zh:'与上面同账号的条目重复', en:'same account as the entry above', ko:'위 항목과 동일 계정', ja:'上の項目と同一アカウント', es:'misma cuenta que la entrada anterior', fr:'même compte que l\'entrée ci-dessus'},
   dm_cfgline:{zh:'在配置文件里加一条槽位（保存后约 5 秒热加载，无需重启）：~/.evo-router/evo-router-config.jsonc → decision.slots',
@@ -1566,6 +1575,16 @@ function renderProviders(){
       ? '<span class="pbadge">'+esc(t('pv_source_manual'))+'</span>'
       : '<span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(t('pv_source_scanned'))+'</span>';
     const kindBadge = (PK_LABEL[p.plan_kind] || 'pk_api') && t(PK_LABEL[p.plan_kind] || 'pk_api') || p.plan_kind;
+    // 配额探测来源（配额执行的证据）：官方 API / 响应头 / 网关推算
+    const quotaSrc = p.quota_source
+      ? '<span class="pbadge" title="'+esc(t('pv_quota_src_hint'))+'">'+esc(t('pv_quota_' + (p.quota_source || 'estimated'))) + '</span>'
+      : '';
+    // 是否参与路由：启用 + 可用 → assigned；否则标注何时不可用
+    const assignBadge = p.disabled
+      ? '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)" title="'+esc(t('pv_assign_off_hint'))+'">'+esc(t('pv_unassigned'))+'</span>'
+      : (p.available
+         ? '<span class="pbadge" style="background:var(--badge-ok-bg);color:var(--green)" title="'+esc(t('pv_assign_on_hint'))+'">'+esc(t('pv_assigned'))+'</span>'
+         : '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)" title="'+esc(t('pv_assign_off_hint'))+'">'+esc(t('pv_unavailable'))+'</span>');
     const docs = p.docs_url ? ' <a href="'+esc(p.docs_url)+'" target="_blank" rel="noopener" title="'+esc(t('pv_docs'))+'" style="color:var(--dim);display:inline-flex;vertical-align:middle"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>' : '';
     // review：tier 名显示原档位；配额带单位——opencode-go 的 plan_kind 是
     // 'go'（美元制），与 'dollar' 同为 $ 计价
@@ -1695,6 +1714,7 @@ function renderProviders(){
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
       +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge+unblockBtn
       +   ' <span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(kindBadge)+'</span>'
+      +   ' ' + quotaSrc + ' ' + assignBadge
       +   summary + disabled + docs + winInfo + paygBal
       +   '<span style="margin-left:auto"></span>'
       +   '<button class="lang-btn" data-pv-edit="'+esc(p.key)+'" data-pv-source="'+esc(p.source)+'">'+esc(t('pv_edit'))+'</button>'

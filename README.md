@@ -1,419 +1,297 @@
-<div align="center">
+<p align="center">
+  <img src="docs/assets/logo.png" width="120" alt="EvolveRouter logo">
+</p>
 
-<img src="docs/assets/logo.png" width="128" alt="EvolveRouter logo">
+<h1 align="center">EvolveRouter</h1>
 
-# EvolveRouter: Think Before You Route. Evolve With Every Request.
+<p align="center"><b>Think before you route. Evolve with every request.</b></p>
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
-[![Tests](https://img.shields.io/badge/tests-220%20passing-brightgreen.svg)](#development)
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="#development"><img src="https://img.shields.io/badge/tests-225%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
+</p>
 
-[English](README.md) | [中文](README.zh-CN.md)
+EvolveRouter is a **local LLM routing gateway** for agents. Every request is judged on eight signals, priced in its own plan's currency, scored on five factors, and routed to the model that fits — then the outcome feeds back so the next decision is better. It ships as one Rust binary with a native macOS menu-bar panel and a zero-build dashboard. Your prompts, sessions and telemetry never leave the machine.
 
-</div>
+```
+opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
+                    │  model = "auto"
+                    ▼
+        ┌───────────────────────────┐
+        │  judge → score → route    │   eight signals · five factors · plan-aware pricing
+        │  fallback → learn         │   quality cascade · flywheel · Thompson exploration
+        └───────────────────────────┘
+                    ▼
+     zhipu · Z.ai · MiniMax · volces · opencode zen · DeepSeek · any OpenAI/Anthropic API
+```
 
----
+## Contents
 
-> **Save tokens. Spend them where they matter.**
->
-> EvolveRouter is a **local-first, self-evolving LLM router** that sits between your agent and every model you use. A pluggable **decision model** judges each request across **8 signals** — domain, difficulty, vision needs, triviality, tool density, stakes, session depth, size — before a single token is spent. A **4-layer feedback flywheel** learns from every outcome, so routing sharpens the more you use it. Every decision is **local, transparent, and auditable**: JSONL event logs, `x-ev-model / x-ev-reason / x-ev-decision-id` response headers, and a zero-build dashboard at `127.0.0.1:8787`. **Your data never leaves the host.** One **6.7 MB Rust binary**, zero runtime dependencies, no Docker, no Python, no cloud. When the decision model is unreachable, a multilingual heuristic takes over and **routing never blocks**. Works with **OpenAI & Anthropic compatible models** and agents like **opencode, Claude Code, Codex, Pi, openclaw, hermes**.
+- [Install](#install) · [Point your agent at it](#point-your-agent-at-it)
+- [How a request is routed](#how-a-request-is-routed) · [Price-aware layers](#price-aware-layers)
+- [Decision model (optional)](#decision-model-optional) · [Request tags](#request-tags)
+- [macOS menu-bar panel](#macos-menu-bar-panel) · [Dashboard](#dashboard)
+- [Configuration](#configuration) · [Operations](#operations)
+- [Why not another proxy](#why-not-another-proxy) · [Managed plans](#managed-plans) · [Development](#development)
 
-![EvolveRouter architecture](docs/assets/architecture.svg)
+## Install
 
-*Every agent points at one endpoint with `model = "auto"`. A dual judge (decision model + heuristic) scores each request; the flywheel feeds every outcome back into the ranking; each provider plan is priced in its own currency against its own budget. [Edit the source](docs/assets/architecture.excalidraw).*
-
-
-## Price-aware routing: spend where it matters, by construction
-
-Difficulty is judged, then **calibrated to a target distribution (70% easy / 20% medium / 10% hard)**,
-and mapped onto **capability and price tiers** so the expensive models only serve the hard tail:
-
-| Layer | What it does |
-|---|---|
-| **Difficulty calibration** | Rolling-quantile calibration reshapes the judge's raw difficulty to the 7:2:1 target (a biased judge can't flood the router with "hard" tasks) |
-| **Model tags (capability / price)** | Auto-derived by quantile (70/20/10 in both dimensions, computed over the **currently usable pool** only — cooling / quota-gated / keyless models are excluded dynamically), user-editable in the dashboard |
-| **Price-tier gate** | L1 tasks may only use `cheap`; L2 up to `medium`; L3 opens everything — with an **inversion exception** (a pricier model whose effective cost ≤ the allowed pool's median passes) and **quality-first fallback** (if the gate would starve a hard task, it relaxes before degrading quality) |
-| **Effective cost** | Official price sheets (per-plan credit multipliers, per-token CNY/USD, cache-hit vs miss, **peak/off-peak windows**) — cache-hit input can be ~1/50 of a miss, so warm sessions are never needlessly switched (**cache-economy sticky**) |
-| **Ratio controller** | Watches the *actual* chosen-tier mix and nudges it back toward 7:2:1 (soft cost multipliers on the over-used tier) |
-| **Active set (50)** | Only the *newest released* (20-slot floor by release date) plus *recently used* (within 14 days) models are routable; the rest stay visible in the dashboard and can be enabled with one click — enabling swaps out the lowest-ranked slot |
-| **Supply awareness** | Subscription quota (expires!) ranks above pay-as-you-go spend; API-queryable providers are refreshed by a 90s quota watchdog, non-API providers are probed with real requests every 5-10 min |
-
-`evo-router report` replays your event log and prints the end-to-end KPIs (difficulty / capability / price distribution vs the 7:2:1 target, premium-on-easy count, cache-hit rate, average cost).
-
-## Decision-model slots: JEV > LAYA > OPENAI
-
-The judge is pluggable and configurable per slot (`decision.slots` in `~/.evo-router/evo-router-config.jsonc` — the single place it is read from); the router tries them in priority order and falls back to the heuristic judge on any failure — routing never blocks. `evo-router report` and `/api/live` expose which slot is live, and the dashboard banners tell you when a decision model is missing. Providers’ official quota endpoints, price sheets and off-peak windows live in one registry (`provider_info`) keyed by hostname, with a review-due reminder when the curated data goes stale.
-
-## Why not another proxy
-
-| | EvolveRouter | LiteLLM / OpenRouter | RouteLLM |
-|---|---|---|---|
-| **Routing decision** | Decision model judges *every request* (8 signals) + heuristic second opinion, fail-open | Config/prefix rules, or model-based router trained offline | Trained router models, offline |
-| **Self-evolution** | Flywheel: 4-layer feedback (transport / tool-syntax / semantic loop / plugin) rewrites per-model learned bias & reliability | Static weights | Static after training |
-| **Subscription economics** | Per-plan credit multipliers, tier allowances (5h/week/month), quota budget protection (soft-deprioritize → sticky-break → hard-filter) | Cost tracking only | – |
-| **Deployment** | One Rust binary (~7 MB), zero deps, no Docker/DB | Python + DB | Python |
-| **Protocol** | OpenAI ↔ Anthropic bidirectional translation (incl. streaming) | OpenAI-centric | OpenAI |
-| **Multi-agent** | Native identity for opencode / codex / claude-code / pi / openclaw / hermes / dsh (session-aware stickiness) | Generic | Generic |
-| **Failure handling** | Multi-key pools → per-provider & per-endpoint circuit breaking → fallback chain → **out-of-chain last-resort sweep** | Retries | – |
-
-
-## The routing formula, step by step
-
-![EvolveRouter formula](docs/assets/formula.png)
-
-The card above is the overview. Here is how each formula actually fires, in the order the decision pipeline runs. Every quantity is named and visible in the event log.
-
-### Step 1 — Hard filters *(no formula: binary gates)*
-
-Context window too small for the estimate → out. Task needs vision, model can't → out. Model in circuit-breaker cooldown → out. Remaining quota below 8× the estimate → out. Candidates dominated on every factor (Pareto) → out. What survives is the eligible set.
-
-### Step 2 — Dynamic weights *(difficulty-linked × quota-aware — [BaRP](https://arxiv.org/abs/2510.07429) Eq.1)*
-
-$$\mathbf{W} = \text{norm}\big(\mathbf{w}^{\mathrm{diff}}(d_{\mathrm{eff}}) \odot \mathbf{w}^{\mathrm{quota}}(t)\big), \quad t = \frac{\text{candidates with remaining quota} < 8 \times \text{est}}{\text{candidates with quota data}}$$
-
-*What happens:* a hard task (d_eff high) tilts weights toward quality; a simple task tilts toward cost. Independently, when many eligible candidates are quota-tight (t → 1), the cost weight rises ×(1+1.5t) and quality yields ×(1−0.25t). No quota data → t undefined → weights untouched.
-
-### Step 3 — Five-factor score + advisor bonus
-
-$$\mathrm{base}(m) = \sum_k W_k \cdot f_k(m), \qquad f_k \in \{\text{quality, speed, cost, reliability, headroom}\}$$
-$$\mathrm{base}(m) \times = 1 + 0.15 \cdot c_r \quad \text{if the advisor recommended } m \text{ with confidence } c_r > 0.3$$
-
-*What happens:* each candidate is priced **in its plan's own currency** (credits / dollars / AFP) before cost scoring. The advisor (decision model, seeing anonymized profiles of the top-8) can directly boost its pick by up to +15%.
-
-### Step 4 — Thompson exploration *(uncertainty-driven — [BayesianRouter](https://arxiv.org/abs/2510.02850) Eqs.4–6, cross-domain)*
-
-$$\mu_0 = 0.15 + 0.70\,\mathrm{rank}(q_m), \quad \alpha = \mu_0 \nu_0 + s, \quad \beta = (1-\mu_0)\nu_0 + f, \quad \nu_0 = 8$$
-$$\tilde{\theta} \sim \mathrm{Beta}(\alpha, \beta), \qquad \mathrm{final}(m) = \mathrm{base}(m) \times \big(1 + 3\rho(\tilde{\theta} - \mathbb{E}[\theta])\big)$$
-
-*What happens:* s/f are the model's recent success/failure counts. A model with few observations has a wide posterior → large sampling offset → it gets tried. A well-observed model has a narrow posterior → offset vanishes → no more free chances. ρ = `explore_ratio` (default 0.1, i.e. ±3% typical jitter). The prior mean μ₀ uses the *rank* of the decision-model quality factor among candidates — absolute q values saturate near 1.0, and a saturated prior would silently kill exploration.
-
-### Step 5 — Flywheel bias *(two-stage normalization + baseline-relative update)*
-
-$$\text{norm}(v) = \text{clamp}\!\left(\frac{v - \bar{x}}{q_{80} - q_{20}},\ 0,\ 1\right), \qquad \mathrm{reward} = w_{\mathrm{ok}} \cdot \text{norm}(\mathrm{ok}) + (1{-}w_{\mathrm{ok}})\big(1 - \text{norm}(\ln \mathrm{ms})\big)$$
-$$B(m) = \text{clamp}\big(1 + (\mathrm{reward}_m - \text{median}_{m'}\mathrm{reward}_{m'}) \cdot \gamma,\ 0.7,\ 1.3\big)$$
-
-*What happens:* for each model, the last 30 outcomes (success + latency, ln-compressed) become a reward in [0,1] — first normalized against its own rolling mean, then scaled by its own 20/80 spread (this is what makes a 200 ms model and a 20 s model comparable). The bias learns the *advantage over the cross-model median*, not absolute outcomes — when the whole workload gets harder, every reward drops together, the median moves with them, and bias stays still. Final scores are multiplied by B(m). The flywheel can only fine-tune: |B| ≤ 1.3, and the decision model's judgment is the ceiling.
-
-### Step 6 — After routing
-
-Quality cascade: a *successful* response that is degenerate / empty / has broken tool calls is discarded and the next chain candidate is tried — stricter at the chain head, looser further down. Repeated identical requests hit a local completion cache. Every event records `regret = best-available-score − chosen-score`, so routing quality is measurable, and every strategy parameter change must survive `evo-router backtest` (replay on real events, judged by Performance-Gap-Recovered) before it ships.
-
-## Three pillars
-
-1. **Intelligent decisions, not prefix rules.** Every request is judged by a pluggable **decision model** on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion, covering the decision model's CJK blind spots); if the decision model is unreachable, the heuristic takes over and **routing never blocks**. Backends are swappable by config — cloud (TypeSafe Jev) or self-hosted open-source decision models (Intern-Decision, StartLux-Decision) behind the same protocol, plus an optional local `laya` sidecar. Re-judging is skipped only inside a **tool loop** (the request continues a tool call of the same turn) and only while the previous judgment stays low-difficulty, the size band holds, the toolset is unchanged, and the service healthy — a new user message always triggers a full re-judgment.
-2. **Budget-aware routing.** Every candidate is priced in its plan's own currency — credits (zhipu / Z.ai / MiniMax), dollars (opencode zen Go), AFP (volces) — before it is scored. Quota budget protection runs at three levels: **>60%** of your allowance deprioritizes the plan, **>85%** breaks session stickiness, **>95%** filters it out entirely — preserving headroom for the tasks that actually need it.
-3. **Managed plans in one dashboard.** Vendor subscription plans are first-class citizens: tiers, allowances, credit multipliers and per-model dollar limits are built in; the dashboard shows live provider-reported quotas per window with one-click reconciliation.
-
-
-## Managed plans
-
-| Plan | Vendor | Kind | Pricing model | Tiers | Windows |
-|---|---|---|---|---|---|
-| `zhipu-coding` | zhipu (bigmodel.cn) | Coding Plan | credits, off-peak 50% | lite / pro / max | 5h · week · month |
-| `zai-devpack` | Z.ai | Coding Plan | credits | lite / pro / max | 5h · week · month |
-| `opencode-go` | opencode zen | Go Plan | $/1M per model + per-model monthly $ cap | go / go-plus | month (5h = 20%) |
-| `volces-coding` | volces | Coding Plan | AFP credits | lite / pro | 5h · week · month |
-| `volces-agent` | volces | Agent Plan | AFP credits | — | 5h · week · month |
-| `minimax-coding` | MiniMax | Coding Plan | credits | lite / pro / max | 5h · week · month |
-| pay-as-you-go | any OpenAI / Anthropic | API | $ per token | — | — |
-
-Plans are auto-detected from base URLs, and every window (5h / weekly / monthly) is tracked with provider-truth quota headers where the vendor reports them.
-
-
-## Features
-- **Local-first, data-safe** — One Rust single-binary (~7 MB), zero runtime dependencies, no Docker, no Python, no cloud. The whole routing chain runs in-process on your machine: user data, session content, and telemetry signals **never leave the host**. Every decision lands in a local JSONL event log — fully auditable, exportable, deletable.
-- **Decision-model intelligence, economics-aware** — A pluggable decision model (cloud or self-hosted, System-One protocol) + a multilingual heuristic second opinion, take-conservative fusion, judges every request on 8 signals (domain, difficulty, needs-vision, triviality, tool-density, high-stakes, session depth, size). Each candidate is **priced in its plan's own currency before it is scored** (credits for zhipu / Z.ai / MiniMax, dollars for opencode Go, AFP for volces), then the five factors are fused with difficulty-linked weights. Three-tier budget protection: >60% quota deprioritizes, >85% breaks session stickiness, >95% filters out — saving headroom for the tasks that actually need it.
-- **Scientific formula, no black box** — Five factors (quality · speed · cost · reliability · headroom) combined with difficulty-linked weights and a flywheel bias multiplier — see [The routing formula](#the-routing-formula-step-by-step) for the full derivation. Every term in the score traces back to a named quantity on the request, the model, or the flywheel. No black box.
-- **Self-evolving flywheel** — Every request feeds the flywheel. 4 layers of feedback (transport success, tool-call syntax validity, session-confirmed semantic loops, plugin-reported outcomes) are **two-stage normalized** (subtract rolling mean, clamp by the 20/80 inter-quantile range) and learned **relative to the cross-model median** — so workload drift never leaks into the learned bias. Long-term 50% + last-30 30% + last-10 20%. **Usage is the learning rate.**
-- **Uncertainty-driven exploration** — No fixed ε-greedy. Each candidate carries a Beta(α, β) posterior (success/failure counts with the decision-model score as prior mean); Thompson sampling makes sample-poor models explore automatically and sample-rich models converge. Strategy parameters are versioned and must pass `evo-router backtest` — replay on real production events, judged by Performance-Gap-Recovered — before adoption.
-- **Quality cascade & completion cache** — The fallback chain escalates not only on errors but on *poor quality* (degenerate output, empty responses, broken tool calls) with stricter gating at the chain head; exhausted chains still return the degraded response rather than an error. Identical logical requests hit a local completion cache (TTL-limited, `x-ev-no-cache` to bypass) for zero-cost zero-latency repeats.
-- **Self-distilling capability cards** — Every 50 gated successes per model, the decision model re-estimates that model's capability tiers from observed statistics (conservatively merged, shift ≤ 0.15 per step) — so silently-updated upstream models can't leave the catalog stale. Users' explicit tier declarations are never overridden; delete `distilled.json` to roll back.
-- **Any Agent, any Provider** — opencode / Claude Code / Codex / Pi, openclaw / hermes / dsh (local harnesses), and any OpenAI- or Anthropic-compatible client. No code changes to your stack. Routes to any OpenAI-compatible **or** Anthropic upstream; Switchyard handles bidirectional streaming translation (event mapping + deterministic IDs) so Claude Code works out of the box. Subscription plans (zhipu coding, Z.ai, opencode zen, volces, MiniMax) and pay-as-you-go APIs share one endpoint.
-- **Fast decisions, zero-deps deployment** — Single Rust binary, 6.7 MB; cold start <30 ms; one request adds <300 ms (a decision-model call + heuristic fallback). Multi-key pool rotation, provider- and endpoint-level circuit breaking, and an out-of-chain last-resort sweep keep routing alive through single-vendor outages.
-- **Every request is tagged with its own decision** — difficulty, domain, hit flags (trivial / tools / vision / stakes), difficulty↔capability fit and decision path (`model` / `model+rules` / `reused` / `rules` / `pinned`) are derived **once, server-side**, written into the event, and rendered identically by the dashboard and the macOS panel. The tag vocabulary and thresholds live in one place (`decision_tags.rs` + `thresholds.rs`), so the two surfaces cannot drift.
-- **Full dashboard control, every decision visible** — Zero-build dashboard at `http://127.0.0.1:8787`: live decision stream with plain-language reasons, scoring matrix, fallback chains with per-hop causes, latency waterfall, model trends, provider & quota management, flywheel learning state. Every response carries `x-ev-model / x-ev-reason / x-ev-decision-id`; `/api/events` exposes the JSONL decision log for query and replay.
-
-## Quick Start
-
-**Requirements:** Rust stable (2024 edition), any OpenAI-compatible or Anthropic provider credentials.
+**Homebrew (macOS menu-bar app + gateway):**
 
 ```bash
-git clone https://github.com/holny/evolve-router.git
-cd evolve-router
+brew install --cask holny/evolve/evolve-router     # or: brew tap holny/evolve && brew install --cask evolve-router
+```
+
+Unzip-free: the cask installs `EvolveRouter.app` (menu-bar panel + bundled gateway). Not notarized — first launch needs right-click → Open.
+
+**From source (gateway only, any OS):**
+
+```bash
+git clone https://github.com/holny/evolve-router && cd evolve-router
 cargo build --release
-
-# binary at target/release/evo-router
-./target/release/evo-router serve
-# gateway listening on http://127.0.0.1:8787
+./target/release/evo-router serve          # http://127.0.0.1:8787
 ```
 
-Configuration lives at `~/.evo-router/evo-router-config.jsonc`; when no file exists the embedded default is used (writing one out is a one-time migration step for older installs). Point providers with their base URLs and API keys:
+## Point your agent at it
+
+One endpoint, one model name. Nothing else changes in your stack.
 
 ```jsonc
-// ~/.evo-router/evo-router-config.jsonc  (JSONC: comments allowed)
-{
-  "server": { "host": "127.0.0.1", "port": 8787 },
-  "models": [
-    {
-      "id": "zhipuai-coding-plan/glm-5.3",
-      "provider": "zhipuai-coding-plan",
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "api_key_env": "ZHIPU_API_KEY",       // or inline "api_key": "..." (chmod 600)
-      "upstream_model": "glm-5.3",
-      "context_window": 1024000,
-      "cost": { "input": 0.0, "output": 0.0 }   // plan models: marginal cost ~ 0
-    }
-  ]
-}
-```
-
-The decision model goes in the same file (`decision.slots`) — that is the only place it is read from, since a gateway started by the menu-bar app at login has no shell environment:
-
-```jsonc
-{
-  "decision": {
-    "backend": "decision_model",     // decision_model = model + rules fusion; auto = model only; heuristic = rules only
-    "judge_timeout_ms": 12000,       // default 3000; raise it for internet relays
-    "slots": [
-      { "kind": "jev", "api_key": "<key>" },                                   // JEV cloud (native contract)
-      { "kind": "jev",                                                          // StartLux-Decision 27B via Bamboo Relay
-        "base_url": "https://api.bamboonode.dev/v1/systemone",
-        "model": "startlux-decision-27b-autothink",
-        "think_mode": "never",        // one pass, fastest (AutoThink otherwise reasons when unsure)
-        "api_key": "<bamboo-key>" },
-      { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" },        // local sidecar, no key
-      { "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",             // any OpenAI-compatible endpoint
-        "model": "<model-id>" }
-    ]
-  }
-}
-```
-
-Configure one slot and it is used; leave them all out and routing runs on the built-in multilingual heuristic (still fully functional). Slots are tried in the order **jev > laya > openai**, a fatal error (auth/404/unreachable) blacklists that slot for the process lifetime, and a whole-chain failure degrades to the heuristic — a decision-model outage never blocks routing. Transient failures (timeout / 5xx / unparseable) are **retried automatically**: the first one retries on the next request, repeats back off exponentially (30 s → 10 min) so no request pays the same timeout twice in a row, and a single success clears the failure state and the banner. `/api/live` reports `consecutive_fails` and `retry_in_ms` so the UI can say when the next attempt happens. With a remote judge, `judge_timeout_ms` matters (a 27B judge behind a relay answers in ~2.5 s, so the 3 s default times out before the answer arrives).
-
-### Config format and where credentials live
-
-The config is one **serde schema**. The canonical file is **`~/.evo-router/evo-router-config.jsonc`** (JSONC: JSON with comments, so the file documents itself), with `evo-router-config.json` as the plain-JSON variant. Older names (`evo-router.toml`, `evo-router.jsonc`, `evo-router.json`, `evolve.toml`) are still read and are **converted automatically on startup** — the original is kept next to it as `*.migrated`.
-
-Where provider credentials actually come from:
-
-| Source | Contains | When |
-|---|---|---|
-| Agent configs (`~/.config/opencode/opencode.jsonc`, `~/.codex/config.toml`, …) | base_url + api_key, read by discovery | every startup — **never copied** into our files |
-| `~/.evo-router/state/overrides.json` | providers you add/edit in the dashboard or panel (base_url, api_key, tier, protocol, …) | written by the UI, replayed at startup |
-| `evo-router-config.jsonc` → `providers` | the explicit provider list, each entry tagged with `origin` (`user` / `discovered` / `builtin`) and, for discovered ones, `source_path` (the agent config it was read from, e.g. `opencode @ ~/.config/opencode/opencode.jsonc`) | config wins over `overrides.json`, which wins over discovery |
-| `evo-router-config.jsonc` → `models` | per-model declarations — `base_url`, `api_key_env` (env var name) or **inline `api_key`** (chmod 600) | static, wins over discovery for the same id |
-
-Materialise the live provider list (keys included) into the config file with **`POST /api/config/export`** — after that the file alone reproduces your setup, no agent configs needed. Deduplication is done inside the gateway on `base_url + api_key`, so the same account appearing in two places is still one provider.
-
-So: nothing is required in the config file to get started (discovery finds your agents), and everything *can* live there if you prefer an explicit, single-file setup.
-
-### Reloading configuration
-
-| Section | How it takes effect |
-|---|---|
-| `decision` / `decision.slots` | **hot-reloaded within ~5 s** — the judge chain (and its route advisor) is swapped in place, no restart. Force it immediately with `curl -X POST http://127.0.0.1:8787/api/reload` |
-| any other section (`[server]`, `[policy]`, `[[models]]`, `[discovery]`, …) | needs a restart — the menu-bar panel's **Stop / Start**, or `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway` for the LaunchAgent, or Ctrl-C the foreground process. Restarts are **graceful**: SIGINT/SIGTERM stops accepting new requests, lets in-flight ones (including live SSE streams) finish, flushes the flywheel, then exits — so restarting never truncates a running generation (a 60 s cap applies to a stuck upstream and is logged) |
-
-`/api/live` reports the live state so you never have to guess:
-
-```json
-{
-  "config":   { "reloaded_at_ms": 1792116723449, "restart_required": false, "restart_reason": null,
-                "path": "~/.evo-router/evo-router-config.jsonc", "active_slots": ["jev"] },
-  "decision": { "backend": "decision_model", "status": "ok",
-                "last_judge": "decision_model+rules", "last_model_used": true,
-                "last_fail": null }
-}
-```
-
-`decision.status` is one of `ok` (judging as configured), `degraded` (slots configured but the last judge fell back to rules — `last_fail` carries the reason, e.g. `timeout` or `auth failed (401/403)`), `stale` (configured, not applied yet) or `missing` (nothing configured). The menu-bar panel and the dashboard render the same object, and a yellow banner spells out the non-`ok` states.
-
-`restart_required` turns on when a non-`[decision]` section changes and clears again if you revert it, so a stale reminder cannot stick.
-
-### Data layout
-
-Everything the gateway writes lives under `~/.evo-router/` (override with `[data] dir`):
-
-```
-~/.evo-router/
-├── evo-router-config.jsonc  # configuration (the only file you edit)
-├── events/               # append-only decision log (replay, stats, backtest)
-│   ├── events.jsonl
-│   └── events.jsonl.1     # 32 MB rotation
-├── state/                # machine-written state & caches
-│   ├── snapshot.json       # flywheel snapshot (incl. hourly buckets)
-│   ├── distilled.json      # distilled capability cards
-│   ├── overrides.json      # dashboard/panel overrides
-│   ├── benchmarks.json     # leaderboard feed cache
-│   ├── modelsdev.json      # models.dev reference cache
-│   └── remote-models.json  # /v1/models scan cache
-└── logs/
-    ├── gateway.log         # LaunchAgent mode
-    └── gateway-child.log   # menu-bar app child process
-```
-
-Older flat layouts (and the pre-rename `~/.evolve`) are migrated automatically on startup — files are moved into their category, never deleted; a conflicting file is kept aside with a `.old-<ts>` suffix.
-
-### Connect your agents
-
-**opencode** (`~/.config/opencode/opencode.jsonc`):
-
-```jsonc
+// ~/.config/opencode/opencode.jsonc
 {
   "provider": {
     "evo-router": {
       "npm": "@ai-sdk/openai-compatible",
       "options": { "baseURL": "http://127.0.0.1:8787/v1" },
-      "models": {
-        "auto": {
-          "name": "Auto (smart routing)",
-          "attachment": true,
-          "reasoning": true,
-          "tool_call": true
-        }
-      }
+      "models": { "auto": { "name": "Auto (smart routing)" } }
     }
   }
 }
 ```
 
-**Claude Code:**
+OpenAI-compatible clients use `http://127.0.0.1:8787/v1` with model `auto`; Claude Code and other Anthropic clients use `http://127.0.0.1:8787` as the Anthropic base URL (bidirectional streaming translation is built in). `codex`, `pi`, `openclaw`, `hermes` and `dsh` are discovered automatically — their providers, keys and models are read from their own config files, so you usually have **nothing to configure**.
 
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
-export ANTHROPIC_MODEL=auto
-claude
+## How a request is routed
+
+```
+request ─▶ digest signals ─▶ session stickiness (device-cache aware)
+        ─▶ judge slot chain (decision model, + rule second opinion)
+        ─▶ difficulty calibration (rolling quantiles → 70/20/10)
+        ─▶ hard filters (context window · vision · circuit breaking · quota · active set · price tier)
+        ─▶ dynamic weights (difficulty-linked × quota-aware) × tier ratio controller
+        ─▶ five-factor score (quality · speed · cost · reliability · headroom) × flywheel bias × user weight
+        ─▶ Thompson exploration (Beta posterior — uncertainty-driven)
+        ─▶ winner queue → upstream, failing over on error *and* on poor quality
+        ─▶ observe outcome → flywheel (reliability · bias · calibration) + ratio observation
 ```
 
-**Any OpenAI-compatible client:** base URL `http://127.0.0.1:8787/v1`, model `auto`.
-
-### Run as a service (macOS LaunchAgent)
-
-```bash
-evo-router service install   # also: start / stop / restart / status
-```
-
-
-### macOS menu bar — real-time status at a glance
-
-On macOS, EvolveRouter lives in your **menu bar** as a native SwiftUI panel. The brand badge itself is a live status indicator with five states:
-
-| State | Meaning |
+| Step | What it does |
 |---|---|
-| Colored disc, white ER | Running, idle |
-| **Soft green ER + breathing** | Routing in progress |
-| **Soft yellow ER** | Last request failed (until the next request starts) |
-| White disc, knocked-out ER | Gateway stopped |
-| Gray + breathing | Gateway starting |
+| **Judge** | A pluggable **decision model** reads the request (domain, difficulty, vision need, triviality, tool density, stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion). If the decision model is unreachable the rules take over — **a decision-model outage never blocks routing** |
+| **Difficulty calibration** | Rolling-quantile calibration reshapes the judge's raw difficulty onto the 7:2:1 target, so a biased judge cannot flood the router with "hard" tasks |
+| **Hard filters** | Context window, vision capability, provider/endpoint circuit breakers, per-model quota, the active set, and the price-tier gate |
+| **Dynamic weights** | Difficulty-linked (easy → cost matters 2×, quality 0.75×; hard → the reverse) and quota-aware ([BaRP](https://arxiv.org/abs/2510.07429) Eq.1) |
+| **Five-factor score** | Quality · speed · cost · reliability · headroom. Cost is an *effective* cost: official price sheets, per-plan credit multipliers, cache-hit vs miss (~1/50), peak/off-peak windows. Reliability blends long-term 50 % / last-30 30 % / last-10 20 % |
+| **Exploration** | Beta posterior per model with the judge's quality as prior mean; Thompson sampling explores sample-poor models and converges on sample-rich ones |
+| **Winner queue** | The ranked chain is tried in order — a failure (or a *poor-quality* response: degenerate, empty, broken tool calls) escalates to the next candidate; the last-resort sweep covers out-of-chain models |
+| **Flywheel** | Four feedback layers (transport success, tool-call syntax, session-confirmed semantic loops, plugin-reported outcomes) are two-stage normalized and learned relative to the cross-model median |
 
-The panel streams live decisions, per-provider 5-hour quotas, cache-hit rates, tok/s, TTFT, cooldown countdowns with causes, and one-tap wiring-config copy — all without opening the dashboard.
+Strategy parameters are versioned and must pass `evo-router backtest` (replay on real production events, judged by Performance-Gap-Recovered) before adoption. Every learned quantity is clamped (bias ∈ [0.7, 1.3], distillation shift ≤ 0.15).
 
-The header answers "who is judging, and is it working": line 1 is the gateway state (`Running · 8787`) plus the version, line 2 is the sync time plus **`judged by decision model + rules`** / **`judged by rules only`** — the *configured* judge path, not the last request's outcome. When a configured decision model is not working, an orange banner says why (`Decision model unreachable (timeout)` / `(auth failed (401/403))` / `not configured` / `applying`). The controls row carries **Stop/Start**, a labelled **Restart** (applies `[server]` / `[policy]` / `models` changes) and Quit; the Providers card is a **top-6-by-usage** snapshot of the chosen window (the dashboard shows the full management list).
+### Price-aware layers
 
-Every request and every model row is **tagged with the decision itself**, rendered from the same server-derived values the dashboard uses:
+| Layer | What it does |
+|---|---|
+| **Model tags** (capability / price) | Auto-derived by quantile (70/20/10 in both dimensions) over the **currently usable pool** only — cooling, quota-gated and keyless models are excluded dynamically; user-editable in the dashboard, and locked by contract tests |
+| **Price-tier gate** | L1 tasks may use `cheap` models only, L2 opens `medium`, L3 everything — with an **inversion exception** (a pricier model whose effective cost ≤ the allowed pool's median passes) and a quality-first relaxation (the gate yields before quality does) |
+| **Ratio controller** | Watches the actual chosen-tier mix and nudges it back toward 7:2:1 |
+| **Active set** | Only the newest-released (20-slot floor by release date) plus recently-used (14 days) models are routable; everything else stays visible and one click away |
+| **Supply awareness** | Subscription quota (it expires!) ranks above pay-as-you-go spend. API-queryable providers refresh through a 90 s quota watchdog; others are probed with real requests every 5–10 min |
+
+## Decision model (optional)
+
+Routing works without one — the built-in rule judge is fully functional. To add one, declare slots in the config file; that is the only place they are read from (a gateway started by the menu-bar app at login has no shell environment, so environment-only configuration would silently degrade to rules):
+
+```jsonc
+// ~/.evo-router/evo-router-config.jsonc
+"decision": {
+  "backend": "decision_model",     // decision_model = model + rules fusion · auto = model only · heuristic = rules only
+  "judge_timeout_ms": 12000,       // default 3000 — raise it for internet relays
+  "slots": [
+    { "kind": "jev", "api_key": "<key>" },                                    // JEV cloud (native contract)
+    { "kind": "jev",                                                           // StartLux-Decision 27B via Bamboo Relay
+      "base_url": "https://api.bamboonode.dev/v1/systemone",
+      "model": "startlux-decision-27b-autothink",
+      "think_mode": "never",         // one pass — fastest; AutoThink otherwise reasons when unsure
+      "api_key": "<bamboo-key>" },
+    { "kind": "laya", "base_url": "http://127.0.0.1:8321/v1/judge" },          // local sidecar (scripts/laya_server.py)
+    { "kind": "openai", "base_url": "http://127.0.0.1:11434/v1",               // any OpenAI-compatible endpoint
+      "model": "<model-id>" }
+  ]
+}
+```
+
+- **Priority** jev > laya > openai; the first usable slot wins, and `protocol` / `think_mode` / `api_key_env` are optional per slot.
+- **Fatal errors** (auth, 404, unreachable) blacklist a slot for the process lifetime. **Transient errors** (timeout, 5xx, unparseable) retry on the next request, then back off exponentially (30 s → 10 min) so no request pays the same timeout twice in a row; **one success clears everything**.
+- **Status is honest**: `GET /api/live` reports `decision.status` = `ok` · `degraded` (slots configured but the last judge fell back to rules — `last_fail` names the cause, e.g. `timeout` or `auth failed (401/403)`) · `stale` (configured, not applied yet) · `missing` (nothing configured), plus `last_judge`, `consecutive_fails` and `retry_in_ms`.
+- Editing `decision` (and `providers`) **hot-reloads in ~5 s** — no restart, or `POST /api/reload` to force it.
+
+## Request tags
+
+Every request and every model row carries the decision itself, rendered from one server-side derivation (`decision_tags.rs`) that both the dashboard and the panel read — the vocabulary and thresholds exist exactly once:
 
 | Category | Values | What it answers |
 |---|---|---|
-| `difficulty` | easy / medium / hard | how hard the gateway judged this request (drives the quality floor and cost weight) |
+| `difficulty` | easy / medium / hard | how hard the gateway judged this request (drives quality floor and cost weight) |
 | `domain` | code / math / data / agent / writing / lookup / chat | which capability tiers the request is scored against |
 | `flags` | trivial / tools / vision / stakes | request traits the judge flagged (thresholds match the routing gates) |
 | `fit` | match / over / under | task difficulty ↔ chosen model's capability tier |
 | `mode` | model / model+rules / reused / rules / pinned | who decided the route — the last three skipped the decision model |
 | `capability` · `price` | basic / standard / powerful · cheap / medium / premium | the chosen model's tier (Model tab) |
 
-Top metrics switch between **today** and **yesterday** (calendar windows, persisted in hourly buckets), and the Providers card toggles between provider and per-model views.
+Request-side tags live on the request rows; model-side tags live in the Model list. Placeholder judgments are suppressed: on a reused (`sticky`) or pinned turn the row shows `mode` only, never a difficulty that was not actually judged.
 
-### Everyday use (macOS)
+## macOS menu-bar panel
 
-| What | How |
+The panel is a native SwiftUI app; the badge itself is the status light (idle / routing / last request failed / stopped / starting).
+
+| Area | What it shows |
 |---|---|
-| Status & controls | click the **ER** badge → panel: **Stop/Start**, **Restart** (applies non-hot-reloadable config), Quit, autostart |
-| Full data view | <http://127.0.0.1:8787/> |
-| Point an agent here | `http://127.0.0.1:8787/v1`, model `auto` |
-| Edit settings | `~/.evo-router/evo-router-config.jsonc` — `decision` / `providers` hot-reload in ~5 s (`POST /api/reload` to force), everything else needs **Restart** |
-| Logs & data | `~/.evo-router/logs/` · `~/.evo-router/events/` · `~/.evo-router/state/` |
-| Health | `curl -s localhost:8787/healthz` · `curl -s localhost:8787/api/live` · `evo-router doctor` |
+| Header | gateway state (`Running · 8787`) + version · clock + `judged by decision model + rules` / `judged by rules only` (**configured** path, not the last request's outcome) |
+| Banner | the *why* when something is off: `Decision model not configured` · `Decision model unreachable (timeout) · retrying in 26s` · `configured — applying` |
+| Metrics | requests / success rate / tokens for **today** or **yesterday** (calendar windows, persisted in hourly buckets) |
+| Providers card | a top-6-by-usage snapshot with proportional quota bars, cooldown countdowns, PAYG balances; toggles between provider and per-model views |
+| Recent requests | the last few decisions with the tags above; `<N> in flight` on the title line lists what is being generated right now |
+| Controls | GitHub · Dashboard · **Stop/Start** · **Restart** · Quit · autostart |
 
-Full walkthrough: **[docs/QUICKSTART-macos.md](docs/QUICKSTART-macos.md)**.
+**Restarts are graceful.** SIGINT/SIGTERM stops accepting new requests, lets in-flight ones (including live SSE streams) finish — up to a 60 s cap for a stuck upstream, which is logged — flushes the flywheel, then exits. Restarting never truncates a running generation; if requests are in flight, the panel asks for confirmation first. Never `kill -9` a gateway you want to keep clean.
 
-![EvolveRouter macOS menu bar panel — light & dark](docs/assets/panel.png)
+## Dashboard
 
+`http://127.0.0.1:8787/` — zero build, same data as the panel, wider:
 
-## The dashboard
-
-Open `http://127.0.0.1:8787/`:
-
-![EvolveRouter dashboard](docs/assets/dashboard.png)
-
-- **Live decision stream** — every request with its 8-signal judgment, chosen model, and a plain-language reason
-- **Scoring matrix** — top candidates with per-factor scores (quality / speed / cost / reliability / headroom)
-- **Fallback chains** — which models were tried, which failed, and exactly why
+- **Live decision stream** — every request with its judgment, chosen model, tags and a plain-language reason
+- **Decision autopsy** — click a row to see the 8-signal judgment, dual-judge source, candidate funnel, scoring matrix, regret, fallback hops with per-hop causes, and the exploration gate as it actually evaluated
 - **Latency waterfall** — preprocess / decision / TTFT / streaming, per request
-- **Provider management** — add/edit/scan providers, tier allowances (5h/week/month), live provider-reported quotas, one-click reconciliation
-- **Flywheel card** — learned bias, observed reliability, calibration, semantic confirmations per model
+- **Providers** — add, edit, scan; tier allowances (5h/week/month); provider-reported quotas with one-click reconciliation; **provenance per provider** (`user` / `discovered` + the config file it came from)
+- **Plans, trends, flywheel** — per-plan usage, model trends, learned bias / reliability / calibration
+- **Benchmarks** — leaderboard-derived tier overlay (LMArena and friends) with review reminders
 
+## Configuration
 
-## How routing decisions work
+One canonical file: **`~/.evo-router/evo-router-config.jsonc`** — JSONC (JSON with comments), so the file documents itself. `evo-router-config.json` is the comment-free variant. Older names (`evo-router.toml`, `evo-router.jsonc`, `evo-router.json`, `evolve.toml`) are still read and **converted on startup**, the original kept as `*.migrated`.
+
+| Section | Takes effect |
+|---|---|
+| `decision` (slots, timeout, think_mode) and `providers` | **hot-reloaded in ~5 s**; `POST /api/reload` forces it |
+| `server`, `policy`, `models`, `discovery`, `data`, … | restart the gateway (panel **Restart**, `launchctl kickstart -k gui/$UID/ai.evolve-router.gateway`, or Ctrl-C + `evo-router serve`) |
+
+`GET /api/live` reports the truth so you never guess:
+
+```json
+{
+  "version": "0.1.9",
+  "inflight": 1,
+  "inflight_detail": [{ "model": "zhipuai-coding-plan/glm-5.3", "session": "…", "age_ms": 42000 }],
+  "config":   { "reloaded_at_ms": 1792140000000, "restart_required": false,
+                "path": "~/.evo-router/evo-router-config.jsonc", "active_slots": ["jev"] },
+  "decision": { "backend": "decision_model", "status": "ok",
+                "last_judge": "decision_model+rules", "last_model_used": true,
+                "last_fail": null, "consecutive_fails": 0, "retry_in_ms": 0 }
+}
+```
+
+### Where provider credentials come from
+
+| Source | Contains | When |
+|---|---|---|
+| Agent configs (`~/.config/opencode/opencode.jsonc`, `~/.codex/config.toml`, …) | base_url + api_key | read at startup, **never copied** into our files |
+| `~/.evo-router/state/overrides.json` | providers you added or edited in the panel / dashboard | written by the UI, replayed at startup |
+| `providers` / `models` in the config | explicit declarations — `api_key_env` (env var name) or **inline `api_key`** (chmod 600) | config wins over overrides, which wins over discovery |
+
+Priority is **config → overrides → discovery**, deduplicated inside the gateway on `base_url + api_key` (so one account listed twice is still one provider), and every row carries its provenance: `origin` (`user` / `discovered` / `builtin`) plus `source_path` (e.g. `opencode @ ~/.config/opencode/opencode.jsonc (OpenCode Go-github)` — two accounts on one endpoint stay distinguishable).
+
+`POST /api/config/export` writes the live merged list (keys included, with provenance) back into the config file, after which the file alone reproduces your setup.
+
+### Data layout
 
 ```
-request → digest signals → session stickiness check (+ cache-economy keep)
-        → judge slot chain (JEV > LAYA > OPENAI, + multilingual heuristic)
-        → difficulty calibration (rolling quantiles → 70/20/10)
-        → route advisor (top-8 candidates, anonymized, decision model picks one directly)
-        → hard filters (context window / vision / circuit breaking / quota gate /
-                        active set of 50 / price-tier gate)
-        → dynamic weights (difficulty-linked × quota-aware) × ratio-controller tier multipliers
-        → five-factor score (effective cost = official prices × cache-hit × peak windows) × flywheel bias
-        → Thompson exploration (Beta posterior sampling — uncertainty-driven)
-        → route → fallback chain (3) → quality cascade
-        → observe outcome → feed the flywheel (+ ratio observation)
+~/.evo-router/
+├── evo-router-config.jsonc   the config (the only file you edit)
+├── events/events.jsonl       append-only decision log (replay · stats · backtest), 32 MB rotation
+├── state/                    snapshot · distilled cards · overrides · benchmark & catalog caches
+└── logs/                     gateway-child.log (menu-bar) · gateway.log (LaunchAgent)
 ```
 
-Self-evolution is grounded in recent routing research, adopted critically:
-two-stage reward normalization & Bayesian exploration ([BayesianRouter][br],
-cross-domain), baseline-relative bias updates & quota-aware preference
-([BaRP][barp]), quality-triggered cascade ([FrugalGPT][fgpt] — the
-strongest-endorsed work in this list, 1300+ citations), replay-validated
-strategy changes ([MERA][mera]), and capability-card distillation
-([FlyRoute][flyroute]). The flywheel only fine-tunes — every learned quantity
-is clamped (bias ∈ [0.7, 1.3], cascade thresholds per chain position, distill
-shift ≤ 0.15) and every strategy change must pass `evo-router backtest` on
-replayed production traffic before adoption.
+Older flat layouts and the pre-rename `~/.evolve` migrate automatically on startup — files are moved, never deleted; conflicts are kept aside as `*.old-<ts>`.
+
+## Operations
 
 ```bash
-evo-router backtest              # A/B replay two strategy params on events.jsonl (PGR verdict)
+curl -s localhost:8787/healthz                              # ok
+curl -s localhost:8787/api/live | python3 -m json.tool      # version · judge · slots · inflight · restart_required
+curl -sX POST localhost:8787/api/reload                     # apply decision/providers now
+curl -sX POST localhost:8787/api/config/export              # materialise the provider list into the config
+evo-router doctor                                           # config + catalog + credentials sanity check
+evo-router backtest                                         # A/B replay of strategy params on real events (PGR verdict)
+evo-router service install                                  # LaunchAgent: start / stop / restart / status
 ```
+
+Every response also carries `x-ev-model`, `x-ev-reason`, `x-ev-decision-id`, `x-ev-est-tokens`, `x-ev-sticky` and `x-ev-skipped` headers; `x-ev-session` and `x-ev-policy` steer stickiness and profile per request, `x-ev-no-cache` bypasses the completion cache.
+
+## Why not another proxy
+
+| | EvolveRouter | LiteLLM / OpenRouter | RouteLLM |
+|---|---|---|---|
+| **Routing decision** | a decision model judges *every request* (8 signals) + rule second opinion, fail-open | config/prefix rules, or an offline-trained router | offline-trained router models |
+| **Self-evolution** | flywheel: 4 feedback layers rewrite per-model bias & reliability | static weights | static after training |
+| **Subscription economics** | per-plan credit multipliers, tier allowances (5h/week/month), quota protection (soft-deprioritize → sticky-break → hard-filter) | cost tracking only | – |
+| **Failure handling** | key pools → per-provider/endpoint circuit breaking → winner queue → out-of-chain sweep | retries | – |
+| **Protocol** | OpenAI ↔ Anthropic bidirectional translation, streaming included | OpenAI-centric | OpenAI |
+| **Multi-agent** | native identity for opencode / codex / claude-code / pi / openclaw / hermes / dsh, session-aware stickiness | generic | generic |
+| **Deployment** | one Rust binary (~7 MB), zero deps, no Docker, no DB | Python + DB | Python |
+
+## Managed plans
+
+| Plan | Vendor | Kind | Pricing model | Tiers | Windows |
+|---|---|---|---|---|---|
+| `zhipu-coding` | zhipu (bigmodel.cn) | Coding Plan | credits, off-peak 50 % | lite / pro / max | 5h · week · month |
+| `zai-devpack` | Z.ai | Coding Plan | credits | lite / pro / max | 5h · week · month |
+| `opencode-go` | opencode zen | Go Plan | $/1M per model + per-model monthly cap | go / go-plus | month (5h = 20 %) |
+| `volces-coding` | volces | Coding Plan | AFP credits | lite / pro | 5h · week · month |
+| `volces-agent` | volces | Agent Plan | AFP credits | — | 5h · week · month |
+| `minimax-coding` | MiniMax | Coding Plan | credits | lite / pro / max | 5h · week · month |
+| pay-as-you-go | any OpenAI / Anthropic | API | $ per token | — | — |
+
+Plans are detected from base URLs; every window is tracked with provider-truth quota headers where the vendor reports them.
+
+## Development
+
+```bash
+cargo build --release
+cargo test          # 225 tests, run from the workspace root
+cargo clippy        # zero-warning policy
+```
+
+| Crate | Role |
+|---|---|
+| `evolve-core` | decision engine, scoring, catalog, plan registry, config, thresholds, capability-card distillation |
+| `evolve-decision` | decision-model backends (cloud / self-hosted / laya / heuristic), slot chain, route advisor |
+| `evolve-discovery` | agent config scanning, remote `/models` fetching, models.dev & leaderboard enrichment |
+| `evolve-memory` | flywheel, hourly buckets, quota ledger, health registry, session store, event log, strategy & backtest |
+| `evolve-server` | axum gateway, OpenAI/Anthropic relay, dashboard, provider APIs, CLI (`evo-router`) |
+| `apps/tray` | macOS menu-bar panel (SwiftUI) + panel preview harness |
+
+Deep dives: [Architecture](docs/ARCHITECTURE.md) · [Decision flow](docs/DECISION-FLOW.md) · [Scoring factors](docs/FACTORS.md) · [macOS quick start](docs/QUICKSTART-macos.md) · [Papers](docs/reference.md) *(Chinese; English translation welcome)*
+
+Research the design borrows from, critically: two-stage reward normalization and Bayesian exploration ([BayesianRouter][br]), baseline-relative bias updates and quota-aware preference ([BaRP][barp]), quality-triggered cascades ([FrugalGPT][fgpt]), replay-validated strategy changes ([MERA][mera]), capability-card distillation ([FlyRoute][flyroute]).
 
 [br]: https://arxiv.org/abs/2510.02850
 [barp]: https://arxiv.org/abs/2510.07429
 [fgpt]: https://arxiv.org/abs/2305.05176
 [mera]: https://arxiv.org/abs/2608.10333
 [flyroute]: https://arxiv.org/abs/2605.22057
-
-Deep dives: [Architecture](docs/ARCHITECTURE.md) · [Decision flow](docs/DECISION-FLOW.md) · [Scoring factors](docs/FACTORS.md) · [Papers](docs/reference.md) *(Chinese, English translation welcome)*
-
-
-## Development
-
-```bash
-cargo build --release
-cargo test          # 220 tests
-cargo clippy        # zero warnings policy
-```
-
-Workspace layout:
-
-| Crate | Role |
-|---|---|
-| `evolve-core` | Decision engine, scoring, catalog, plan registry, config, distillation |
-| `evolve-decision` | Decision-model backends (cloud or self-hosted, laya, heuristic) + route advisor |
-| `evolve-discovery` | Agent config scanning, remote /models fetching, models.dev enrichment |
-| `evolve-memory` | Flywheel, quota ledger, health registry, session store, event log, strategy & backtest |
-| `evolve-server` | Axum gateway, relay, dashboard, provider APIs, CLI (binary: `evo-router`) |
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
 
 ## License
 

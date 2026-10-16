@@ -73,7 +73,7 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = []) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = [], tier: String = "", modelCount: Int = 0) {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.planKind = planKind
@@ -85,6 +85,8 @@ public struct ProviderRow: Identifiable {
         self.quotaSource = quotaSource
         self.mergedFrom = mergedFrom
         self.blockedModels = blockedModels
+        self.tier = tier
+        self.modelCount = modelCount
     }
     public let key: String
     public let enabled: Bool
@@ -101,6 +103,10 @@ public struct ProviderRow: Identifiable {
     public let blockedModels: [String]
     public let pct: Int?
     public let planKind: String
+    /// 方案档位（lite/pro/max/go…）——"按档位管理 provider"的展示依据
+    public let tier: String
+    /// 该 provider 当前可用模型数（来自 /models 拉取；0 = 未拉取/未暴露）
+    public let modelCount: Int
     public let tokensWin: Int
     public let avgTtftMs: Int?
     public let avgRate: Double?
@@ -342,6 +348,15 @@ public final class AppState: ObservableObject {
                 let quotaReset = (binding?["reset_epoch_ms"] as? Double)
                     .map { Date(timeIntervalSince1970: $0 / 1000) }
                 let mergedKeys = ((p["merged_from"] as? [Any])?.compactMap { $0 as? String }) ?? [key]
+                let tier = (p["tier"] as? String) ?? ""
+                let modelCount: Int = {
+                    if let n = p["model_count"] as? Int { return n }
+                    if let fm = p["fetched_models"] as? [String] { return fm.count }
+                    if let fm = p["fetched_models"] as? String {
+                        return fm.split(separator: ",").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+                    }
+                    return 0
+                }()
                 rows.append(ProviderRow(key: key, enabled: !disabled, available: available,
                                         cooldownUntil: cooldownUntil, cooldownCause: cooldownCause, pct: usedPct,
                                         planKind: kind,
@@ -351,7 +366,9 @@ public final class AppState: ObservableObject {
                                         cooldownModel: cooldownModel,
                                         quotaSource: (p["quota_source"] as? String) ?? "",
                                         blockedModels: blockedModels,
-                                        mergedFrom: mergedKeys))
+                                        mergedFrom: mergedKeys,
+                                        tier: tier,
+                                        modelCount: modelCount))
             }
         }
         // per-provider 5h 指标：stats 的 model key 形如 "provider/model"，按前缀聚合
@@ -393,6 +410,7 @@ public final class AppState: ObservableObject {
             guard let e else { return r }
             let cachePct: Int? = e.promptSum > 0 ? Int(round(100.0 * Double(e.cacheSum) / Double(e.promptSum))) : nil
             // 配额/冷却等派生量已在服务端算好（见上），此处只叠加 /api/stats 的指标
+            // ⚠ 具名参数也必须按声明顺序（Swift 位置化解析）——新增字段一律放末尾
             return ProviderRow(key: r.key, enabled: r.enabled, available: r.available,
                                cooldownUntil: r.cooldownUntil, cooldownCause: r.cooldownCause,
                                pct: r.pct, planKind: r.planKind,
@@ -405,7 +423,9 @@ public final class AppState: ObservableObject {
                                quotaExhausted: r.quotaExhausted, quotaReset: r.quotaReset,
                                cooldownModel: r.cooldownModel,
                                quotaSource: r.quotaSource,
-                               blockedModels: r.blockedModels)
+                               blockedModels: r.blockedModels,
+                               mergedFrom: r.mergedFrom,
+                               tier: r.tier, modelCount: r.modelCount)
         }
         // 按**当前窗口的 token 用量降序**（用户裁决）——须在窗口指标聚合后排序
         // （此前用 24h 累计字段、且在聚合前排，与面板显示口径不一致）；

@@ -1314,6 +1314,15 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             },
             "model_rates": pd.model_rates,
             "fetched_models": pd.fetched_models,
+            // 端点级模型数（同 base_url 的目录模型 ∪ 已拉取清单）：同端点两账号显示一致，
+            // 避免孪生账号显示 0 个模型（模型清单属于端点，不属于账号）
+            "model_count": snap_all
+                .iter()
+                .filter(|m| m.base_url == pd.base_url)
+                .map(|m| m.id.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                .max(pd.fetched_models.len()),
             "observed": observed_for_provider(&st.quota, key, now_ms),
             "has_key": pd.api_key.is_some(),
             "key_fp": pd.api_key.as_deref().map(key_fp).unwrap_or_default(),
@@ -1383,6 +1392,14 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             .filter_map(|(_, h)| h.until_epoch_ms.filter(|u| *u > now_ms))
             .min();
         let model_ids: Vec<&str> = models_at_url.iter().map(|mm| mm.id.as_str()).collect();
+        // 模型清单属于**端点**（同 base_url 的两个账号看到同一批模型）：
+        // "拉取模型列表"展示端点级数量，账号级归属仍看 `models`（用量/冷却按账号算）
+        let endpoint_model_count = snap_all
+            .iter()
+            .filter(|x| x.base_url == m.base_url)
+            .map(|x| x.id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
         out.push(json!({
             "key": m.provider.clone(), "source": "discovered",
             // provider 来源（用户要求可追溯）：user（配置/面板）| discovered（agent 配置 + 路径）
@@ -1401,7 +1418,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             },
             "model_rates": profile.map(|p| p.model_rates).unwrap_or(""),
             "observed": observed_for_provider(&st.quota, &m.provider, now_ms),
-            "model_count": model_ids.len(),
+            "model_count": endpoint_model_count.max(model_ids.len()),
             "models": model_ids,
             "has_key": m.has_credential(),
             "key_fp": m.key_values().first().map(|k| key_fp(k)).unwrap_or_default(),

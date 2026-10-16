@@ -47,6 +47,7 @@ let T: [String: String] = [
     "dm_retrying_now": "retrying on the next request",
     "dm_degraded_hint": "Check the slot endpoint / api_key in evo-router-config.jsonc (details: ~/.evo-router/logs/gateway-child.log)",
     "top6_by_usage": "top 6 by usage",
+    "providers_duty": "plan tier · fetched model list · probed quota · assigned to routing",
     "restart": "Restart",
     "inflight_n": "%d in flight",
     "inflight_hint": "requests being processed right now (streams included) — the tooltip lists model and age",

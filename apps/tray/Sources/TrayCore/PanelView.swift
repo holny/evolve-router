@@ -172,6 +172,17 @@ public struct PanelView: View {
         return s
     }
 
+    /// 配额信息源短词（"探测配额"的可见证据）：official（官方 API/响应头）→ obs
+    /// official_headers → hdr；estimated（网关推算）→ est
+    static func quotaSourceLabel(_ src: String) -> String {
+        switch src {
+        case "official": return "quota obs"
+        case "official_headers": return "quota hdr"
+        case "estimated": return "quota est"
+        default: return "quota \(src)"
+        }
+    }
+
     /// 是否配置了决策模型（头行用它决定配色；判定路径文案见 judgeLabel）
     private var configuredJudge: Bool {
         !state.activeSlots.isEmpty && state.decisionBackend.lowercased() != "heuristic"
@@ -410,6 +421,12 @@ public struct PanelView: View {
                 Spacer(minLength: 0)
                 dimTabs
             }
+            // 这张卡在管什么（用户裁决）：按档位管理 → 拉模型清单 → 探测配额 → 参与路由分配
+            Text(t("providers_duty"))
+                .font(.system(size: 8.5))
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             if state.modelDim {
                 ForEach(state.modelRows) { m in
                     modelRow(m)
@@ -511,14 +528,34 @@ public struct PanelView: View {
                 .fill(p.enabled ? (p.available && !p.quotaExhausted ? Color.green : Color.orange) : Color.gray)
                 .frame(width: 5, height: 5)
             VStack(alignment: .leading, spacing: 1) {
-                Text(p.key)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(p.key)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                    if !p.tier.isEmpty, p.tier != "-" {
+                        Text(p.tier)
+                            .font(.system(size: 8.5, weight: .medium))
+                            .padding(.horizontal, 4).padding(.vertical, 0.5)
+                            .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                            .foregroundStyle(.secondary)
+                    }
+                    if p.modelCount > 0 {
+                        Text("\(p.modelCount) models")
+                            .font(.system(size: 8.5))
+                            .foregroundStyle(.quaternary)
+                    }
+                }
                 HStack(spacing: 5) {
                     if !p.enabled {
                         Text(t("disabled"))
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
+                    }
+                    if !p.quotaSource.isEmpty {
+                        Text(Self.quotaSourceLabel(p.quotaSource))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.quaternary)
                     }
                     if p.tokensWin > 0 {
                         Text(AppState.fmtTok(p.tokensWin))
