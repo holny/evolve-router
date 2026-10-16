@@ -222,6 +222,31 @@ pub fn any_slot_configured(cfg: &[DecisionSlotCfg]) -> bool {
     !build_slots(cfg).is_empty()
 }
 
+/// 带显式协议的槽位构造：`protocol` 非空时覆盖 URL 判别
+pub fn slot_from_with_protocol(
+    kind: SlotKind,
+    base: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    protocol: Option<String>,
+) -> Option<SlotImpl> {
+    let explicit = protocol.map(|p| p.trim().to_lowercase()).filter(|p| !p.is_empty());
+    let kind = match explicit.as_deref() {
+        // 显式 openai → 按 OPENAI 槽的规则构造（base + model 必填）
+        Some(p) if p.contains("openai") || p.contains("chat") => SlotKind::OpenAI,
+        _ => kind,
+    };
+    let imp = slot_from(kind, base.clone(), api_key.clone(), model.clone())?;
+    match explicit.as_deref() {
+        // 显式原生契约：即使 kind 是 OpenAI 也强制走 SystemOne 形状
+        Some(p) if p.contains("system") || p.contains("decision") => match imp {
+            SlotImpl::Model(b) => Some(SlotImpl::Model(b.with_systemone_protocol())),
+            other => Some(other),
+        },
+        _ => Some(imp),
+    }
+}
+
 /// 纯函数：槽位配置规则（测试友好；build_slots 只读 env 后调用）
 pub fn slot_from(kind: SlotKind, base: Option<String>, api_key: Option<String>, model: Option<String>) -> Option<SlotImpl> {
     let base = base.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
@@ -275,7 +300,15 @@ pub fn build_slots(cfg: &[DecisionSlotCfg]) -> Vec<ChainSlot> {
             },
             _ => None,
         };
-        match slot_from(kind, entry.base_url.clone(), key, entry.model.clone()) {
+        // protocol 显式指定时优先（原生契约端点未必带 "systemone" 字样，
+        // 如 StartLux / Bamboo 的 /v1/decisions）
+        match slot_from_with_protocol(
+            kind,
+            entry.base_url.clone(),
+            key,
+            entry.model.clone(),
+            entry.protocol.clone(),
+        ) {
             Some(imp) => out.push(ChainSlot { kind, imp }),
             None => tracing::warn!(
                 slot = kind.label(),
@@ -298,6 +331,7 @@ mod slot_config_tests {
             api_key_env: key_env.map(String::from),
             base_url: base.map(String::from),
             model: model.map(String::from),
+            protocol: None,
         }
     }
 
@@ -346,6 +380,55 @@ mod slot_config_tests {
         assert_eq!(slots[0].kind, SlotKind::Jev);
         assert!(any_slot_configured(&[cfg("jev", Some("k"), None, None, None)]));
         assert!(!any_slot_configured(&[]));
+    }
+
+    #[test]
+    fn startlux_decisions_endpoint_is_systemone() {
+        use crate::decision_backend::DecisionProtocol;
+        // StartLux / Bamboo 的原生路径（不带 systemone 字样）也必须判为原生契约
+        let slots = build_slots(&[DecisionCfgHelper::jev_decisions()]);
+        assert_eq!(slots.len(), 1);
+        match &slots[0].imp {
+            SlotImpl::Model(b) => {
+                assert_eq!(b.protocol, DecisionProtocol::SystemOne, "…/v1/decisions must be native");
+                assert_eq!(b.endpoint, "https://api.bamboonode.dev/v1/decisions");
+                assert_eq!(b.model, "startlux-decision-27b-autothink");
+            }
+            _ => panic!("expected model slot"),
+        }
+    }
+
+    #[test]
+    fn explicit_protocol_overrides_url_guess() {
+        use crate::decision_backend::DecisionProtocol;
+        // 路径不含 systemone/decisions，但显式 protocol = "system-one" → 仍走原生契约
+        let cfg = DecisionSlotCfg {
+            kind: "jev".into(),
+            api_key: Some("k".into()),
+            base_url: Some("http://127.0.0.1:8090/api".into()),
+            model: None,
+            protocol: Some("system-one".into()),
+            api_key_env: None,
+        };
+        match &build_slots(&[cfg])[0].imp {
+            SlotImpl::Model(b) => assert_eq!(b.protocol, DecisionProtocol::SystemOne),
+            _ => panic!("expected model slot"),
+        }
+    }
+}
+
+/// 测试用构造 helper（StartLux / Bamboo 决策端点）
+struct DecisionCfgHelper;
+impl DecisionCfgHelper {
+    fn jev_decisions() -> DecisionSlotCfg {
+        DecisionSlotCfg {
+            kind: "jev".into(),
+            api_key: Some("bk-test".into()),
+            base_url: Some("https://api.bamboonode.dev/v1/decisions".into()),
+            model: Some("startlux-decision-27b-autothink".into()),
+            protocol: None,
+            api_key_env: None,
+        }
     }
 }
 

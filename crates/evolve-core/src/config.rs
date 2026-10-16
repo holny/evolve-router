@@ -74,6 +74,10 @@ pub struct DecisionSlotCfg {
     pub base_url: Option<String>,
     /// 模型名（openai 槽必填）
     pub model: Option<String>,
+    /// 协议显式指定：`system-one`（原生 {state,questions}→{answers}）/ `openai`（chat 兼容）/
+    /// 留空 = 按 base_url 自动判别。原生契约的第三方端点（如 StartLux / Bamboo 的
+    /// `/v1/decisions`）建议显式写死，别依赖路径猜测
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

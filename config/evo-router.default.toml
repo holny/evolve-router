@@ -22,6 +22,8 @@ redact = true
 # api_key_env = "TYPESAFE_API_KEY"   # or inline api_key = "..." (chmod 600 this file)
 # base_url = ""                # optional for the JEV cloud; required for laya/openai
 # model = ""                   # required for openai
+# protocol = "system-one"      # optional override: system-one | openai; omit to detect from the URL
+#                              # (native-contract third parties, e.g. StartLux / Bamboo /v1/decisions)
 
 [catalog]
 remote_fetch = false        # M3

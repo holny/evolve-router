@@ -224,17 +224,32 @@ impl DecisionModelBackend {
         b.ends_with("/judge")
     }
 
-    /// Jev 型端点识别：systemone / system-one / system_one（去分隔符归一化，大小写无关）
-    /// ——本地原生契约服务端点的常用路径命名都不落判别盲区。
-    /// 兜底：判错协议的调用失败一律自动降级 heuristic，用户也可用
-    /// DECISION_PROTOCOL 强制指定，因此误判只会表现为回退启发式而非阻塞。
+    /// 强制走原生 SystemOne 契约（槽位配置 `protocol = "system-one"` 时用）：
+    /// 端点路径不一定带 "systemone" 字样（如 StartLux / Bamboo 的 `/v1/decisions`）
+    pub fn with_systemone_protocol(mut self) -> Self {
+        self.protocol = DecisionProtocol::SystemOne;
+        self
+    }
+
+    /// 同上，强制走 OpenAI chat 兼容契约
+    pub fn with_openai_protocol(mut self) -> Self {
+        self.protocol = DecisionProtocol::OpenAIChat;
+        self
+    }
+
+    /// Jev 型端点识别（原生 `{state, questions}` → `{answers}` 契约）：
+    /// - `systemone / system-one / system_one`（去分隔符归一化，大小写无关）
+    /// - `…/decisions`（StartLux-Decision / Bamboo Relay 的路径，实测同契约同一形状；
+    ///   2026-10-16 接入 `api.bamboonode.dev/v1/decisions` 时发现漏判）
+    /// 兜底：判错协议的调用失败一律自动降级 heuristic，槽位配置还可用 `protocol` 显式指定，
+    /// 因此误判只会表现为回退启发式而非阻塞。
     pub fn is_systemone_style(base: &str) -> bool {
         let folded: String = base
             .to_lowercase()
             .chars()
             .filter(|c| *c != '-' && *c != '_')
             .collect();
-        folded.contains("systemone")
+        folded.contains("systemone") || folded.trim_end_matches('/').ends_with("/decisions")
     }
 
     /// w1 双协议统一咨询 → Result<Value, SlotFail>（w2 槽位链路需要失败分类）
@@ -638,6 +653,7 @@ impl DecisionModelBackend {
         let model = model_set.clone().unwrap_or_else(|| "jev-latest".into());
         let protocol = match protocol_hint.map(|p| p.to_lowercase()) {
             Some(ref p) if p.contains("openai") || p.contains("chat") => DecisionProtocol::OpenAIChat,
+            // 显式指定原生契约（槽位配置 protocol = "system-one"）——优先于 URL 猜测
             Some(ref p) if p.contains("system") => DecisionProtocol::SystemOne,
             // URL 形态：systemone/system-one/system_one（去分隔符归一化）→ 原生契约；
             // /judge 结尾 → Laya 型；其余 → OpenAI chat 兼容
