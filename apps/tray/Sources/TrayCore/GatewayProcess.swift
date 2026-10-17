@@ -9,11 +9,19 @@ public final class GatewayProcess: ObservableObject {
 
     /// true = 由本 app 启动并管理；false = 探测到外部实例（按钮只读）
     @Published public private(set) var owned = false
+    /// 用户显式 Stop 过（面板按钮）→ 周期自愈必须让路，否则 Stop 一秒内
+    /// 就被重新拉起（实测 bug 2026-10-17）。Start/成功 spawn 时清除
+    @Published public private(set) var userStopped = false
     @Published public private(set) var starting = false
 
     private var child: Process?
     private var spawnInFlight = false
     private var externalUntil: Date?
+
+    /// Start 按钮清除用户 Stop 意图（自愈恢复）
+    public func clearUserStopped() {
+        userStopped = false
+    }
 
     public var isChildAlive: Bool {
         guard let child, child.isRunning else { return false }
@@ -24,6 +32,7 @@ public final class GatewayProcess: ObservableObject {
     /// 一旦出现非健康 → spawnInFlight 抢占式接管 spawn。pollLive 每秒驱动、
     /// 无节流死锁（旧 lastAttempt 被每秒调用刷新，spawn 永不触发——实证修复）。
     public func ensureRunning() async {
+        if userStopped { return }
         if owned, child?.isRunning == true { return }
         if spawnInFlight { return }
         if let eu = externalUntil, Date() < eu { return }
@@ -72,6 +81,7 @@ public final class GatewayProcess: ObservableObject {
         }
         child = p
         owned = true
+        userStopped = false
         // 等网关就绪（最长 ~6s：绑定 + 目录初始化）
         for _ in 0..<12 {
             try? await Task.sleep(nanoseconds: 500_000_000)
@@ -92,6 +102,7 @@ public final class GatewayProcess: ObservableObject {
 
     /// 优雅停止：SIGTERM → 等 3s → SIGKILL；返回是否由本 app 管理并已停。
     public func stop() async {
+        userStopped = true
         guard owned, child?.isRunning == true, let proc = child else { return }
         proc.terminate()
         for _ in 0..<30 {
@@ -104,6 +115,7 @@ public final class GatewayProcess: ObservableObject {
         }
         child = nil
         owned = false
+        userStopped = true
     }
 
     /// Quit 时的兜底：本 app 实例可能不是网关的父进程（launchd RunAtLoad 直启
@@ -111,6 +123,7 @@ public final class GatewayProcess: ObservableObject {
     /// `evo-router serve` 发 SIGTERM（等 8s 排空，与网关自身的 drain 一致），
     /// 仍存活才 SIGKILL。找不到/已退出都是 no-op。
     public func stopGatewayWithSigterm() {
+        userStopped = true
         let out = Process()
         out.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         out.arguments = ["-f", "evo-router serve"]

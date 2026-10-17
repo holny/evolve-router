@@ -8,9 +8,10 @@ public struct PanelView: View {
     @State private var autostart = UserDefaults.standard.object(forKey: "ev-autostart") == nil
         ? true
         : UserDefaults.standard.bool(forKey: "ev-autostart")
-    @State private var showExitConfirm = false
     /// 有在飞请求时的重启确认（用户裁决：重启前提示在飞的流）
-    @State private var showInflightConfirm = false
+    /// ⚠ MenuBarExtra 里系统 confirmationDialog 的按钮 action 不触发（实测
+    /// 2026-10-17，与 .help() 同族失效；Quit 曾因此永远退不出）→ 确认流程
+    /// 用面板内嵌行实现，Apple 对话框一律不用
     @State private var pendingAction: (() -> Void)?
 
     /// 预览/截图模式：不触发首帧实时轮询，保证种子数据稳定渲染（README 图可复现）
@@ -33,6 +34,7 @@ public struct PanelView: View {
             if !state.providers.isEmpty { providersCard }
             if !state.recent.isEmpty { decisionsCard }
             controls
+            if pendingAction != nil { inflightConfirmBar }
         }
         // 页脚（控制区）与页头留白对齐：菜单栏窗口底部无系统内边距，
         // 与页头同值时按钮会贴住下边框（实测页头 15pt / 页脚 8pt）→ 页脚加宽
@@ -44,23 +46,6 @@ public struct PanelView: View {
             if previewSeed { return }
             await state.pollLive()
             await state.pollData()
-        }
-        .confirmationDialog(String(format: t("inflight_confirm_title"), state.inflight),
-                            isPresented: $showInflightConfirm, titleVisibility: .visible) {
-            Button(t("inflight_confirm_go"), role: .destructive) {
-                let a = pendingAction; pendingAction = nil; a?()
-            }
-            Button(t("cancel"), role: .cancel) { pendingAction = nil }
-        } message: {
-            Text(inflightSummary.isEmpty
-                 ? t("inflight_confirm_hint")
-                 : t("inflight_confirm_hint") + "\n\n" + inflightSummary)
-        }
-        .confirmationDialog(t("quit_confirm"), isPresented: $showExitConfirm, titleVisibility: .visible) {
-            Button(t("quit_action"), role: .destructive) { quitAll() }
-            Button(t("cancel"), role: .cancel) {}
-        } message: {
-            Text(t("quit_hint"))
         }
     }
 
@@ -795,7 +780,9 @@ public struct PanelView: View {
                     confirmIfInflight { Task { await restartGateway() } }
                 }
                 textChip(label: t("quit"), tint: .red, help: t("quit"), danger: true) {
-                    showExitConfirm = true
+                    // 不走 Apple 对话框（MenuBarExtra 内不可点）→ 直接退出；
+                    // 网关 SIGTERM 会等排空，不必前置在飞确认
+                    quitAll()
                 }
                 // Autostart 与上面三个按钮**同一行**：为此收紧内距/字号
                 // （tooltip 在 MenuBarExtra 里不触发 → 文字必须可见，不能只留开关）
@@ -1005,16 +992,56 @@ public struct PanelView: View {
     private func confirmIfInflight(_ action: @escaping () -> Void) {
         if state.inflight > 0 {
             pendingAction = action
-            showInflightConfirm = true
         } else {
             action()
         }
     }
 
+    /// 在飞确认行（面板内嵌，替代 MenuBarExtra 里不可用的 Apple 对话框）
+    private var inflightConfirmBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(String(format: t("inflight_confirm_title"), state.inflight))
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                Text(t("inflight_confirm_hint"))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help(inflightSummary)
+            }
+            Spacer(minLength: 0)
+            Button {
+                let a = pendingAction; pendingAction = nil; a?()
+            } label: {
+                Text(t("inflight_confirm_go"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Color.orange.opacity(0.16)))
+            }
+            .buttonStyle(.plain)
+            Button(t("cancel")) { pendingAction = nil }
+                .buttonStyle(.plain)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 9)
+        .padding(.vertical, 7)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+    }
+
     /// 面板"Restart"：停掉网关子进程再拉起（非 [decision] 配置改动靠它生效）
+    /// ⚠ stop() 会置 userStopped=true（Stop 修复），重启是"停了马上再要"的
+    /// 显式意图 → 拉起前必须清除，否则 ensureRunning 直接 return（实测回归）
     private func restartGateway() async {
         await gateway.stop()
         try? await Task.sleep(nanoseconds: 600_000_000)
+        gateway.clearUserStopped()
         await gateway.ensureRunning()
         await state.pollLive()
         await state.pollData()
@@ -1024,6 +1051,8 @@ public struct PanelView: View {
         if state.healthy {
             await gateway.stop()
         } else {
+            // Start = 用户要它跑：清除 Stop 意图，自愈恢复工作
+            gateway.clearUserStopped()
             await gateway.ensureRunning()
         }
         try? await Task.sleep(nanoseconds: 400_000_000)
