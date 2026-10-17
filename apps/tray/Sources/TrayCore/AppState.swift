@@ -73,7 +73,8 @@ public struct ChatResult: Equatable {
 }
 
 public struct ProviderRow: Identifiable {
-    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = [], tier: String = "", modelCount: Int = 0) {
+    public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = [], tier: String = "", modelCount: Int = 0, freeModels: Int = 0, needsKey: Bool = false, keyURL: String = "", issueLabel: String = "", nextProbeMs: Int = 0,
+                tierEffective: String = "") {
         self.key = key; self.enabled = enabled; self.available = available
         self.cooldownUntil = cooldownUntil; self.cooldownCause = cooldownCause
         self.pct = pct; self.planKind = planKind
@@ -87,6 +88,12 @@ public struct ProviderRow: Identifiable {
         self.blockedModels = blockedModels
         self.tier = tier
         self.modelCount = modelCount
+        self.freeModels = freeModels
+        self.needsKey = needsKey
+        self.keyURL = keyURL
+        self.issueLabel = issueLabel
+        self.nextProbeMs = nextProbeMs
+        self.tierEffective = tierEffective
     }
     public let key: String
     public let enabled: Bool
@@ -107,6 +114,19 @@ public struct ProviderRow: Identifiable {
     public let tier: String
     /// 该 provider 当前可用模型数（来自 /models 拉取；0 = 未拉取/未暴露）
     public let modelCount: Int
+    /// 免费模型数（命名带 free 段：zen 的 -free / OpenRouter 的 :free）——
+    /// 路由优先且不消耗套餐额度；>0 时卡片上标注
+    public let freeModels: Int
+    /// 缺 API key（服务端判定）→ 卡片提示"去申请"+ 不参与路由
+    public let needsKey: Bool
+    /// 申请 API key 的官方入口（默认接入的 provider 才有；空 = 无可展示）
+    public let keyURL: String
+    /// provider 级降级原因（网络/鉴权；空 = 正常）→ 卡片显示 `degraded · next probe`
+    public let issueLabel: String
+    /// 下次探活倒计时（ms）——"降级不是永久沉默"的可见证据
+    public let nextProbeMs: Int
+    /// 生效档位（服务端 tier_effective）：本条目显式值 → 方案级 override（不继承同方案账号）
+    public let tierEffective: String
     public let tokensWin: Int
     public let avgTtftMs: Int?
     public let avgRate: Double?
@@ -123,6 +143,22 @@ public enum IconState { case idle, busy, success, fail, stopped, starting }
 
 /// 模型维度行（Providers 卡切到 Model 标签）：同一窗口的逐模型指标，
 /// 与 Provider 行同布局（dot + 名称 + tokens/hit/速率/TTFT）
+/// 模型级健康冷却（/api/health）：剩余时长 + 原因 + 是否属于 provider/账户级
+public struct ModelCoolState {
+    public let ms: Int
+    public let message: String
+    /// quota / payment（账户或方案级）→ 属于 provider 行，不在 model 行重复
+    public let accountLevel: Bool
+}
+
+/// 模型实时打标 + 可用性（服务端 /api/model-tags；单一事实源）
+public struct ModelTagInfo {
+    public let capability: String
+    public let priceTier: String
+    /// nil = 可用；否则是服务端给的原因（no-key / deleted）
+    public let unusableReason: String?
+}
+
 public struct ModelRow: Identifiable {
     public let id: String
     public let tok: Int
@@ -134,11 +170,24 @@ public struct ModelRow: Identifiable {
     public let capability: String?
     public let priceTier: String?
 
+    /// 失败率（0-100；requests>0 时才有意义）
+    public let failPct: Int?
+    /// 不可用原因（no-key / deleted…，nil = 可用）
+    public let unusableReason: String?
+    /// 健康冷却剩余（ms；>0 = 冷却中）
+    public let coolingMs: Int
+    /// 冷却原因（**仅非账户级**才带；quota/payment 属 provider 行，此处为 nil）
+    public let coolMsg: String?
+
     public init(id: String, tok: Int, hit: Int?, rate: Double?, ttft: Int?, requests: Int,
-                capability: String? = nil, priceTier: String? = nil) {
+                capability: String? = nil, priceTier: String? = nil,
+                failPct: Int? = nil, unusableReason: String? = nil, coolingMs: Int = 0,
+                coolMsg: String? = nil) {
         self.id = id; self.tok = tok; self.hit = hit
         self.rate = rate; self.ttft = ttft; self.requests = requests
         self.capability = capability; self.priceTier = priceTier
+        self.failPct = failPct; self.unusableReason = unusableReason; self.coolingMs = coolingMs
+        self.coolMsg = coolMsg
     }
 }
 
@@ -186,7 +235,9 @@ public final class AppState: ObservableObject {
     /// Model 维度行（当前窗口、按 tokens 降序、前 6 行）
     @Published public var modelRows: [ModelRow] = []
     /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
-    @Published public var modelTagMap: [String: (String, String)] = [:]
+    @Published public var modelTagMap: [String: ModelTagInfo] = [:]
+    /// 模型级健康冷却（/api/health）：model → 冷却态（原因 + 是否账户级）
+    @Published public var modelCooling: [String: ModelCoolState] = [:]
 
     @Published public var pulse = false
     @Published public var requests = 0
@@ -266,6 +317,27 @@ public final class AppState: ObservableObject {
             startMs = Int64(yStart.timeIntervalSince1970 * 1000)
             endMs = Int64(dayStart.timeIntervalSince1970 * 1000)
         }
+        // 模型级健康（冷却中/原因）：Model 行显示报错状态用；与 stats 同轮询
+        if case (200, let hData)? = try? await get("/api/health"),
+           let hObj = try? JSONSerialization.jsonObject(with: hData) as? [String: Any],
+           let hModels = hObj["models"] as? [String: Any] {
+            var cool: [String: ModelCoolState] = [:]
+            for (mid, hv) in hModels {
+                guard let h = hv as? [String: Any] else { continue }
+                // ⚠ 服务端字段是 cooldown_remaining_ms（此前误读 until_epoch_ms → 永远 0）
+                let ms = (h["cooldown_remaining_ms"] as? Int)
+                    ?? Int((h["cooldown_remaining_ms"] as? Double) ?? 0)
+                let available = (h["available"] as? Bool) ?? (ms <= 0)
+                guard !available || ms > 0 else { continue }
+                let kind = (h["kind"] as? String) ?? ""
+                let msg = (h["message"] as? String) ?? ""
+                // 账户/方案级（配额、付款余额）→ 属于 provider 行，model 行不重复
+                let accountLevel = kind.contains("quota") || kind.contains("payment")
+                    || msg.lowercased().contains("quota")
+                cool[mid] = ModelCoolState(ms: max(ms, 0), message: msg, accountLevel: accountLevel)
+            }
+            modelCooling = cool
+        }
         if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             models = (obj["models"] as? [String: Any]) ?? obj
@@ -273,10 +345,14 @@ public final class AppState: ObservableObject {
             if case (200, let mtData)? = try? await get("/api/model-tags"),
                let mtObj = try? JSONSerialization.jsonObject(with: mtData) as? [String: Any],
                let mtArr = mtObj["models"] as? [[String: Any]] {
-                var tm: [String: (String, String)] = [:]
+                var tm: [String: ModelTagInfo] = [:]
                 for m in mtArr {
                     guard let id = m["model"] as? String else { continue }
-                    tm[id] = ((m["capability"] as? String) ?? "", (m["price_tier"] as? String) ?? "")
+                    tm[id] = ModelTagInfo(
+                        capability: (m["capability"] as? String) ?? "",
+                        priceTier: (m["price_tier"] as? String) ?? "",
+                        unusableReason: ((m["usable"] as? Bool) == false)
+                            ? ((m["unusable_reason"] as? String) ?? "unusable") : nil)
                 }
                 modelTagMap = tm
             }
@@ -302,18 +378,32 @@ public final class AppState: ObservableObject {
             let cached = (ms["cached_tokens"] as? Int) ?? Int((ms["cached_tokens"] as? Double) ?? 0)
             let out = (ms["completion_tokens"] as? Int) ?? Int((ms["completion_tokens"] as? Double) ?? 0)
             let tok = pin + out
+            // 只展示**用过的模型**（用户裁决 2026-10-17）：窗口内没有任何调用、
+            // 也没有产出的目录模型不进这一列（它是用量视图，不是目录清单）
             if tok <= 0 && req <= 0 { continue }
+            let fails = (ms["failures"] as? Int) ?? Int((ms["failures"] as? Double) ?? 0)
             let hit = pin > 0 ? Int(round(100.0 * Double(cached) / Double(pin))) : nil
             let ttft = (ms["avg_ttft_ms"] as? Int) ?? (ms["avg_ttft_ms"] as? Double).map(Int.init)
             let rate = (ms["avg_rate_tok_s"] as? Double) ?? (ms["avg_rate_tok_s"] as? Int).map(Double.init)
-            mrows.append(ModelRow(id: mid, tok: tok, hit: hit, rate: rate, ttft: ttft, requests: req))
+            let failPct: Int? = req > 0 ? Int((Double(fails) * 100.0 / Double(req)).rounded()) : nil
+            mrows.append(ModelRow(id: mid, tok: tok, hit: hit, rate: rate, ttft: ttft, requests: req,
+                                  failPct: failPct))
         }
         mrows.sort { if $0.tok != $1.tok { return $0.tok > $1.tok } ; return $0.id < $1.id }
         // 模型打标（实时口径）：仅 today 视图挂到行上（yesterday 的标签是当前态，无意义）
-        modelRows = mrows.prefix(6).map { m in
+        // 上限 50（可在面板内滚动查看）：仍只含用过的模型
+        modelRows = mrows.prefix(50).map { m in
             let tag = statWindowToday ? modelTagMap[m.id] : nil
             return ModelRow(id: m.id, tok: m.tok, hit: m.hit, rate: m.rate, ttft: m.ttft,
-                            requests: m.requests, capability: tag?.0, priceTier: tag?.1)
+                            requests: m.requests, capability: tag?.capability, priceTier: tag?.priceTier,
+                            failPct: m.failPct,
+                            // 只保留结构性不可用（no-key / deleted）；"cooldown"/
+                            // "quota-gated" 是健康的派生结果，交给下面的冷却原因显示
+                            unusableReason: tag?.unusableReason.flatMap { r in
+                                (r == "no-key" || r == "deleted") ? r : nil
+                            },
+                            coolingMs: modelCooling[m.id]?.ms ?? 0,
+                            coolMsg: modelCooling[m.id].flatMap { $0.accountLevel ? nil : $0.message })
         }
 
         var rows: [ProviderRow] = []
@@ -368,7 +458,13 @@ public final class AppState: ObservableObject {
                                         blockedModels: blockedModels,
                                         mergedFrom: mergedKeys,
                                         tier: tier,
-                                        modelCount: modelCount))
+                                        modelCount: modelCount,
+                                        freeModels: (p["free_models"] as? Int) ?? 0,
+                                        needsKey: (p["needs_key"] as? Bool) ?? false,
+                                        keyURL: (p["key_url"] as? String) ?? "",
+                                        issueLabel: ((p["provider_issue"] as? [String: Any])?["issue"] as? String) ?? "",
+                                        nextProbeMs: ((p["provider_issue"] as? [String: Any])?["next_probe_ms"] as? Int) ?? 0,
+                                        tierEffective: (p["tier_effective"] as? String) ?? (p["tier"] as? String) ?? ""))
             }
         }
         // per-provider 5h 指标：stats 的 model key 形如 "provider/model"，按前缀聚合
@@ -425,7 +521,10 @@ public final class AppState: ObservableObject {
                                quotaSource: r.quotaSource,
                                blockedModels: r.blockedModels,
                                mergedFrom: r.mergedFrom,
-                               tier: r.tier, modelCount: r.modelCount)
+                               tier: r.tier, modelCount: r.modelCount,
+                               freeModels: r.freeModels, needsKey: r.needsKey, keyURL: r.keyURL,
+                               issueLabel: r.issueLabel, nextProbeMs: r.nextProbeMs,
+                               tierEffective: r.tierEffective)
         }
         // 按**当前窗口的 token 用量降序**（用户裁决）——须在窗口指标聚合后排序
         // （此前用 24h 累计字段、且在聚合前排，与面板显示口径不一致）；
@@ -435,8 +534,13 @@ public final class AppState: ObservableObject {
             if $0.enabled != $1.enabled { return $0.enabled }
             return $0.key < $1.key
         }
-        providers = Array(rows.prefix(6))
-        if case (200, let data)? = try? await get("/api/events?limit=30"),
+        // 上限 12（面板内滚动；此前 6 条是为了不撑高面板）
+        providers = Array(rows.prefix(12))
+        // 最近 10 天（用户裁决 2026-10-17）：窗口过滤交给服务端（kind=chat + since_ms），
+        // 否则 limit 会被非 chat 事件吃掉、只回几小时的数据；面板拿到的就是"10 天内
+        // 最近 60 条请求"，由 PanelView 放在固定高度的 ScrollView 里滚动查看
+        let since10d = Int(Date().timeIntervalSince1970 * 1000) - 10 * 24 * 60 * 60 * 1000
+        if case (200, let data)? = try? await get("/api/events?kind=chat&since_ms=\(since10d)&limit=60"),
            let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             var decRows: [RecentDecision] = []
             for ev in arr.reversed() where (ev["kind"] as? String) == "chat" {
@@ -490,7 +594,7 @@ public final class AppState: ObservableObject {
                     tags: tags))
                 let did = ((ev["decision_id"] as? String) ?? "")
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
-                if decRows.count >= 4 { break }
+                if decRows.count >= 60 { break }
             }
             recent = decRows
             // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废

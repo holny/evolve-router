@@ -12,6 +12,28 @@ enum PanelPreview {
         state.successRate = 99
         state.tokensK = "780.4k"
         state.version = "0.1.7"
+        // EV_PREVIEW_DIM=model → 直接看 Model 维度（标题/复数 tab/报错状态）
+        if ProcessInfo.processInfo.environment["EV_PREVIEW_DIM"] == "model" {
+            state.modelDim = true
+            state.modelRows = [
+                ModelRow(id: "opencode-go-github/glm-5.3", tok: 48_200, hit: 62, rate: 92,
+                         ttft: 1_240, requests: 41, capability: "powerful", priceTier: "medium"),
+                ModelRow(id: "deepseek/deepseek-v4-pro", tok: 21_400, hit: 45, rate: 71,
+                         ttft: 3_180, requests: 8, capability: "powerful", priceTier: "cheap",
+                         failPct: 25),
+                ModelRow(id: "opencode-go/beam-free", tok: 1_200, hit: nil, rate: 40,
+                         ttft: 800, requests: 3, capability: "basic", priceTier: "cheap",
+                         failPct: 67, unusableReason: "no-key"),
+                // 非账户级失败原因（应显示在行①右侧）
+                ModelRow(id: "zhipuai-coding-plan/glm-5.3", tok: 900, hit: nil, rate: 30,
+                         ttft: 2_000, requests: 2, capability: "powerful", priceTier: "medium",
+                         coolingMs: 240_000, coolMsg: "unsupported model"),
+                // 账户级（quota）冷却 → 按裁决不在 model 行显示原因
+                ModelRow(id: "MiniMax/MiniMax-M3", tok: 700, hit: nil, rate: 20,
+                         ttft: 3_000, requests: 1, capability: "powerful", priceTier: "cheap",
+                         coolingMs: 300_000, coolMsg: nil),
+            ]
+        }
         state.lastSync = Date()
         // 文档截图用的稳定种子（EV_PREVIEW_SEED=1）：覆盖五类标签的各种组合，
         // 不依赖本机实时流量（否则 README 图会随环境漂移）
@@ -29,11 +51,21 @@ enum PanelPreview {
                            failReason: "quota exhausted (api-backed)", capability: "powerful",
                            tags: DecisionTags(difficulty: "medium", domain: "lookup", flags: ["trivial"], mode: "rules", fit: "under")),
         ]
+        // 三行制（名称+状态 / 数据 / 标签）——种子里也带齐数据与标签，
+        // 否则截图只能看到第一行（README/回归看图都看不出结构）
         state.providers = [
-            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, planKind: "go"),
-            ProviderRow(key: "deepseek", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 26, planKind: "api"),
-            ProviderRow(key: "MiniMax", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(6_720), cooldownCause: "quota window exhausted (5h)", pct: 100, planKind: "coding"),
-            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, planKind: "coding"),
+            ProviderRow(key: "opencode-go", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 4, planKind: "go",
+                        tokensWin: 412_800, avgTtftMs: 1_240, avgRate: 92, cachePctWin: 62,
+                        modelCount: 38, freeModels: 2, tierEffective: "go"),
+            ProviderRow(key: "deepseek", enabled: true, available: true, cooldownUntil: nil, cooldownCause: nil, pct: 26, planKind: "api",
+                        tokensWin: 168_400, avgTtftMs: 3_180, avgRate: 71, cachePctWin: 45,
+                        paygBalance: PaygBalance(currency: "CNY", total: 59.31, available: true),
+                        modelCount: 4),
+            ProviderRow(key: "MiniMax", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(6_720), cooldownCause: "quota window exhausted (5h)", pct: 100, planKind: "coding",
+                        tokensWin: 22_100, modelCount: 10, tierEffective: "pro"),
+            ProviderRow(key: "zhipuai-coding-plan", enabled: true, available: false, cooldownUntil: Date().addingTimeInterval(8_520), cooldownCause: "transient error (cooling down)", pct: 71, planKind: "coding",
+                        tokensWin: 96_300, avgTtftMs: 900, avgRate: 110, cachePctWin: 38,
+                        modelCount: 12, tierEffective: "pro"),
         ]
         state.lastSync = Date()
         // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）

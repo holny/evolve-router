@@ -330,7 +330,21 @@ fn mock_upstream(port: u16) -> anyhow::Result<()> {
 }
 
 fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {
-    let (mut cfg, path) = config::load_config(config_path.as_deref())?;
+    let (mut cfg, mut path) = config::load_config(config_path.as_deref())?;
+    // 首次运行（无任何配置文件）：以嵌入默认配置生成规范配置文件。
+    // 否则默认接入的 provider 清单无处落盘、`POST /api/reload` 与
+    // `POST /api/config/export` 也会因"无配置文件"而不可用。
+    if path.is_none()
+        && let Some(target) = evolve_core::config::canonical_config_path()
+    {
+        match evolve_core::config::write_config(&target, &cfg) {
+            Ok(()) => {
+                tracing::info!(path = %target.display(), "default config written (first run)");
+                path = Some(target);
+            }
+            Err(e) => tracing::warn!(error = %e, "could not write the default config file"),
+        }
+    }
     tracing::info!(?path, "config loaded");
     // 安全默认（审查 #2）：host/port 缺省只修了 bind，而 build_state 里的
     // cfg.server 仍是空/0 → 所有自引用防护（自递归/自 provider 排除）算出

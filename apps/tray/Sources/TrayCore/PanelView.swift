@@ -32,8 +32,6 @@ public struct PanelView: View {
             metricsCard
             if !state.providers.isEmpty { providersCard }
             if !state.recent.isEmpty { decisionsCard }
-            // 标签颜色说明（用户裁决）：紧贴控制区之上，每项 1-2 词
-            if !state.providers.isEmpty || !state.recent.isEmpty { tagLegend }
             controls
         }
         // 页脚（控制区）与页头留白对齐：菜单栏窗口底部无系统内边距，
@@ -174,13 +172,20 @@ public struct PanelView: View {
 
     /// 配额信息源短词（"探测配额"的可见证据）：official（官方 API/响应头）→ obs
     /// official_headers → hdr；estimated（网关推算）→ est
-    static func quotaSourceLabel(_ src: String) -> String {
-        switch src {
-        case "official": return "quota obs"
-        case "official_headers": return "quota hdr"
-        case "estimated": return "quota est"
-        default: return "quota \(src)"
-        }
+    /// 档位胶囊的取值：生效档位优先，缺失时回落显式档位（服务端字段缺失也不丢信息）
+    private func displayTier(_ p: ProviderRow) -> String {
+        let t = p.tierEffective.isEmpty ? p.tier : p.tierEffective
+        return t == "-" ? "" : t
+    }
+
+    /// Providers / Model 列表的滚动窗口高度（三行制后每行约 48pt → 这里约 3.5 行）
+    private let providersScrollH: CGFloat = 172
+
+    /// 配额百分比文案：**估算来源**加 `~` 前缀（与 web 同口径）。
+    /// 不用 "quota: estimated/headers" 这类行话标签——数字自己表达可信度，
+    /// 省掉一行噪音（用户反馈 2026-10-17）。
+    static func quotaPctText(_ pct: Int, src: String) -> String {
+        src == "estimated" ? "~\(pct)%" : "\(pct)%"
     }
 
     /// 是否配置了决策模型（头行用它决定配色；判定路径文案见 judgeLabel）
@@ -300,7 +305,7 @@ public struct PanelView: View {
     private var decisionsCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                sectionLabel("sparkle.middle", t("recent"))
+                sectionLabel("clock.arrow.circlepath", t("recent"))
                 Spacer(minLength: 0)
                 // 在飞提示（用户裁决：放 Recent requests 标题右侧，右对齐）
                 if state.inflight > 0 {
@@ -315,8 +320,11 @@ public struct PanelView: View {
                           : inflightSummary)
                 }
             }
+            // 最近 10 天（用户裁决）：固定高度滚动窗口——条数多了也不占面板高度
             let rows = state.recent
-            ForEach(rows, id: \.id) { r in
+            ScrollView(.vertical, showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(rows, id: \.id) { r in
                 HStack(spacing: 7) {
                     Circle()
                         .fill(r.status == 200 ? Color.green : Color.red)
@@ -399,8 +407,14 @@ public struct PanelView: View {
                             .monospacedDigit()
                             .foregroundStyle(.tertiary)
                     }
+                    }
+                }
                 }
             }
+            .frame(height: 186)
+            // 标签示例说明放在**卡内**、列表下方（用户裁决 2026-10-17：
+            // 与 Model 列表下的模型标签图例同构，各自归各自卡片，不占面板底部一行）
+            requestTagLegend
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -412,30 +426,39 @@ public struct PanelView: View {
     private var providersCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                sectionLabel("server.rack", t("providers"))
-                // 口径说明：本卡是**窗口用量 top 6** 快照（Web 面板是全量管理列表，
-                // 行序按 key 字母序）——标注清楚避免两端"看起来不一致"
-                Text(t("top6_by_usage"))
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(.quaternary)
+                // 标题随维度切换（Providers / Models），tab 也用复数
+                sectionLabel("server.rack", state.modelDim ? t("models") : t("providers"))
+                // 标明数据窗口（today / yesterday）：顶部指标卡可切换，这里是同一口径。
+                // 原先的 "top 6 by usage" 上限已放开（Provider 12 / Model 50，可滚动）
+                // → 文案不再成立，改显示窗口（用户裁决 2026-10-17）
+                Text(state.statWindowToday ? t("window_today") : t("window_yesterday"))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
                 dimTabs
             }
-            // 这张卡在管什么（用户裁决）：按档位管理 → 拉模型清单 → 探测配额 → 参与路由分配
-            Text(t("providers_duty"))
-                .font(.system(size: 8.5))
-                .foregroundStyle(.tertiary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            // 两个维度都在固定高度窗口内滚动（用户裁决 2026-10-17）：行数多了也不撑高面板
             if state.modelDim {
-                ForEach(state.modelRows) { m in
-                    modelRow(m)
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(state.modelRows) { m in
+                            modelRow(m)
+                        }
+                    }
                 }
+                .frame(height: providersScrollH)
+                // model 的标签示例放在 models 下面（不在面板底部再占一行）
+                if state.statWindowToday { modelTagLegend }
             } else {
                 let provs = state.providers
-                ForEach(provs, id: \.id) { p in
-                    providerRow(p)
+                ScrollView(.vertical, showsIndicators: true) {
+                    LazyVStack(alignment: .leading, spacing: 6) {
+                        ForEach(provs, id: \.id) { p in
+                            providerRow(p)
+                        }
+                    }
                 }
+                .frame(height: providersScrollH)
             }
         }
         .padding(10)
@@ -443,12 +466,24 @@ public struct PanelView: View {
         .background(groupBackground)
     }
 
+    /// 冷却原因压缩成一行短文本（面板空间有限；完整说明仍在 tooltip）
+    static func shortCause(_ cause: String) -> String {
+        let one = cause.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return one.count <= 34 ? one : String(one.prefix(33)) + "…"
+    }
+
+    /// 探活倒计时（ms → 人读）：<60s 给秒，否则给分
+    static func fmtProbe(_ ms: Int) -> String {
+        let s = max(0, ms / 1000)
+        return s < 60 ? "\(s)s" : "\(s / 60)m"
+    }
+
     /// 维度切换 tab（用户裁决）：Provider / Model —— 两维度同布局同位置，
     /// 切换零学习成本；窗口切换钮（today/yesterday）在顶部指标卡，两维度共用
     private var dimTabs: some View {
         HStack(spacing: 0) {
-            dimTab("Provider", selected: !state.modelDim) { state.modelDim = false }
-            dimTab("Model", selected: state.modelDim) { state.modelDim = true }
+            dimTab(t("providers"), selected: !state.modelDim) { state.modelDim = false }
+            dimTab(t("models"), selected: state.modelDim) { state.modelDim = true }
         }
         .background(Capsule().fill(Color.primary.opacity(0.06)))
         .clipShape(Capsule())
@@ -466,28 +501,44 @@ public struct PanelView: View {
         .buttonStyle(.plain)
     }
 
-    /// Model 维度行：与 Provider 行同布局（dot + 名称 + 指标 subline），
-    /// 右侧不放配额/状态（那是 provider 级信息）
+    /// Model 维度行：与 Provider / Recent 同构的**三行**——
+    /// ① 名称 ② 数据（tokens/hit/速率/TTFT）③ 标签（capability/price）
     private func modelRow(_ m: ModelRow) -> some View {
         HStack(spacing: 7) {
             Circle()
                 .fill(Color.green)
                 .frame(width: 5, height: 5)
             VStack(alignment: .leading, spacing: 1) {
-                Text(m.id)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
                 HStack(spacing: 5) {
-                    // today 视图：展示模型实时打标（能力/价位）；yesterday 是
-                    // 当前态标签对历史无意义（用户裁决）→ 不展示
-                    if state.statWindowToday {
-                        if let cap = m.capability, !cap.isEmpty {
-                            tagPill(cap, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: Self.tagHelpCap)
-                        }
-                        if let pt = m.priceTier, !pt.isEmpty {
-                            tagPill(pt, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: Self.tagHelpPrice)
-                        }
+                    Text(m.id)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    // 报错状态（与 Provider 行同构：状态右对齐）：
+                    // 不可用（no-key/removed） > 冷却中 > 失败率
+                    if let why = m.unusableReason, !why.isEmpty {
+                        Text(why == "no-key" ? t("noKey") : why)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.red)
+                    } else if m.coolingMs > 0, let msg = m.coolMsg, !msg.isEmpty {
+                        // 非账户级失败原因直接显示（如 unsupported / auth failed /
+                        // truncated）；quota/payment 属 provider 行 → coolMsg 为 nil，不重复
+                        Text(Self.shortCause(msg) + " " + Self.fmtProbe(m.coolingMs))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.red)
+                    } else if m.coolingMs > 0 {
+                        // 冷却但无可用原因（含账户级配额）→ 不显示（provider 行已有）
+                        EmptyView()
+                    } else if let f = m.failPct, f > 0 {
+                        Text("fail \(f)%")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundStyle(.red)
                     }
+                }
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                // ② 数据行
+                HStack(spacing: 5) {
                     if m.tok > 0 {
                         Text(AppState.fmtTok(m.tok))
                             .font(.system(size: 9.5))
@@ -515,12 +566,29 @@ public struct PanelView: View {
                 }
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
+                // ③ 标签行（today 视图才展示：yesterday 的标签是当前态，对历史无意义）
+                if state.statWindowToday,
+                   (m.capability?.isEmpty == false) || (m.priceTier?.isEmpty == false) {
+                    HStack(spacing: 4) {
+                        if let cap = m.capability, !cap.isEmpty {
+                            tagPill(cap, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: Self.tagHelpCap)
+                        }
+                        if let pt = m.priceTier, !pt.isEmpty {
+                            tagPill(pt, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: Self.tagHelpPrice)
+                        }
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                }
             }
             Spacer(minLength: 0)
         }
     }
 
-
+    /// Provider 行：与 Recent / Model 同构的**三行**
+    /// ① 名称 + 三选一状态（配额进度 / 余额 / 窗口用完警告——互斥，同一行）
+    /// ② 各项数据（tokens / hit / 速率 / TTFT）
+    /// ③ 标签（档位 / 模型数 / 免费 / 降级 / 去申请 key）
     @ViewBuilder
     private func providerRow(_ p: ProviderRow) -> some View {
         HStack(spacing: 7) {
@@ -528,111 +596,49 @@ public struct PanelView: View {
                 .fill(p.enabled ? (p.available && !p.quotaExhausted ? Color.green : Color.orange) : Color.gray)
                 .frame(width: 5, height: 5)
             VStack(alignment: .leading, spacing: 1) {
+                // ① 名称 + 状态（三选一，**右对齐**：配额进度/余额/窗口警告贴右边缘）
                 HStack(spacing: 5) {
                     Text(p.key)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
-                    if !p.tier.isEmpty, p.tier != "-" {
-                        Text(p.tier)
-                            .font(.system(size: 8.5, weight: .medium))
-                            .padding(.horizontal, 4).padding(.vertical, 0.5)
-                            .background(Capsule().fill(Color.secondary.opacity(0.14)))
-                            .foregroundStyle(.secondary)
-                    }
-                    if p.modelCount > 0 {
-                        Text("\(p.modelCount) models")
-                            .font(.system(size: 8.5))
-                            .foregroundStyle(.quaternary)
-                    }
-                }
-                HStack(spacing: 5) {
-                    if !p.enabled {
-                        Text(t("disabled"))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                    }
-                    if !p.quotaSource.isEmpty {
-                        Text(Self.quotaSourceLabel(p.quotaSource))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.quaternary)
-                    }
-                    if p.tokensWin > 0 {
-                        Text(AppState.fmtTok(p.tokensWin))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
-                    if let cp = p.cachePctWin {
-                        Text("hit \(cp)%")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
-                    if let rt = p.avgRate, rt > 0 {
-                        Text(AppState.fmtRate(rt) + " t/s")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
-                    if let tt = p.avgTtftMs {
-                        Text("TTFT \(Self.fmtMs(tt))")
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
-                            .monospacedDigit()
-                    }
+                    Spacer(minLength: 4)
+                    providerStateInline(p)
                 }
                 .lineLimit(1)
-                // 空间不足先缩字再截断——保证 subline 不被右侧配额条挤没
-                .minimumScaleFactor(0.75)
+                .minimumScaleFactor(0.8)
+                // ② 数据
+                providerMetricsLine(p)
+                // ③ 标签
+                providerLabelsLine(p)
             }
-            Spacer(minLength: 0)
-            // 昨天/历史视图：配额进度与冷却状态都是**当前态**，对历史无意义
-            // （用户裁决）→ 不展示，行内只留窗口指标（tokens/hit/速率/TTFT）
-            if state.statWindowToday {
-                trailingCell(p)
-                    .frame(width: 88, alignment: .trailing)
-            }
+            // 占满可用宽度：让第①行的 Spacer 把状态推到右边缘
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
+    /// 三选一状态：配额进度 / 余额 / 窗口用完警告（互斥）。
+    /// 昨天/历史视图里这些都是**当前态**，对历史无意义（既有裁决）→ 不显示。
     @ViewBuilder
-    private func trailingCell(_ p: ProviderRow) -> some View {
-        // 统一双排模板：第一行状态词（cooldown / 5h full / monthly full / 余额），
-        // 第二行倒计时。原因与模型名进 tooltip——与配额窗口态视觉节奏一致
-        if let cd = p.cooldownUntil, cd > Date() {
-            let txt = Self.fmtCountdown(cd)
-            // 配额类冷却（上游 429 说 "quota window exhausted (monthly)"）本质就是
-            // 窗口耗尽——并轨到配额窗态同款文案（月度 full + 倒计时），区别于
-            // 纯健康冷却（失败驱动）。两条来源在 tooltip 里都写清楚。
-            let quotaStyle = p.cooldownCause?.contains("quota window exhausted") == true
-            VStack(alignment: .trailing, spacing: 1) {
+    private func providerStateInline(_ p: ProviderRow) -> some View {
+        if state.statWindowToday {
+            if let cd = p.cooldownUntil, cd > Date() {
+                let quotaStyle = p.cooldownCause?.contains("quota window exhausted") == true
                 Text(quotaStyle ? Self.quotaFullLabel(p.cooldownCause ?? "") : t("cooldown"))
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.red)
-                    .minimumScaleFactor(0.8)
-                Text(txt)
+                    .help(Self.cooldownHelp(p))
+                Text(Self.fmtCountdown(cd))
                     .font(.system(size: 9, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(Color.red.opacity(0.8))
-            }
-            .lineLimit(1)
-            .help(Self.cooldownHelp(p))
-        } else if !p.blockedModels.isEmpty {
-            // w3 永久黑名单（上游 404 且不在模型列表）——仅 Web 手动恢复
-            VStack(alignment: .trailing, spacing: 1) {
-                Text("removed")
+            } else if !p.blockedModels.isEmpty {
+                Text("removed \(p.blockedModels.count)")
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.red)
-                Text("\(p.blockedModels.count) · restore in Dashboard")
-                    .font(.system(size: 8.5))
-                    .foregroundStyle(Color.red.opacity(0.75))
-            }
-            .lineLimit(1)
-            .help("\(p.blockedModels.joined(separator: ", ")) — removed by upstream (not in the provider model list). Manual restore via Dashboard → Providers → Restore")
-        } else if let used = p.quotaUsed, let scope = p.quotaScope {
-            if p.quotaExhausted {
-                VStack(alignment: .trailing, spacing: 1) {
+                    .help("\(p.blockedModels.joined(separator: ", ")) — removed by upstream (not in the provider model list). Manual restore via Dashboard → Providers → Restore")
+            } else if let used = p.quotaUsed, let scope = p.quotaScope {
+                if p.quotaExhausted {
                     Text("\(scope) full")
                         .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(.red)
@@ -642,35 +648,119 @@ public struct PanelView: View {
                             .monospacedDigit()
                             .foregroundStyle(Color.red.opacity(0.8))
                     }
-                }
-                .lineLimit(1)
-                .help("\(scope) quota exhausted — recovers at \(p.quotaReset.map { Self.fmtAbs($0) } ?? "?")")
-            } else {
-                HStack(spacing: 5) {
-                    quotaBar(used).frame(width: 46)
-                    // 固定宽度+右对齐：否则 "1%" 比 "77%" 少一位，整块 HStack 变窄
-                    // → 进度条被推向右侧，各行的条不对齐
-                    Text("\(used)%")
+                } else {
+                    quotaBar(used).frame(width: 36)
+                    Text(Self.quotaPctText(used, src: p.quotaSource))
                         .font(.system(size: 10, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(width: 34, alignment: .trailing)
+                        .help("\(scope) quota usage · \(Self.srcTip(p.quotaSource))")
                 }
-                .help("\(scope) quota usage · \(Self.srcTip(p.quotaSource))")
+            } else if let bal = p.paygBalance {
+                Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
+                    .font(.system(size: 10, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(bal.available ? Color.secondary : Color.red)
+                    .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
+            } else {
+                Text(t("payg"))
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
             }
-        } else if let bal = p.paygBalance {
-            Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
-                .font(.system(size: 10, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(bal.available ? Color.secondary : Color.red)
-                .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
-        } else {
-            Text(t("payg"))
-                .font(.system(size: 9.5))
-                .foregroundStyle(.tertiary)
         }
     }
 
+    /// ② 数据行：与 Model 行的数据一致
+    @ViewBuilder
+    private func providerMetricsLine(_ p: ProviderRow) -> some View {
+        HStack(spacing: 5) {
+            if !p.enabled {
+                Text(t("disabled")).font(.system(size: 9.5)).foregroundStyle(.tertiary)
+            }
+            if p.tokensWin > 0 {
+                Text(AppState.fmtTok(p.tokensWin))
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            if let cp = p.cachePctWin {
+                Text("hit \(cp)%")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            if let rt = p.avgRate, rt > 0 {
+                Text(AppState.fmtRate(rt) + " t/s")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary).monospacedDigit()
+            }
+            if let tt = p.avgTtftMs {
+                Text("TTFT \(Self.fmtMs(tt))")
+                    .font(.system(size: 9.5)).foregroundStyle(.tertiary).monospacedDigit()
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
+
+    /// ③ 标签行：档位 / 模型数 / 免费 / 降级 / 缺 key
+    @ViewBuilder
+    private func providerLabelsLine(_ p: ProviderRow) -> some View {
+        HStack(spacing: 4) {
+            if !displayTier(p).isEmpty {
+                Text(displayTier(p))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .padding(.horizontal, 4).padding(.vertical, 0.5)
+                    .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                    .foregroundStyle(.secondary)
+            }
+            if p.modelCount > 0 {
+                Text("\(p.modelCount) models")
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.quaternary)
+            }
+            if p.freeModels > 0 {
+                Text("\(p.freeModels) free")
+                    .font(.system(size: 8.5, weight: .medium))
+                    .padding(.horizontal, 4).padding(.vertical, 0.5)
+                    .background(Capsule().fill(Color.green.opacity(0.16)))
+                    .foregroundStyle(.green)
+            }
+            if !p.issueLabel.isEmpty {
+                Text(t("degraded") + " · " + Self.fmtProbe(p.nextProbeMs))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .padding(.horizontal, 4).padding(.vertical, 0.5)
+                    .background(Capsule().fill(Color.red.opacity(0.16)))
+                    .foregroundStyle(.red)
+            }
+            // 非配额类冷却：原因原文放明面（tooltip 在 MenuBarExtra 基本不触发）。
+            // 配额类冷却不重复显示——行①的 `5h full / monthly full` 已经足够。
+            if state.statWindowToday,
+               let cd = p.cooldownUntil, cd > Date(),
+               let cause = p.cooldownCause, !cause.isEmpty,
+               !cause.contains("quota window exhausted") {
+                Text(Self.shortCause(cause))
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(Color.red.opacity(0.85))
+                    .lineLimit(1)
+            }
+            if p.needsKey {
+                if let url = URL(string: p.keyURL), !p.keyURL.isEmpty {
+                    Link(destination: url) {
+                        Text(t("getKey"))
+                            .font(.system(size: 8.5, weight: .medium))
+                            .padding(.horizontal, 4).padding(.vertical, 0.5)
+                            .background(Capsule().fill(Color.orange.opacity(0.18)))
+                            .foregroundStyle(.orange)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Text(t("noKey"))
+                        .font(.system(size: 8.5, weight: .medium))
+                        .padding(.horizontal, 4).padding(.vertical, 0.5)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
 
     // MARK: - 控制区
     // 行 1：主行动（GitHub / 完整面板）—— 等宽 tinted 胶囊
@@ -810,8 +900,8 @@ public struct PanelView: View {
     private func sectionLabel(_ symbol: String, _ title: String) -> some View {
         HStack(spacing: 5) {
             Image(systemName: symbol)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.secondary)
             Text(title)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
@@ -849,14 +939,24 @@ public struct PanelView: View {
 
     /// 标签颜色说明：色卡 = 类别名（左：request 判定 / 右：model 属性）
     /// ⚠ 菜单栏弹窗（MenuBarExtra）里 SwiftUI `.help()` 悬停提示不触发 → 取值不赘述，看胶囊
-    private var tagLegend: some View {
+    /// Recent 请求标签的图例（difficulty/domain/flags/fit/mode）——留在 Recent 卡下方
+    private var requestTagLegend: some View {
         HStack(spacing: 7) {
             legendItem(Self.tagColorDiff, "difficulty")
             legendItem(Self.tagColorDomain, "domain")
             legendItem(Self.tagColorFlag, "flags")
             legendItem(Self.tagColorFit, "fit")
             legendItem(Self.tagColorMode, "mode")
-            Spacer(minLength: 6)
+        }
+        .font(.system(size: 8.5))
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 模型标签的图例（capability/price）——放在 Model 列表**下面**（用户裁决 2026-10-17）
+    private var modelTagLegend: some View {
+        HStack(spacing: 7) {
             legendItem(Self.tagColorCap, "capability")
             legendItem(Self.tagColorPrice, "price")
         }

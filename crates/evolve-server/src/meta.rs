@@ -630,6 +630,12 @@ pub async fn api_events(
         .get("limit")
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
+    // kind=chat：只回该类型（面板"最近请求"要的是 chat，否则 limit 被别的
+    // 事件类型吃掉 → 显示条数远少于请求条数）
+    let kind_filter: Option<String> = params.get("kind").cloned();
+    // since_ms：窗口下界（面板要"最近 10 天"）。事件按月时间升序落盘，从尾部
+    // 反向扫描时一旦早于窗口即可停——既满足大窗口又不必回传巨量 JSON
+    let since_ms: Option<u64> = params.get("since_ms").and_then(|v| v.parse().ok());
     let path = evolve_core::config::events_file(&st.config.data.dir, false);
     let mut events = Vec::new();
     // 只读文件尾部：面板要的是"最近 limit 条"，全量读几十 MB 没有意义。
@@ -643,6 +649,22 @@ pub async fn api_events(
         for line in content.lines().rev() {
             if events.len() >= limit { break; }
             if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(line) {
+                if let Some(k) = &kind_filter
+                    && v.get("kind").and_then(|x| x.as_str()) != Some(k.as_str())
+                {
+                    continue;
+                }
+                if let Some(since) = since_ms {
+                    let ts = v
+                        .get("ts")
+                        .and_then(|x| x.as_u64().or_else(|| x.as_f64().map(|f| f as u64)));
+                    // 无 ts 的旧事件保守保留；早于窗口下界 → 后续都更早，直接停
+                    if let Some(ts) = ts
+                        && ts < since
+                    {
+                        break;
+                    }
+                }
                 // 部署前写入的老事件没有 tags → 读取时用同一份规则补算，
                 // 避免客户端在过渡期显示成"没有标签"（decision_tags 单一事实源）
                 if v.get("tags").is_none() {
@@ -1236,17 +1258,52 @@ fn refresh_payg_balances_if_stale(st: &AppState) {
             .map(|t| now0.saturating_sub(t) > 60 * 1000)
             .unwrap_or(true)
     };
-    if stale("deepseek") {
+    // 账号清单：手动 provider（含发现型 overlay）+ 目录里仅发现到的 provider
+    // ——按 host 注册表（quota_api_for）判定谁是"按量余额型"（deepseek / openrouter）
+    let balance_based =
+        |bu: &str| evolve_core::plans::quota_api_for(bu).map(|a| a.balance_based()).unwrap_or(false);
+    let mut accounts: Vec<(String, String, Option<String>)> = Vec::new();
+    let ov = crate::state::effective_overrides(st);
+    for (k, p) in &ov.providers {
+        if p.disabled || !balance_based(&p.base_url) {
+            continue;
+        }
+        accounts.push((k.clone(), p.base_url.clone(), p.api_key.clone()));
+    }
+    for m in st.engine.catalog_snapshot() {
+        if balance_based(&m.base_url) && !accounts.iter().any(|(k, _, _)| k == &m.provider) {
+            accounts.push((
+                m.provider.clone(),
+                m.base_url.clone(),
+                m.key_values().first().cloned(),
+            ));
+        }
+    }
+    for (k, bu, ak) in accounts {
+        if !stale(&k) {
+            continue;
+        }
         let st2 = st.clone();
         tokio::spawn(async move {
             let now_ms = evolve_memory::health::now();
-            if let Some(mut bal) = deepseek_balance(&st2, "deepseek", None).await {
+            if let Some(mut bal) = payg_balance(&st2, &k, &bu, ak).await {
                 bal["ts"] = json!(now_ms);
                 if let Ok(mut pb) = st2.payg_balance.lock() {
-                    pb.insert("deepseek".into(), bal);
+                    pb.insert(k, bal);
                 }
             }
         });
+    }
+}
+
+/// 按量余额按 host 分派（与配额窗口同一注册表）
+async fn payg_balance(
+    st: &AppState, key: &str, base_url: &str, api_key: Option<String>,
+) -> Option<Value> {
+    match evolve_core::plans::quota_api_for(base_url)? {
+        evolve_core::plans::QuotaApi::DeepseekBalance => deepseek_balance(st, key, api_key).await,
+        evolve_core::plans::QuotaApi::OpenrouterCredits => openrouter_balance(st, key, api_key).await,
+        _ => None,
     }
 }
 
@@ -1285,7 +1342,29 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         // 用户可在面板/网页一键恢复
         // 档位联动：显式窗口额度 > 注册表档位额度（选档位后配额条立即生效）
         let plan_key = evolve_core::plans::plan_for(&pd.base_url).map(|p| p.key).unwrap_or("");
-        let tier_allow = |w: usize| evolve_core::plans::tier_allowance_by_key(plan_key, &pd.tier, w);
+        // 档位（tier）回退链（2026-10 修复）：本条目显式 tier → **方案级** override
+        // （overrides.plans[plan_key]）→ 空。
+        // ⚠ 不再"继承同方案其它账号的档位"（用户裁决 2026-10-17）：同一 provider
+        // 的不同账号可以买不同方案（gmail 买 go、github 买 go-plus），替用户瞎认
+        // 会展示错误档位与错误额度。未选 → 空 + 提醒用户去选。
+        // 此前只读 pd.tier：面板里把 zhipu-coding 设成 pro 后，行上档位显示空、
+        // 额度条也是空 —— 看起来像"只有 MiniMax 有套餐"（用户反馈）。
+        // 展示与**窗口额度**都用这个生效值（预算执行本来就走方案级，口径对齐）。
+        let effective_tier: String = {
+            let explicit = pd.tier.trim();
+            if !explicit.is_empty() {
+                explicit.to_string()
+            } else {
+                ov.plans
+                    .get(plan_key)
+                    .and_then(|po| po.tier.clone())
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_default()
+            }
+        };
+        let tier_allow = |w: usize| {
+            evolve_core::plans::tier_allowance_by_key(plan_key, &effective_tier, w)
+        };
         // 手动也查用量：按账号归属——目录里有同名 provider（编辑自发现条的
         // overlay）按 provider 过滤；纯自定义条目退回 base_url 匹配
         let has_named = snap_all.iter().any(|m| &m.provider == key);
@@ -1306,12 +1385,18 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "disabled": pd.disabled,
             "plan_key": plan_key,
             "plan_kind": pd.plan_kind, "docs_url": pd.docs_url,
+            // 档位（tier）回退链与发现型行一致（2026-10 修复）：
+            // 本条目显式 tier → **方案级** override（overrides.plans[plan_key]）
+            // → 同方案其它条目的 tier → 空。
+            // 此前手动行只看 pd.tier，于是"面板里设了 zhipu-coding=pro"在行上显示为空，
+            // 而 MiniMax 恰好在 provider 级设了 tier → 看起来像"只有 MiniMax 有套餐"。
             "tier": pd.tier,
             "windows": {
                 "5h": pd.window_5h.or_else(|| tier_allow(0)),
                 "weekly": pd.window_weekly.or_else(|| tier_allow(1)),
                 "monthly": pd.window_monthly.or_else(|| tier_allow(2)),
             },
+            "tier_effective": effective_tier,
             "model_rates": pd.model_rates,
             "fetched_models": pd.fetched_models,
             // 端点级模型数（同 base_url 的目录模型 ∪ 已拉取清单）：同端点两账号显示一致，
@@ -1324,7 +1409,24 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
                 .len()
                 .max(pd.fetched_models.len()),
             "observed": observed_for_provider(&st.quota, key, now_ms),
-            "has_key": pd.api_key.is_some(),
+            // has_key：内联 key **或** overrides 里记录的指纹（面板编辑过的发现型
+            // provider 只写 key_fp，此前会被误报成"无凭据·不参与路由"）
+            "has_key": pd.api_key.is_some() || pd.key_fp.is_some(),
+            "needs_key": pd.api_key.is_none() && pd.key_fp.is_none(),
+            // 申请 API key 的官方入口（默认接入的 provider 有；其余回落到 docs_url）
+            "key_url": evolve_core::provider_info::default_provider_for(&pd.base_url)
+                .map(|d| d.key_url)
+                .unwrap_or(""),
+            "free_models": snap_all
+                .iter()
+                .filter(|m| m.base_url == pd.base_url && m.is_free())
+                .map(|m| m.id.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            // provider 级非配额故障（网络/鉴权）：面板显示 `degraded · next probe`
+            "provider_issue": provider_issue_json(&st, key, now_ms),
+            // 订阅型端点（有方案画像）但**未选方案** → 提醒用户去选（配额展示/限制依赖它）
+            "needs_plan": !plan_key.is_empty() && effective_tier.trim().is_empty(),
             "key_fp": pd.api_key.as_deref().map(key_fp).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
             "tokens_24h": tok24.get(key).copied().unwrap_or(0),
@@ -1362,14 +1464,16 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
         let profile = evolve_core::plans::plan_for(&m.base_url);
         let plan_key = profile.map(|p| p.key.to_string()).unwrap_or_default();
         let pov = ov.plans.get(&plan_key);
-        // tier 回退链：面板档位设置 → 同 plan_key 的手动条目档位（同方案多账号
-        // 档位一致，如 opencode-go 与 -github）→ 空（无配额展示，诚实）
-        let tier = pov.and_then(|p| p.tier.clone())
-            .or_else(|| ov.providers.iter()
-                .filter(|(_, p)| !p.disabled && !p.tier.is_empty()
-                    && evolve_core::plans::plan_for(&p.base_url).map(|pp| pp.key.to_string()).unwrap_or_default() == plan_key)
-                .map(|(_, p)| p.tier.clone())
-                .next())
+        // 档位回退链（用户裁决 2026-10-17）：**账号自身**的显式档位 → 方案级设置 → 空。
+        // 不继承同方案其它账号——同 provider 不同账号可能买不同方案（go vs go-plus）；
+        // 空 = 未选方案 → 面板/网页提醒用户去选（不猜）。
+        let account_tier = ov
+            .providers
+            .get(&m.provider)
+            .map(|p| p.tier.trim().to_string())
+            .filter(|t| !t.is_empty());
+        let tier = account_tier
+            .or_else(|| pov.and_then(|p| p.tier.clone()).filter(|t| !t.trim().is_empty()))
             .unwrap_or_default();
         let tier_str = tier.clone();
         let allowance_5h = budgets.get(&plan_key).copied()
@@ -1411,6 +1515,7 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "plan_kind": profile.map(|p| p.plan_kind).unwrap_or("api"),
             "docs_url": profile.map(|p| p.docs_url).unwrap_or(""),
             "tier": tier,
+            "tier_effective": tier,
             "windows": {
                 "5h": allowance_5h,
                 "weekly": allowance_weekly,
@@ -1421,6 +1526,18 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
             "model_count": endpoint_model_count.max(model_ids.len()),
             "models": model_ids,
             "has_key": m.has_credential(),
+            "needs_key": !m.has_credential(),
+            "key_url": evolve_core::provider_info::default_provider_for(&m.base_url)
+                .map(|d| d.key_url)
+                .unwrap_or(""),
+            "free_models": snap_all
+                .iter()
+                .filter(|x| x.base_url == m.base_url && x.is_free())
+                .map(|x| x.id.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            "provider_issue": provider_issue_json(&st, &m.provider, now_ms),
+            "needs_plan": !plan_key.is_empty() && tier.trim().is_empty(),
             "key_fp": m.key_values().first().map(|k| key_fp(k)).unwrap_or_default(),
             "used_5h": if used > 0.0 { (used * 100.0).round() / 100.0 } else { 0.0 },
             "tokens_24h": tok24.get(m.provider.as_str()).copied().unwrap_or(0),
@@ -1750,6 +1867,7 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
             "source": if user.is_some() { "user" } else { "auto" },
             "usable": !matches!(usability.get(&m.id), Some(Some(_))),
             "unusable_reason": usability.get(&m.id).cloned().flatten(),
+            "free": m.is_free(),
             "active": active_set.contains(&m.id),
             "release_ts": evolve_core::recency::release_ts_of(m),
             "release_src": if m.release_ts.is_some() { "provider/models.dev" } else if evolve_core::recency::release_ts_from_id(&m.id).is_some() { "id" } else { "none" },
@@ -1757,6 +1875,256 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
         })
     }).collect();
     (axum::Json(json!({"models": out}))).into_response()
+}
+
+/// GET /api/portfolio —— 路由组合（provider 名额 + 能力×价位 格位覆盖）。
+///
+/// 面板"组合视图"的数据源：一眼看清"决策时有哪些 provider、每家占了几个名额、
+/// 9 格里哪些格有代表、哪些格空缺、免费模型有几个、谁被降级"。
+pub async fn api_portfolio(State(st): State<AppState>) -> Response {
+    let (active, _ranked, items) = portfolio_selection(&st);
+    let selected: std::collections::HashSet<&str> = active.iter().map(|s| s.as_str()).collect();
+    let now = evolve_memory::health::now();
+    let cap = evolve_core::recency::portfolio_cap(
+        items.iter().map(|i| i.provider.as_str()).collect::<std::collections::HashSet<_>>().len(),
+    );
+    let share = evolve_core::recency::provider_slot_cap(cap);
+    let cell_label = |c: u8, p: u8| {
+        let cap_l = ["basic", "standard", "powerful"][c.min(2) as usize];
+        let price_l = ["cheap", "medium", "premium"][p.min(2) as usize];
+        format!("{cap_l}/{price_l}")
+    };
+    let mut per: std::collections::BTreeMap<&str, Vec<&evolve_core::recency::PortfolioItem>> =
+        std::collections::BTreeMap::new();
+    for it in &items {
+        per.entry(it.provider.as_str()).or_default().push(it);
+    }
+    let mut providers: Vec<Value> = Vec::new();
+    // 目录快照只取一次（711 模型，别在每家 provider 上重复克隆）
+    let snap_all = st.engine.catalog_snapshot();
+    for (provider, list) in &per {
+        // ⚠ 名额只算**占名额**的（排除免费直通车与 pin）——否则会出现
+        // "slots 30 / cap 14"这种自相矛盾的展示（web 与面板同源，两边都会错）
+        let slots = list
+            .iter()
+            .filter(|i| selected.contains(i.id.as_str()) && !i.free && !i.pinned)
+            .count();
+        // 模型/免费规模按**端点级**统计（与 Provider 管理卡同口径：同 base_url 的
+        // 两个账号看到同一批模型）——避免"卡片 76 models / 组合 38 models"的数字冲突
+        let base = snap_all
+            .iter()
+            .find(|m| m.provider == *provider)
+            .map(|m| m.base_url.clone())
+            .unwrap_or_default();
+        let endpoint_models = snap_all
+            .iter()
+            .filter(|m| m.base_url == base)
+            .map(|m| m.id.as_str())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let mut endpoint_free: Vec<String> = snap_all
+            .iter()
+            .filter(|m| m.base_url == base && m.is_free())
+            .map(|m| m.id.clone())
+            .collect();
+        endpoint_free.sort();
+        endpoint_free.dedup();
+        let free: Vec<&str> = endpoint_free.iter().map(|s| s.as_str()).collect();
+        // 9 格代表（已入选者优先；空缺格列出"为什么没代表"＝该 provider 无此格模型）
+        let mut cells: Vec<Value> = Vec::new();
+        for c in 0..3u8 {
+            for p in 0..3u8 {
+                let mut in_cell: Vec<&&evolve_core::recency::PortfolioItem> = list
+                    .iter()
+                    .filter(|i| i.cap_rank.min(2) == c && i.price_rank.min(2) == p)
+                    .collect();
+                in_cell.sort_by(|a, b| {
+                    b.release_ts
+                        .unwrap_or(0)
+                        .cmp(&a.release_ts.unwrap_or(0))
+                        .then(a.id.cmp(&b.id))
+                });
+                let chosen = in_cell
+                    .iter()
+                    .find(|i| selected.contains(i.id.as_str()))
+                    .or_else(|| in_cell.first());
+                cells.push(json!({
+                    "cell": cell_label(c, p),
+                    "model": chosen.map(|i| i.id.clone()),
+                    "count": in_cell.len(),
+                    "selected": chosen
+                        .map(|i| selected.contains(i.id.as_str()))
+                        .unwrap_or(false),
+                }));
+            }
+        }
+        let issue = provider_issue_json(&st, provider, now);
+        providers.push(json!({
+            "provider": provider,
+            "models": list.len(),
+            "models_endpoint": endpoint_models,
+            "slots": slots,
+            "slot_cap": share,
+            "free": free.len(),
+            "free_models": free,
+            "free_selected": list
+                .iter()
+                .filter(|i| i.free && selected.contains(i.id.as_str()))
+                .count(),
+            "pinned": list.iter().filter(|i| i.pinned).count(),
+            "issue": issue,
+            "cells": cells,
+        }));
+    }
+    let free_total = items.iter().filter(|i| i.free).count();
+    axum::Json(json!({
+        "cap": cap,
+        "slot_cap_per_provider": share,
+        "providers": providers,
+        "totals": {
+            "providers": per.len(),
+            // selected = **占名额**的选中数（与 cap 同口径）；selected_total 含免费/pin
+            "selected": items
+                .iter()
+                .filter(|i| selected.contains(i.id.as_str()) && !i.free && !i.pinned)
+                .count(),
+            "selected_total": active.len(),
+            "models": items.len(),
+            "free": free_total,
+            "free_selected": items.iter().filter(|i| i.free && selected.contains(i.id.as_str())).count(),
+            "pinned": items.iter().filter(|i| i.pinned).count(),
+        },
+        "notes": {
+            "cap_rule": format!("max(50, healthy_providers × 8) = {cap}"),
+            "slot_rule": format!("each provider ≤ {share} slots (25% of cap)"),
+            "free_rule": "free models are always selected and do not consume slots",
+        },
+    }))
+    .into_response()
+}
+
+/// provider 级非配额故障的展示对象（面板/网页渲染 `degraded · next probe`）。
+/// null = 正常；否则 {issue, next_probe_ms, consecutive_fails}
+fn provider_issue_json(st: &AppState, provider: &str, now_ms: u64) -> Value {
+    match st.quota.provider_issue_of(provider) {
+        Some((issue, probe_at, fails)) => json!({
+            "issue": issue.label(),
+            "next_probe_ms": probe_at.saturating_sub(now_ms),
+            "consecutive_fails": fails,
+        }),
+        None => Value::Null,
+    }
+}
+
+/// 免费模型清单（catalog 里 is_free 的模型）。免费判据见 `ModelRecord::is_free`
+/// ——模型名带独立 `free` 段（zen 的 `-free`、OpenRouter 的 `:free`）。
+pub fn free_models(snap: &[evolve_core::types::ModelRecord]) -> Vec<&evolve_core::types::ModelRecord> {
+    snap.iter().filter(|m| m.is_free()).collect()
+}
+
+/// 默认接入 provider 的开箱状态 + 当前可用的免费模型清单。
+///
+/// 面板/网页据此渲染"默认接入"横幅：尚未填 key 的给出发起申请入口
+/// （key_url），并列出已发现的免费模型，告诉用户"可以直接用这些"。
+pub async fn api_onboarding(State(st): State<AppState>) -> Response {
+    let snap = st.engine.catalog_snapshot();
+    let ov = crate::state::effective_overrides(&st);
+    let modelsdev_ready = evolve_discovery::modelsdev::load_fresh(&st.config.data.dir).is_some();
+    let defaults: Vec<Value> = evolve_core::provider_info::DEFAULT_PROVIDERS
+        .iter()
+        .map(|d| {
+            // 该默认 provider 当前是否已登记（配置/发现任一来源）
+            let row = ov.providers.values().find(|p| {
+                evolve_core::provider_info::default_provider_for(&p.base_url)
+                    .map(|x| x.key == d.key)
+                    .unwrap_or(false)
+            });
+            let has_key = row
+                .map(|p| p.api_key.as_ref().map(|k| !k.trim().is_empty()).unwrap_or(false))
+                .unwrap_or_else(|| {
+                    snap.iter()
+                        .any(|m| m.base_url == d.base_url && m.has_credential())
+                });
+            let endpoint: Vec<&evolve_core::types::ModelRecord> =
+                snap.iter().filter(|m| m.base_url == d.base_url).collect();
+            let free = endpoint.iter().filter(|m| m.is_free()).count();
+            json!({
+                "key": d.key,
+                "base_url": d.base_url,
+                "key_url": d.key_url,
+                "docs_url": d.docs_url,
+                "plan_kind": d.plan_kind,
+                "registered": row.is_some()
+                    || evolve_core::provider_info::default_provider_for(&d.base_url)
+                        .map(|_| snap.iter().any(|m| m.base_url == d.base_url))
+                        .unwrap_or(false),
+                "has_key": has_key,
+                "needs_key": !has_key,
+                "model_count": endpoint
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                "free_models": free,
+                "origin": row.and_then(|p| p.origin.clone()),
+            })
+        })
+        .collect();
+    // 免费模型只统计**可路由**的（在组合里 = 有凭据 + 可用）：无 key 的目录条目
+    // 不能算"可直接使用"（审查 P1-5）——组合选择已过滤 no-key/deleted
+    let (_active_ids, _ranked, pf_items) = portfolio_selection(&st);
+    let active_set: std::collections::HashSet<&str> =
+        _active_ids.iter().map(|s| s.as_str()).collect();
+    let free: Vec<&evolve_core::types::ModelRecord> = free_models(&snap)
+        .into_iter()
+        .filter(|m| active_set.contains(m.id.as_str()))
+        .collect();
+    let mut by_provider: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for m in &free {
+        *by_provider.entry(m.provider.as_str()).or_insert(0) += 1;
+    }
+    let free_list: Vec<Value> = free
+        .iter()
+        .take(60)
+        .map(|m| {
+            json!({
+                "id": m.id,
+                "provider": m.provider,
+                "context_window": m.context_window,
+                "model": m.upstream_model,
+            })
+        })
+        .collect();
+    let needs_key: Vec<String> = defaults
+        .iter()
+        .filter(|d| d["needs_key"].as_bool().unwrap_or(false))
+        .filter_map(|d| d["key"].as_str().map(str::to_string))
+        .collect();
+    // 订阅型端点但未选方案的账号（用户裁决 2026-10-17：拿不到官方方案数据就让用户选，
+    // 以用户选择为准；没选就提醒）——方案决定配额(5h/周/月)、可用模型范围与并发
+    let needs_plan: Vec<String> = ov
+        .providers
+        .iter()
+        .filter(|(k, p)| {
+            !p.disabled
+                && evolve_core::plans::plan_for(&p.base_url).is_some()
+                && p.tier.trim().is_empty()
+                && !k.is_empty()
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
+    axum::Json(json!({
+        "defaults": defaults,
+        "needs_key": needs_key,
+        "needs_plan": needs_plan,
+        "free_count": free.len(),
+        "free_by_provider": by_provider,
+        "free_models": free_list,
+        // 免费名单来自每日 models.dev 目录 + 每小时远端 /models 扫描；
+        // 目录尚未就绪时先说明，避免用户以为"没有免费模型"
+        "catalog_ready": modelsdev_ready || !free.is_empty(),
+    }))
+    .into_response()
 }
 
 /// POST {model, capability?, price_tier?, reset?} → 保存/清除用户覆盖
@@ -1848,6 +2216,16 @@ fn last_used_cached(st: &AppState) -> std::collections::HashMap<String, u64> {
 pub fn active_models(
     st: &AppState,
 ) -> (Vec<String>, Vec<(String, u64)>) {
+    let (active, ranked, _) = portfolio_selection(st);
+    (active, ranked)
+}
+
+/// 组合选择（单一事实源）：`/api/portfolio`、active 判定、面板展示共用同一份
+/// 结果——避免"两端各算一份"的口径漂移（本项目已多次踩坑）。
+/// 返回 (选中 id 列表, 综合排名[(id, score)], 组合条目[含 provider/格位/免费])
+pub fn portfolio_selection(
+    st: &AppState,
+) -> (Vec<String>, Vec<(String, u64)>, Vec<evolve_core::recency::PortfolioItem>) {
     let now = evolve_memory::health::now();
     // 最近使用时间（窗口内才计分；过期使用不占"最近使用"名额）。
     // 30s TTL 缓存：此前每请求整读 events 文件（32MB 轮转阈值）+ 解析 4000 行，
@@ -1856,9 +2234,14 @@ pub fn active_models(
     // 结构不可用（no-key / deleted）不占活跃名额；冷却/闸门是临时的，不剔除
     let usability = model_usability(st);
     let snap = st.engine.catalog_snapshot(); // 先持有快照（避免借用临时值）
+    // 自指端点（base_url 指向本机网关自己）不是上游——绝不能进组合：
+    // 路由到它会绕回网关形成自我循环（2026-10 实测 evo-router/auto 曾进组合）
+    let self_ep = format!("127.0.0.1:{}", st.config.server.port);
+    let self_ep2 = format!("localhost:{}", st.config.server.port);
     let eligible: Vec<&evolve_core::types::ModelRecord> = snap
         .iter()
         .filter(|m| !matches!(usability.get(&m.id), Some(Some("no-key" | "deleted"))))
+        .filter(|m| !m.base_url.contains(&self_ep) && !m.base_url.contains(&self_ep2))
         .collect();
 
     // 两个池（各自降序）：新发布（有 id 内嵌日期者） / 最近使用（窗口内）
@@ -1875,15 +2258,53 @@ pub fn active_models(
     by_used.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     let ov = crate::state::effective_overrides(&st);
-    let active = evolve_core::recency::select_active(
-        &by_release,
-        &by_used,
-        &ov.active_models.include,
-        &ov.active_models.exclude,
-        evolve_core::recency::ACTIVE_CAP,
-        evolve_core::recency::NEWEST_QUOTA,
-        now,
-    );
+    // ── 组合选择（2026-10 用户裁决）：provider 名额 + 能力×价位矩阵覆盖 + 免费直通车 ──
+    // 旧行为=单一全局池（新发布 20 + 近用 30）→ 一家新模型多就通吃，provider 故障
+    // 即全军覆没。新行为按 provider 分配名额并在每家内补齐 9 格覆盖。
+    let tags = tags_for_catalog(st, &snap);
+    let quotas = st.quota.best_remaining_by_models();
+    let excluded: std::collections::HashSet<&str> =
+        ov.active_models.exclude.iter().map(|s| s.as_str()).collect();
+    let items: Vec<evolve_core::recency::PortfolioItem> = eligible
+        .iter()
+        .map(|m| {
+            let (cap, price) = tags
+                .get(&m.id)
+                .map(|(c, p)| {
+                    let cr = match c {
+                        evolve_core::tags::Capability::Basic => 0u8,
+                        evolve_core::tags::Capability::Standard => 1,
+                        evolve_core::tags::Capability::Powerful => 2,
+                    };
+                    let pr = match p {
+                        evolve_core::tags::PriceTier::Cheap => 0u8,
+                        evolve_core::tags::PriceTier::Medium => 1,
+                        evolve_core::tags::PriceTier::Premium => 2,
+                    };
+                    (cr, pr)
+                })
+                .unwrap_or((1, 1));
+            let quota_ratio = quotas
+                .get(&m.id)
+                .map(|r| (*r as f32 / 200_000.0).clamp(0.0, 1.0))
+                .unwrap_or(0.5);
+            evolve_core::recency::PortfolioItem {
+                id: m.id.clone(),
+                provider: m.provider.clone(),
+                cap_rank: cap,
+                price_rank: price,
+                free: m.is_free(),
+                release_ts: evolve_core::recency::release_ts_of(m),
+                last_used_ms: last_used.get(&m.id).copied(),
+                quota_ratio,
+                pinned: ov.active_models.include.iter().any(|x| x == &m.id),
+            }
+        })
+        .collect();
+    let active: Vec<String> = evolve_core::recency::select_portfolio(&items, now)
+        .into_iter()
+        .filter(|id| !excluded.contains(id.as_str()))
+        .collect();
     // 综合排名（供顶替预告与 UI 排序）：max(发布日期, 最近使用)
     let mut ranked: Vec<(String, u64)> = eligible
         .iter()
@@ -1900,7 +2321,7 @@ pub fn active_models(
         })
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-    (active, ranked)
+    (active, ranked, items)
 }
 
 /// POST /api/models/active {model, action: enable|disable|auto}
@@ -2071,10 +2492,19 @@ pub fn assign_tags_within(
     let price_of = |m: &evolve_core::types::ModelRecord| -> PriceTier {
         let Some((c, src)) = cost_proxy(m) else { return PriceTier::Medium }; // 无成本信息：中性档
         // 可用池内：桶内分位秩（精确 7:2:1）；池外：桶内阈值映射
+        // ⚠ **并列成本必须同档**：直接用 `position` 会让同价模型按目录先后拿到
+        // 不同档位——实测两条同为 0 价（免费）的模型被拆成 cheap 与 premium，
+        // premium 那条随后被价位硬闸挡掉（"免费模型反而不给用"，2026-10 修复）。
+        // 桶按成本升序排列，并列即连续区间 → 秩取区间中点
         if let Some(list) = groups.get(&src)
-            && let Some(idx) = list.iter().position(|(i, _)| i == &m.id)
+            && let Some(pos) = list.iter().position(|(i, _)| i == &m.id)
         {
-            return tier_by_rank(idx as f32 / (list.len().max(2) - 1) as f32);
+            // 与自身**成本相同**的区间（桶按成本升序 → 并列连续），秩取区间中点
+            let c0 = list[pos].1;
+            let first = list.iter().position(|(_, v)| *v == c0).unwrap_or(pos);
+            let last = list.iter().rposition(|(_, v)| *v == c0).unwrap_or(pos);
+            let mid = (first + last) as f32 / 2.0;
+            return tier_by_rank(mid / (list.len().max(2) - 1) as f32);
         }
         let t1 = t1_of.get(&src).copied().unwrap_or(f32::MAX);
         let t2 = t2_of.get(&src).copied().unwrap_or(f32::MAX);
@@ -2428,6 +2858,57 @@ async fn deepseek_balance(
     }))
 }
 
+/// OpenRouter 额度/余额（官方，Bearer key）：
+/// - 首选 GET /api/v1/key → `limit_remaining`（key 级额度剩余）+ `usage_monthly`
+///   + `is_free_tier`（免费层账号免费模型可用）；
+/// - 无 key 级额度时退 GET /api/v1/credits → `total_credits - total_usage`。
+/// 返回 {currency: "USD", total: 剩余可用美元, is_available, usage_monthly, is_free_tier}
+async fn openrouter_balance(
+    st: &AppState, key: &str, api_key: Option<String>,
+) -> Option<Value> {
+    let key_resolved = api_key.or_else(|| {
+        st.engine.catalog_snapshot().iter()
+            .find(|m| m.provider == key)
+            .and_then(|m| m.key_values().first().cloned())
+    })?;
+    let auth = |url: &str| {
+        st.http
+            .get(url)
+            .timeout(std::time::Duration::from_secs(8))
+            .bearer_auth(&key_resolved)
+    };
+    let mut total: Option<f64> = None;
+    let mut usage_monthly: Option<f64> = None;
+    let mut is_free_tier = false;
+    if let Ok(j) = auth("https://openrouter.ai/api/v1/key").send().await
+        && let Ok(j) = j.json::<serde_json::Value>().await
+    {
+        let d = &j["data"];
+        total = d["limit_remaining"].as_f64().or_else(|| {
+            d["effective_budget"]["remaining_usd"].as_f64()
+        });
+        usage_monthly = d["usage_monthly"].as_f64();
+        is_free_tier = d["is_free_tier"].as_bool().unwrap_or(false);
+    }
+    if total.is_none()
+        && let Ok(j) = auth("https://openrouter.ai/api/v1/credits").send().await
+        && let Ok(j) = j.json::<serde_json::Value>().await
+    {
+        let credits = j["data"]["total_credits"].as_f64().unwrap_or(0.0);
+        let used = j["data"]["total_usage"].as_f64().unwrap_or(0.0);
+        total = Some(credits - used);
+    }
+    let total = total?;
+    Some(json!({
+        // 免费模型不消耗额度 → 余额为 0 但账号仍可用（is_free_tier 时更明确）
+        "is_available": total > 0.0 || is_free_tier,
+        "currency": "USD",
+        "total": total,
+        "usage_monthly": usage_monthly,
+        "is_free_tier": is_free_tier,
+    }))
+}
+
 /// w2 配额看门狗：独立于面板轮询的官方端点定时刷新（90s 一轮，observed
 /// 未过期则跳过）——面板不开也在刷新；刷新后把官方窗口结论写进 gate 状态机
 pub fn spawn_quota_watchdog(st: AppState) {
@@ -2531,6 +3012,38 @@ pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
             st.quota.gate_probe_fail(&provider, probe_now);
         }
     }
+    // provider 级非配额故障（网络不可达 / 鉴权·区域被拒）探活回生（2026-10 用户要求
+    // "降级不能永久沉默"）：到点挑一个 provider，用它的模型发极小请求；
+    // 成功 → 立即清降级、放回组合；失败 → 退避加一档（1m→5m→15m→30m→60m）。
+    // 探针只影响 provider 归属判断，不误清模型级冷却（模型级由各自的冷却/重试负责）。
+    let issue_now = evolve_memory::quota::now_ms();
+    if let Some(provider) = st.quota.provider_issue_pick_probe(issue_now) {
+        let snap = st.engine.catalog_snapshot();
+        let target: Option<String> = snap
+            .iter()
+            .find(|m| m.provider == provider && m.has_credential())
+            .or_else(|| snap.iter().find(|m| m.provider == provider))
+            .map(|m| m.id.clone());
+        match target {
+            Some(mid) => {
+                let ok = probe_provider_model(&st, &provider, Some(&mid)).await;
+                let finished = evolve_memory::quota::now_ms();
+                st.quota.provider_issue_probe_result(&provider, ok, finished);
+                if ok {
+                    st.events.record(json!({
+                        "kind": "provider_state_changed",
+                        "provider": provider, "state": "ok", "source": "probe",
+                    }));
+                    tracing::info!(provider = %provider, "provider issue probe succeeded — revived");
+                }
+            }
+            // 无模型可探（provider 已被删/无凭据）→ 记一次失败，退避后再看
+            None => {
+                let failed_at = issue_now;
+                st.quota.provider_issue_probe_result(&provider, false, failed_at)
+            }
+        }
+    }
 }
 
 /// 单次探针请求：优先打指定（冷却中）模型，未指定则取该 provider 首模型；
@@ -2589,7 +3102,8 @@ pub(crate) async fn refresh_observed(
             format!("{origin}/api/monitor/usage/quota/limit?type=1"),
         evolve_core::plans::QuotaApi::OpencodeZen => format!("{origin}/zen/go/v1/usage"),
         evolve_core::plans::QuotaApi::MinimaxRemains => format!("{origin}/v1/token_plan/remains"),
-        evolve_core::plans::QuotaApi::DeepseekBalance => return None, // 余额走 deepseek_balance
+        evolve_core::plans::QuotaApi::DeepseekBalance
+        | evolve_core::plans::QuotaApi::OpenrouterCredits => return None, // 余额走 payg_balance
     };
     let zhipuish = matches!(
         api_kind,
@@ -2822,10 +3336,56 @@ pub async fn api_plans(State(st): State<AppState>) -> Response {
             let p = profile.unwrap_or(&evolve_core::plans::PAYG);
             let pov = ov.plans.get(&key);
             let allowance = budgets.get(&key).copied();
+            // 官方方案选项（单一事实源 = 服务端注册表）：tier + 官方配额。
+            // 前端据此生成"选方案"下拉与配额预设——不再在客户端硬编码一份
+            // （此前客户端 PLAN_TO_PRESET 把 coding→zhipu、go→zai 混套，
+            //  minimax/volc/zen 选档位会套到别家配额上）
+            let tier_options: Vec<serde_json::Value> = {
+                let mut out = Vec::new();
+                for line in p.tier_allowances.split('\n').filter(|l| !l.trim().is_empty()) {
+                    let parts: Vec<&str> = line.split('|').collect();
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let num = |i: usize| -> serde_json::Value {
+                        parts
+                            .get(i)
+                            .and_then(|v| v.trim().parse::<f64>().ok())
+                            .map(|v| json!(v))
+                            .unwrap_or(serde_json::Value::Null)
+                    };
+                    out.push(json!({
+                        "tier": parts[0].trim(),
+                        "h5": num(1),
+                        "weekly": num(2),
+                        "monthly": num(3),
+                    }));
+                }
+                out
+            };
+            // 档位名：优先取官方配额表里的名字（最可靠）；否则取 `tiers` 里
+            // **括号/说明之前**的部分再按 '/' 切（`tiers` 常带一整句中文说明，
+            // 直接切会切出 "build (官方相对口径 1x" 这种碎片——实测踩过）
+            let tier_names: Vec<String> = if !tier_options.is_empty() {
+                tier_options
+                    .iter()
+                    .filter_map(|o| o["tier"].as_str().map(str::to_string))
+                    .collect()
+            } else {
+                let head = p.tiers.split(['(', '（']).next().unwrap_or("");
+                head.split('/')
+                    .map(|t| t.trim())
+                    .filter(|t| !t.is_empty() && *t != "-")
+                    .map(str::to_string)
+                    .collect()
+            };
             json!({
                 "key": key,
                 "provider": if p.key.is_empty() { m.provider.clone() } else { p.provider.to_string() },
                 "plan_kind": p.plan_kind.to_string(),
+                "tier_options": tier_options,
+                "tier_names": tier_names,
+                "quotas_published": !p.tier_allowances.trim().is_empty(),
                 "scheme": pov.and_then(|o| o.scheme.clone()).unwrap_or_else(|| p.scheme_key.to_string()),
                 "windows": pov.and_then(|o| o.windows.clone()).unwrap_or_else(|| p.windows.to_string()),
                 "models_note": p.models_note.to_string(),
@@ -3019,24 +3579,37 @@ mod tag_tests {
         let zhipu = "https://open.bigmodel.cn/api/coding/paas/v4";
         let go = "https://opencode.ai/zen/go/v1";
         let mut snap: Vec<ModelRecord> = Vec::new();
-        for i in 0..10 {
-            snap.push(mk_plan(&format!("zhipuai-coding-plan/glm-5.{i}"), zhipu));
+        // 真实套餐内部单价本就分层（旗舰 vs 轻量系数不同）——用真实模型名，
+        // 每个名字命中不同系数分支
+        for n in ["glm-5.3-flash", "glm-5.3"] {
+            for i in 0..5 {
+                snap.push(mk_plan(&format!("zhipuai-coding-plan/{n}-{i}"), zhipu));
+            }
         }
-        for i in 0..10 {
-            snap.push(mk_plan(&format!("opencode-go/m{i}"), go));
+        for n in [
+            "longcat-2.0",
+            "gpt-6-luna",
+            "glm-5.3-flash",
+            "qwen3.7-plus",
+            "kimi-k3",
+            "glm-5.3",
+            "deepseek-v4-pro",
+            "qwen3.8-max",
+        ] {
+            snap.push(mk_plan(&format!("opencode-go/{n}"), go));
         }
         let usable: HashSet<String> = snap.iter().map(|m| m.id.clone()).collect();
         let tags = assign_tags_within(&snap, &usable);
         let tier = |id: &str| tags.get(id).map(|(_, p)| *p);
-        // 两个方案各自桶内最便宜者都应是 cheap
-        assert_eq!(tier("zhipuai-coding-plan/glm-5.0"), Some(PriceTier::Cheap), "zhipu 桶内应有 cheap（旧行为：全族 premium）");
-        assert_eq!(tier("opencode-go/m0"), Some(PriceTier::Cheap));
-        // zhipu 不再全族 premium：桶内 70/90 分位应产生 cheap/medium/premium 分布
-        let zhipu_tiers: Vec<PriceTier> = (0..10)
-            .filter_map(|i| tier(&format!("zhipuai-coding-plan/glm-5.{i}")))
+        // 两个方案各自桶内最便宜者都应是 cheap（旧行为：zhipu 全族 premium → 被硬闸挡死）
+        assert_eq!(tier("zhipuai-coding-plan/glm-5.3-flash-0"), Some(PriceTier::Cheap));
+        assert_eq!(tier("opencode-go/longcat-2.0"), Some(PriceTier::Cheap));
+        // 桶内 70/90 分位应产生 cheap/medium/premium 分布（而非全族 premium）
+        let zhipu_tiers: Vec<PriceTier> = (0..5)
+            .map(|i| tier(&format!("zhipuai-coding-plan/glm-5.3-{i}")).unwrap())
             .collect();
-        assert!(zhipu_tiers.iter().any(|t| *t == PriceTier::Cheap));
         assert!(zhipu_tiers.iter().any(|t| *t != PriceTier::Cheap), "桶内应有非 cheap 档");
+        assert_eq!(tier("opencode-go/kimi-k3"), Some(PriceTier::Premium), "最贵的那档应落 premium");
     }
 
     #[test]
@@ -3194,5 +3767,38 @@ mod quota_derive_tests {
         for e in &out {
             assert!(e.get("duplicate_of").is_none(), "empty fingerprint must not mark duplicates: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod price_tier_tie_tests {
+    use super::*;
+
+    fn mk(id: &str, cost: (f32, f32)) -> evolve_core::types::ModelRecord {
+        evolve_core::types::ModelRecord {
+            id: id.into(),
+            provider: "mock".into(),
+            base_url: "http://127.0.0.1:9999/v1".into(),
+            upstream_model: id.into(),
+            context_window: Some(1000),
+            cost: Some(evolve_core::types::Cost { input: cost.0, output: cost.1 }),
+            tiers: evolve_core::types::Tiers { reasoning: 0.75, coding: 0.75, vision: 0.0, agentic: 0.75 },
+            ..Default::default()
+        }
+    }
+
+    /// 同价模型必须同档（2026-10 修复）：此前按目录位置取秩，两条同为 0 价
+    /// （免费）的模型会被拆成 cheap / premium，premium 那条被价位硬闸挡掉
+    /// → "免费模型反而不给用"。秩改为取并列成本区间的中点。
+    #[test]
+    fn equal_cost_models_share_the_price_tier() {
+        let snap = vec![mk("twin-free", (0.0, 0.0)), mk("twin-paid", (0.0, 0.0))];
+        let all: std::collections::HashSet<String> = snap.iter().map(|m| m.id.clone()).collect();
+        let got = assign_tags_within(&snap, &all);
+        assert_eq!(
+            got.get("twin-free").map(|x| x.1),
+            got.get("twin-paid").map(|x| x.1),
+            "equal cost must map to the same price tier"
+        );
     }
 }

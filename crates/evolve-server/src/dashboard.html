@@ -83,6 +83,20 @@ body { background:var(--bg); color:var(--fg); font:13.5px/1.55 -apple-system,"Pi
                   font-size:11.5px; user-select:all; }
 .dm-banner .dm-sub { color:var(--dim); }
 
+/* 开箱可用横幅（默认接入的 provider：填 key 指引 + 免费模型清单） */
+.ob-banner { display:none; flex-direction:column; align-items:flex-start; gap:6px; margin-bottom:14px; padding:10px 14px;
+             border:1px solid var(--border); border-radius:10px; background:var(--card);
+             font-size:12.5px; line-height:1.55; }
+.ob-banner .ob-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.ob-banner b { color:var(--fg); }
+.ob-banner .ob-apply { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:6px;
+                       border:1px solid var(--green); color:var(--green); text-decoration:none; font-size:11.5px; }
+.ob-banner .ob-apply:hover { background:color-mix(in srgb, var(--green) 12%, transparent); }
+.ob-banner .ob-models { color:var(--dim); font-size:11.5px; }
+.ob-free-list { display:flex; flex-wrap:wrap; gap:5px; }
+.ob-free-list span { padding:2px 7px; border-radius:5px; background:var(--badge-ok-bg); color:var(--green);
+                     border:1px solid var(--border); font-size:11px; }
+
 /* A-decision：决策流 + 解剖面板主从布局 */
 .duo { display:grid; grid-template-columns: 1.25fr 1fr; gap:14px; align-items:start; margin-bottom:14px; }
 @media (max-width:1280px){ .duo { grid-template-columns:1fr; } }
@@ -249,6 +263,7 @@ table.mx tr.win td { color:var(--green); }
   <select class="lang-sel" id="lang-sel"></select>
 </header>
 <div id="dm-banner" class="dm-banner" style="display:none"></div>
+<div id="ob-banner" class="ob-banner" style="display:none"></div>
 <main>
   <div class="duo">
     <section class="card">
@@ -305,6 +320,7 @@ table.mx tr.win td { color:var(--green); }
     </h2>
     <div class="sub" style="margin-bottom:8px" data-i18n="provider_sub">管理 provider：按方案档位（tier）· 拉取各自模型清单 · 探测配额窗口 · 决定是否参与路由分配</div>
     <div id="pv-scan-progress" style="display:none;margin-bottom:8px;padding:8px 10px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;font-size:11px;font-family:monospace;white-space:pre-wrap;max-height:200px;overflow:auto;color:var(--dim)"></div>
+    <div id="portfolio-view" style="margin-bottom:12px"></div>
     <div id="providers-list"></div>
   </section>
 
@@ -621,11 +637,35 @@ const T = {
   tags_auto:{zh:'自动', en:'auto', ko:'자동', ja:'自動', es:'auto', fr:'auto'},
   tags_reset:{zh:'恢复自动', en:'Reset', ko:'초기화', ja:'自動に戻す', es:'Restablecer', fr:'Réinitialiser'},
   tags_basis:{zh:'分位基准：可用 {u} / 全部 {n}（冷却/闸门/无凭据的模型动态排除）', en:'quantile basis: usable {u} / {n} (cooling, gated or keyless models excluded dynamically)', ko:'분위 기준: 사용 가능 {u}/{n}', ja:'分位基準：利用可能 {u}/{n}', es:'base de cuantiles: usables {u}/{n}', fr:'base des quantiles : utilisables {u}/{n}'},
-  ur_no_key:{zh:'无凭据', en:'no key', ko:'키 없음', ja:'キーなし', es:'sin clave', fr:'sans clé'},
-  ur_deleted:{zh:'已删除', en:'deleted', ko:'삭제됨', ja:'削除済み', es:'eliminado', fr:'supprimé'},
+  pf_title:{zh:'路由组合（provider 名额 × 能力/价位格位）', en:'Routing portfolio (provider slots × capability/price cells)', ko:'라우팅 포트폴리오', ja:'ルーティング・ポートフォリオ', es:'Portafolio de enrutado', fr:'Portefeuille de routage'},
+  pf_sub:{zh:'决策时实际可用的模型池：每家 provider 的名额上限、9 格覆盖、免费直通车（必选且不占名额）', en:'the model pool the router actually picks from: per-provider slot caps, 9-cell coverage, and free models (always in, never counted)', ko:'라우터가 실제로 고르는 모델 풀', ja:'ルーターが実際に選ぶモデルプール', es:'el pool real del enrutador', fr:'le pool réel du routeur'},
+  pf_slot_cap:{zh:'名额上限', en:'slot cap', ko:'슬롯 상한', ja:'スロット上限', es:'tope de slots', fr:'plafond de slots'},
+  pf_slots:{zh:'占名额', en:'slots used', ko:'슬롯 사용', ja:'スロット使用', es:'slots usados', fr:'slots utilisés'},
+  pv_quota_unpublished:{zh:'官方未公布各档位的绝对配额（仅相对口径）——窗口留空即按实测/官方接口为准', en:'the provider does not publish absolute per-plan quotas (relative only) — leave the window fields empty and the gateway will use the official endpoint / observations', ko:'공식 절대 쿼터 미공개', ja:'公式の絶対クォータ未公開', es:'cuotas absolutas no publicadas', fr:'quotas absolus non publiés'},
+  pv_pick_plan:{zh:'去选方案', en:'pick plan', ko:'요금제 선택', ja:'プランを選ぶ', es:'elegir plan', fr:'choisir un plan'},
+  ob_needs_plan:{zh:'{p} 是订阅制端点但未选方案：配额（5h/周/月）、可用模型范围都由方案决定，请在 Provider 编辑里选一个档位', en:'{p} is a subscription endpoint with no plan selected: quotas (5h/weekly/monthly) and model access depend on it — pick a tier in the Provider editor', ko:'{p}: 요금제 미선택', ja:'{p}：プラン未選択', es:'{p} sin plan', fr:'{p} sans plan'},
+  pf_models:{zh:'入选模型', en:'selected models', ko:'선택 모델', ja:'選択モデル', es:'modelos elegidos', fr:'modèles retenus'},
+  pf_free:{zh:'免费直通车', en:'free (always in)', ko:'무료', ja:'無料', es:'gratis', fr:'gratuit'},
+  pf_cell_empty:{zh:'本格无模型', en:'no model in this cell', ko:'해당 셀 없음', ja:'該当セルなし', es:'sin modelo en esta celda', fr:'aucun modèle'},
+  pf_cell_unselected:{zh:'有模型未入选（名额/评分）', en:'models exist but not selected', ko:'미선택', ja:'未選択', es:'sin seleccionar', fr:'non sélectionné'},
+  pf_degraded:{zh:'已降级 · 下次探测', en:'degraded · next probe', ko:'성능 저하 · 다음 탐색', ja:'低下 · 次回探査', es:'degradado · próxima sonda', fr:'dégradé · prochaine sonde'},
+  pf_degraded_hint:{zh:'provider 级故障（网络/鉴权）：不进主池，但会定时探活，成功后立即放回', en:'provider-level failure (network/auth): out of the main pool but probed on a backoff, revived on success', ko:'provider 장애: 주 풀 제외, 주기적 탐색', ja:'provider 障害：主プール外・定期探査', es:'fallo del proveedor: fuera del pool principal, con sondas', fr:'panne fournisseur : hors pool, sondé'},
+  ob_title:{zh:'开箱可用 · 默认接入', en:'Ready out of the box · default providers', ko:'기본 제공 · 기본 연동', ja:'すぐ使える · 既定の接続先', es:'Listo para usar · proveedores por defecto', fr:'Prêt à l’emploi · fournisseurs par défaut'},
+  ob_needs_key:{zh:'{p} 需要 API key 才能路由：', en:'{p} needs an API key to route:', ko:'{p} 라우팅에는 API 키가 필요합니다:', ja:'{p} のルーティングには API キーが必要です:', es:'{p} necesita una API key para enrutar:', fr:'{p} a besoin d’une clé API pour router :'},
+  ob_apply:{zh:'申请 API key', en:'Get an API key', ko:'API 키 발급', ja:'API キーを取得', es:'Obtener API key', fr:'Obtenir une clé'},
+  ob_docs:{zh:'文档', en:'Docs', ko:'문서', ja:'ドキュメント', es:'Docs', fr:'Docs'},
+  ob_models:{zh:'{n} 个模型', en:'{n} models', ko:'모델 {n}개', ja:'{n} モデル', es:'{n} modelos', fr:'{n} modèles'},
+  ob_free_avail:{zh:'可直接使用 {n} 个免费模型（优先路由，不消耗额度）', en:'{n} free models ready to use (preferred, no quota consumed)', ko:'무료 모델 {n}개 바로 사용 가능', ja:'無料モデル {n}件をすぐ利用可能', es:'{n} modelos gratuitos listos', fr:'{n} modèles gratuits prêts'},
+  ob_free_none:{zh:'暂未发现免费模型（免费名单每日自动刷新）', en:'no free models found yet (the free list refreshes daily)', ko:'무료 모델 없음(매일 갱신)', ja:'無料モデルは未検出（毎日更新）', es:'aún sin modelos gratuitos', fr:'aucun modèle gratuit pour l’instant'},
+  ob_free_list:{zh:'免费模型', en:'Free models', ko:'무료 모델', ja:'無料モデル', es:'Modelos gratuitos', fr:'Modèles gratuits'},
+  ob_hint:{zh:'这些 provider 开箱即接入：填上 key 即可路由；未填 key 时不出现在路由候选里。免费模型始终优先。', en:'These providers are onboarded by default: add a key to start routing; without one they are excluded from routing. Free models always win.', ko:'기본 연동된 provider입니다. 키를 넣으면 라우팅됩니다. 무료 모델이 우선입니다.', ja:'既定で接続済み：キーを入れるとルーティング対象になります。無料モデルが優先されます。', es:'Estos proveedores vienen por defecto: añade una key para enrutar. Los modelos gratuitos tienen prioridad.', fr:'Ces fournisseurs sont préconfigurés : ajoutez une clé pour router. Les modèles gratuits sont prioritaires.'},
+  pv_free:{zh:'{n} 免费', en:'{n} free', ko:'무료 {n}', ja:'無料 {n}', es:'{n} gratis', fr:'{n} gratuits'},
+  pv_free_hint:{zh:'命名带 free 的免费模型（zen 的 -free、OpenRouter 的 :free）：路由优先、不消耗套餐额度', en:'models named free (zen -free, OpenRouter :free): preferred by routing and not billed to plan quota', ko:'이름에 free가 포함된 무료 모델: 라우팅 우선, 쿼터 미소모', ja:'名前に free を含む無料モデル：優先的に使用、枠を消費しません', es:'modelos con free en el nombre: prioritarios y sin consumo de cuota', fr:'modèles « free » : prioritaires, hors quota'},
+  pv_key_missing:{zh:'缺 API key · 不参与路由', en:'no API key · excluded from routing', ko:'API 키 없음 · 라우팅 제외', ja:'API キーなし · ルーティング対象外', es:'sin API key · excluido del enrutado', fr:'pas de clé · exclu du routage'},
+  ur_no_key:{zh:'无凭据', en:'no key', ko:'키 없음', ja:'キーなし', es:'sin clave', fr:'sans clé'},  ur_deleted:{zh:'已删除', en:'deleted', ko:'삭제됨', ja:'削除済み', es:'eliminado', fr:'supprimé'},
   ur_gated:{zh:'配额闸门', en:'quota gated', ko:'쿼터 차단', ja:'クォータ遮断', es:'cuota bloqueada', fr:'quota bloqué'},
   ur_cooling:{zh:'冷却中', en:'cooling', ko:'쿨링', ja:'クーリング', es:'enfriando', fr:'en refroidissement'},
-  act_basis:{zh:'活跃集（可路由）：{a} / {n} · 50 = 新发布保底 20 + 最近使用(14天内) 30，两侧不足互借；开启新模型自动顶掉最低分者', en:'active (routable): {a} / {n} · 50 = newest-release quota 20 + recently-used (14d) 30, borrowed across when short; enabling swaps out the lowest-ranked', ko:'활성(라우팅 가능): {a}/{n} · 50 = 신규 20 + 최근 사용 30', ja:'アクティブ：{a}/{n} · 50 = 新着枠 20 + 直近使用 30', es:'activos: {a}/{n} · 50 = nuevos 20 + usados 30', fr:'actifs : {a}/{n} · 50 = nouveaux 20 + récents 30'},
+  act_basis:{zh:'路由组合（可路由）：{a} / {n} · 名额 = max(50, 健康 provider × 8)，单 provider ≤25%；每家内先补齐 能力×价位 9 格，免费模型必选且不占名额', en:'routing portfolio (routable): {a} / {n} · cap = max(50, healthy providers × 8), each provider ≤25%; per provider it fills the capability×price cells first; free models are always in and do not consume slots', ko:'라우팅 포트폴리오: {a}/{n}', ja:'ルーティング・ポートフォリオ：{a}/{n}', es:'portafolio de enrutado: {a}/{n}', fr:'portefeuille de routage : {a}/{n}'},
   act_on:{zh:'已启用', en:'active', ko:'활성', ja:'有効', es:'activo', fr:'actif'},
   act_off:{zh:'启用', en:'enable', ko:'활성화', ja:'有効化', es:'activar', fr:'activer'},
   act_disable:{zh:'停用', en:'disable', ko:'비활성', ja:'無効化', es:'desactivar', fr:'désactiver'},
@@ -790,6 +830,10 @@ function fmtK(n){ return n==null ? '-' : (n>=1e6 ? (n/1e6).toFixed(1)+'M' : n>=1
 function fmtCost(n, cur){ if (n==null) return '-'; const sym = cur==='CNY' ? '¥' : '$'; return sym + (n>=100 ? n.toFixed(0) : n.toFixed(n<1 ? 3 : 2)); }
 function fmtMs(ms){ return ms==null ? '-' : (ms>=10000 ? (ms/1000).toFixed(0)+'s' : ms>=1000 ? (ms/1000).toFixed(1)+'s' : Math.round(ms)+'ms'); }
 function fmtRate(r){ return r==null ? '-' : r.toFixed(1); }
+// 冷却原因压缩成一行（完整原文在 title 里）
+function shortCause(c){ const one = String(c).replace(/\s+/g,' ').trim(); return one.length<=34 ? one : one.slice(0,33)+'…'; }
+// 时长（探测倒计时用）：<60s 给秒，否则给分
+function fmtDur(ms){ if (ms==null) return '-'; const s = Math.max(0, Math.round(ms/1000)); return s < 60 ? s + 's' : Math.round(s/60) + 'm'; }
 function timeStr(d){ return d.toLocaleTimeString(LOCALE[lang], {hour12:false}); }
 function feedTokens(e){
   let s = fmtK(e.prompt_tokens ?? e.est_tokens)+t('s_in')+' '+fmtK(e.completion_tokens ?? 0)+t('s_out');
@@ -1341,7 +1385,7 @@ function renderAutopsy(e){
   if (hint) hint.style.display = 'none';
 }
 
-const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0 };
+const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0, onboarding:null, portfolio:null };
 
 // 评分矩阵模型名 → 飞轮行高亮（事件委托，覆盖后续新增的矩阵单元格）
 feed.addEventListener('click', ev => {
@@ -1553,8 +1597,65 @@ const TIER_PRESETS = {
   'volces-coding': {'lite':[null,null,null],'pro':[null,null,null]},
 };
 const PLAN_TO_PRESET = {coding:'zhipu-coding', agent:'volces-coding', go:'zai-devpack', api:'zhipu-coding'};
+// 档位下拉：选项来自服务端 /api/plans 的官方方案数据（tier_options / tier_names）。
+// 同一 provider 的**每个账号**各自选（同 provider 不同账号可买不同方案）。
+// 官方未公布绝对配额时（如 minimax 只给相对口径），只列档位名 + 提示留空即可。
+// 当前抽屉对应的方案键：优先编辑中 provider 的 plan_key；新增/未知时按 plan_kind
+// 反查一个代表方案（仅用于列出"有哪些档位可选"，配额仍以各方案自己的数据为准）
+function currentPlanKey(){
+  const k = (typeof drawerKey !== 'undefined' && drawerKey) ? drawerKey : '';
+  const row = k ? (state.providers || []).find(p => p.key === k) : null;
+  if (row && row.plan_key) return row.plan_key;
+  const el = document.getElementById('pv-planKind');
+  const kind = el ? el.value : '';
+  const hit = (state.plans || []).find(p => p.plan_kind === kind);
+  return hit ? hit.key : '';
+}
+function planProfileFor(planKey){
+  return (state.plans || []).find(p => p.key === planKey) || null;
+}
+function tierSelectHtml(v){
+  const prof = planProfileFor(currentPlanKey());
+  const opts = (prof && prof.tier_options) || [];
+  const names = (prof && prof.tier_names) || [];
+  let html = '<option value="">-</option>';
+  const seen = new Set();
+  for (const o of opts) {
+    seen.add(o.tier);
+    const q = [o.h5 != null ? '5h ' + fmtK(o.h5) : null,
+               o.weekly != null ? '周 ' + fmtK(o.weekly) : null,
+               o.monthly != null ? '月 ' + fmtK(o.monthly) : null].filter(Boolean).join(' · ');
+    html += '<option value="' + esc(o.tier) + '"' + (v.tier === o.tier ? ' selected' : '') + '>'
+      + esc(o.tier) + (q ? ' — ' + esc(q) : '') + '</option>';
+  }
+  for (const n of names) {
+    if (seen.has(n)) continue;
+    const known = ['lite','pro','max','go','go-plus','explore','build'];
+    if (known.includes(n) || opts.length === 0) {
+      html += '<option value="' + esc(n) + '"' + (v.tier === n ? ' selected' : '') + '>' + esc(n) + '</option>';
+    }
+  }
+  // 当前已选但不在列表里（历史/自定义值）→ 保留，避免静默丢配置
+  if (v.tier && !seen.has(v.tier) && !names.includes(v.tier)) {
+    html += '<option value="' + esc(v.tier) + '" selected>' + esc(v.tier) + '</option>';
+  }
+  const hint = (prof && prof.quotas_published === false)
+    ? '<div class="dim2" style="font-size:11px;grid-column:2">' + esc(t('pv_quota_unpublished')) + '</div>' : '';
+  return '<select id="pv-tier" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px">'
+    + html + '</select>';
+}
+
 function applyTierPreset(planKind, tier, fields){
   // 套餐下拉值 → 精确映射 preset 键（旧版 includes 匹配曾把 zhipu 窗口误套给 minimax）
+  // 优先用服务端官方方案配额（与后端注册表同源）；找不到再退回客户端旧表
+  const prof = planProfileFor(currentPlanKey());
+  const fromServer = prof && (prof.tier_options || []).find(o => o.tier === tier);
+  if (fromServer) {
+    fields.w5h.value = fromServer.h5 != null ? fromServer.h5 : '';
+    fields.wweek.value = fromServer.weekly != null ? fromServer.weekly : '';
+    fields.wmonth.value = fromServer.monthly != null ? fromServer.monthly : '';
+    return;
+  }
   const key = PLAN_TO_PRESET[planKind];
   const p = key ? TIER_PRESETS[key] && TIER_PRESETS[key][tier] : null;
   if (!p) return;
@@ -1588,7 +1689,9 @@ function renderProviders(){
     const docs = p.docs_url ? ' <a href="'+esc(p.docs_url)+'" target="_blank" rel="noopener" title="'+esc(t('pv_docs'))+'" style="color:var(--dim);display:inline-flex;vertical-align:middle"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>' : '';
     // review：tier 名显示原档位；配额带单位——opencode-go 的 plan_kind 是
     // 'go'（美元制），与 'dollar' 同为 $ 计价
-    const tName = p.tier || '-';
+    // 生效档位（服务端 tier_effective：本条目显式值 → 方案级 override → 同方案其它条目）
+    // ——与 macOS 面板同源；此前读 p.tier，导致"面板设了 zhipu-coding=pro 这行却显示空"
+    const tName = p.tier_effective || p.tier || '-';
     const isDollar = p.plan_kind === 'dollar' || p.plan_kind === 'go';
     const qUnit = {credits:'cr', afp:'AFP', token:'tok'}[p.plan_kind] || '';
     const fq = v => v == null ? '-' : (isDollar ? '$'+fmtK(v) : fmtK(v) + (qUnit ? ' '+qUnit : ''));
@@ -1596,8 +1699,8 @@ function renderProviders(){
       : (typeof p.model_count === 'number' ? p.model_count
       : (p.fetched_models ? String(p.fetched_models).split(',').filter(s => s.trim()).length : 0));
     const tierColors = {lite:'#64748b', pro:'var(--blue)', max:'var(--amber)', go:'var(--green)', 'go-plus':'var(--green)'};
-    const tierColor = tierColors[p.tier] || 'var(--dim)';
-    const tierBadge = p.tier
+    const tierColor = tierColors[p.tier_effective || p.tier] || 'var(--dim)';
+    const tierBadge = (p.tier_effective || p.tier)
       ? '<span class="pbadge" style="background:var(--card2);color:'+tierColor+'">'+esc(tName)+'</span>'
       : '';
     // 配额展示：全部取自服务端派生视图 p.quota（单一事实源，与 macOS 面板同源）
@@ -1634,6 +1737,26 @@ function renderProviders(){
         + winBar(t('pv_month'), 'monthly')
         + '</div>';
     }
+    // provider 级降级（网络/鉴权）：显示 "degraded · next probe X"——
+    // 关键信息直接可见（MenuBarExtra 的 tooltip 不触发）
+    const issueBadge = p.provider_issue
+      ? '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)">'
+        + esc(t('pf_degraded')) + ' ' + fmtDur(p.provider_issue.next_probe_ms || 0) + '</span>'
+      : '';
+    // 免费模型数（命名带 free 段：zen 的 -free / OpenRouter 的 :free）——
+    // 路由优先且不消耗套餐额度；缺 key 时给"申请"入口
+    const freeBadge = p.free_models > 0
+      ? '<span class="pbadge" style="background:var(--badge-ok-bg);color:var(--green)" title="'+esc(t('pv_free_hint'))+'">'+esc(t('pv_free').replace('{n}', p.free_models))+'</span>'
+      : '';
+    // 订阅型端点未选方案 → 提醒去选（配额/模型范围/并发都由方案决定）
+    const planMissing = p.needs_plan
+      ? '<a class="ob-apply" href="#" onclick="openProviderDrawer(\'' + esc(p.key) + '\', ' + (p.source === 'manual') + '); return false;" style="border-color:var(--amber);color:var(--amber)">' + esc(t('pv_pick_plan')) + '</a>'
+      : '';
+    const keyMissing = p.needs_key
+      ? (p.key_url
+          ? '<a class="ob-apply" href="'+esc(p.key_url)+'" target="_blank" rel="noopener" title="'+esc(t('pv_key_missing'))+'">'+esc(t('ob_apply'))+' ↗</a>'
+          : '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)">'+esc(t('pv_key_missing'))+'</span>')
+      : '';
     // Provider 测实时余量（用户裁决：以 Provider 测为准；本地 token 估算仅兜底）
     let provHtml = '';
     const obs = p.observed || {};
@@ -1675,8 +1798,12 @@ function renderProviders(){
       if (s >= 60) return Math.floor(s/60)+'m'+(s%60)+'s';
       return s+'s';
     };
+    // 非配额类冷却把原因原文带出来（配额类看 5h/monthly full 即可，不重复）
+    const coolCause = (p.cooling && typeof p.cooling.cause === 'string') ? p.cooling.cause : '';
+    const coolIsQuota = coolCause.includes('quota window exhausted');
     const statusBadge = onCool
-      ? '<span class="la f">⏳ '+fmtCd(coolMs)+'</span>'
+      ? '<span class="la f" title="'+esc(coolCause)+'">⏳ '+fmtCd(coolMs)
+        + (coolIsQuota || !coolCause ? '' : ' · '+esc(shortCause(coolCause)))+'</span>'
       : '<span class="la c">✓</span>';
     // w3 永久黑名单（上游 404 且不在模型列表）：手动恢复入口（按来源账号逐个清）
     const blocked = p.blocked_models || [];
@@ -1714,7 +1841,7 @@ function renderProviders(){
       + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
       +   '<b style="font-size:13px">'+esc(p.key)+'</b> '+srcBadge+statusBadge+dupBadge+unblockBtn
       +   ' <span class="pbadge" style="background:var(--tab-on-bg);color:var(--blue)">'+esc(kindBadge)+'</span>'
-      +   ' ' + quotaSrc + ' ' + assignBadge
+      +   ' ' + quotaSrc + ' ' + assignBadge + ' ' + issueBadge + ' ' + freeBadge + ' ' + planMissing + ' ' + keyMissing
       +   summary + disabled + docs + winInfo + paygBal
       +   '<span style="margin-left:auto"></span>'
       +   '<button class="lang-btn" data-pv-edit="'+esc(p.key)+'" data-pv-source="'+esc(p.source)+'">'+esc(t('pv_edit'))+'</button>'
@@ -1766,7 +1893,9 @@ function restoreProvider(key){
   fetch('/api/providers', {method:'POST', headers:{'content-type':'application/json'},
     body: JSON.stringify({...p, key, disabled: false})}).then(refresh);
 }
+let drawerKey = '';
 function openProviderDrawer(key, isManual){
+  drawerKey = key || '';
   const isNew = !key;
   const existing = isNew ? null : (state.providers||[]).find(x => x.key === key);
   const drawer = document.getElementById('pv-drawer');
@@ -1786,7 +1915,7 @@ function openProviderDrawer(key, isManual){
       <option value="go" ${v.plan_kind==='go'?'selected':''}>OpenCode Go (Token)</option>
       <option value="api" ${v.plan_kind==='api'?'selected':''}>API 按量</option>
     </select>`],
-    ['pv_field_tier',`<select id="pv-tier" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px"><option value="">-</option><option value="lite" ${v.tier==='lite'?'selected':''}>Lite</option><option value="pro" ${v.tier==='pro'?'selected':''}>Pro</option><option value="max" ${v.tier==='max'?'selected':''}>Max</option><option value="go" ${v.tier==='go'?'selected':''}>Go</option><option value="go-plus" ${v.tier==='go-plus'?'selected':''}>Go Plus</option></select>`],
+    ['pv_field_tier', tierSelectHtml(v)],
     ['pv_field_window5h',`<input id="pv-w5h" type="number" min="0" value="${v.window_5h??''}" placeholder="2000" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px">`],
     ['pv_field_windowWeekly',`<input id="pv-wweek" type="number" min="0" value="${v.window_weekly??''}" placeholder="10000" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px">`],
     ['pv_field_windowMonthly',`<input id="pv-wmonth" type="number" min="0" value="${v.window_monthly??''}" placeholder="50000" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px">`],
@@ -2061,6 +2190,45 @@ document.getElementById('pw-btn').addEventListener('click', () => {
   renderPwPanel();
 });
 
+// 路由组合视图（服务端 /api/portfolio 单一事实源）：provider 名额 + 9 格覆盖。
+// 目的：一眼看出"决策时哪些 provider 有份、每格是否有人"——这正是 2026-10 事故
+// （一家新模型刷屏把别家全挤出可路由范围）需要的可见性。
+function renderPortfolio(){
+  const cont = document.getElementById('portfolio-view');
+  const pf = state.portfolio;
+  if (!cont) return;
+  if (!pf || !Array.isArray(pf.providers) || !pf.providers.length) { cont.innerHTML = ''; return; }
+  const tn = pf.totals || {};
+  const head = '<div class="sub" style="margin:6px 0 6px">' + esc(t('pf_title'))
+    + ' · ' + esc(t('pf_slots')) + ' ' + (tn.selected || 0) + '/' + (pf.cap || 0)
+    + ' · ' + esc(t('pf_free')) + ' ' + (tn.free || 0)
+    + ' · ' + esc(t('pf_models')) + ' ' + (tn.selected_total || 0) + '/' + (tn.models || 0) + '</div>'
+    + '<div class="dim2" style="margin:-2px 0 8px">' + esc(t('pf_sub')) + '</div>';
+  const rows = pf.providers.map(p => {
+    const cells = (p.cells || []).map(c => {
+      const sel = c.selected;
+      const col = c.model && sel ? 'var(--badge-ok-bg)' : (c.model ? 'var(--input-bg)' : 'transparent');
+      const fg = c.model && sel ? 'var(--green)' : 'var(--dim)';
+      const title = c.model ? (c.model + (sel ? '' : ' · ' + t('pf_cell_unselected'))) : t('pf_cell_empty');
+      return '<span title="' + esc(title) + '" style="padding:1px 5px;border-radius:4px;border:1px solid var(--border);background:'
+        + col + ';color:' + fg + ';font-size:10px">' + esc(c.cell) + (c.model ? '' : ' ∅') + '</span>';
+    }).join(' ');
+    const issue = p.issue
+      ? '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)">' + esc(t('pf_degraded'))
+        + ' ' + fmtDur(p.issue.next_probe_ms || 0) + '</span>' : '';
+    const free = p.free > 0
+      ? '<span class="pbadge" style="background:var(--badge-ok-bg);color:var(--green)">' + esc(t('pf_free')) + ' ' + p.free + '</span>' : '';
+    return '<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px">'
+      + '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+      + '<b style="font-size:12px">' + esc(p.provider) + '</b>'
+      + '<span class="dim2" style="font-size:11px">' + p.slots + '/' + p.slot_cap + ' ' + esc(t('pf_slot_cap'))
+      + ' · ' + (p.models_endpoint || p.models) + ' models</span>' + free + issue + '</div>'
+      + '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:5px">' + cells + '</div>'
+      + '</div>';
+  }).join('');
+  cont.innerHTML = head + rows;
+}
+
 async function refresh(){
   try {
     // today/yesterday = 日历口径（本地时区由浏览器算好，服务端不引时区库）
@@ -2073,11 +2241,11 @@ async function refresh(){
       }
       return encodeURIComponent(state.win);
     })();
-    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, liveR] = await Promise.all([
+    const [statsR, healthR, quotaR, benchR, pwR, plansR, trendsR, provR, liveR, obR, pfR] = await Promise.all([
       fetch('/api/stats?window='+winParam), fetch('/api/health'), fetch('/api/quota'), fetch('/api/benchmarks'),
       fetch('/api/policy-weights'), fetch('/api/plans'),
       fetch('/api/trends?window='+encodeURIComponent(state.twin)),
-      fetch('/api/providers'), fetch('/api/live')]);
+      fetch('/api/providers'), fetch('/api/live'), fetch('/api/onboarding'), fetch('/api/portfolio')]);
     const statsRoot = await statsR.json();
     state.statsRoot = statsRoot;
     state.stats  = statsRoot.models  || {};
@@ -2093,6 +2261,8 @@ async function refresh(){
     state.inflight = liveBody.inflight || 0;
     state.inflightDetail = liveBody.inflight_detail || [];
     state.version = liveBody.version || '';
+    try { state.onboarding = await obR.json(); } catch(_) { state.onboarding = null; }
+    try { state.portfolio = await pfR.json(); } catch(_) { state.portfolio = null; }
     { const v = document.getElementById('app-version');
       if (v) v.textContent = state.version ? 'v' + state.version : ''; }
     renderPlans();
@@ -2105,12 +2275,56 @@ async function refresh(){
     renderHealthQuota();
     renderWheel();
     renderDecisionBanner();
+    renderOnboarding();
+    renderPortfolio();
     renderTags();
   } catch(e){ console.error('dashboard refresh failed', e); }
 }
 
-function renderDecisionBanner(){
-  const b = document.getElementById('dm-banner');
+// 开箱可用横幅：默认接入的 provider（opencode-go / openrouter）状态。
+// 缺 key → 给"申请 API key"入口；有 key → 提示已可用。同时列出免费模型，
+// 让用户知道"直接就能用哪些"（免费模型优先路由、不消耗额度）。
+function renderOnboarding(){
+  const b = document.getElementById('ob-banner');
+  if (!b) return;
+  const ob = state.onboarding;
+  if (!ob || !Array.isArray(ob.defaults) || !ob.defaults.length) { b.style.display = 'none'; return; }
+  const rows = ob.defaults.map(d => {
+    const apply = d.key_url
+      ? '<a class="ob-apply" href="'+esc(d.key_url)+'" target="_blank" rel="noopener">'+esc(t('ob_apply'))+' ↗</a>' : '';
+    const docs = d.docs_url
+      ? '<a class="ob-apply" style="border-color:var(--border);color:var(--dim)" href="'+esc(d.docs_url)+'" target="_blank" rel="noopener">'+esc(t('ob_docs'))+'</a>' : '';
+    const free = d.free_models > 0
+      ? '<span class="pbadge" style="background:var(--badge-ok-bg);color:var(--green)" title="'+esc(t('pv_free_hint'))+'">'+esc(t('pv_free').replace('{n}', d.free_models))+'</span>' : '';
+    const state_ = d.needs_key
+      ? '<span class="pbadge" style="background:var(--badge-dead-bg);color:var(--red)">'+esc(t('pv_key_missing'))+'</span>'
+      : '<span class="pbadge" style="background:var(--badge-ok-bg);color:var(--green)">'+esc(t('pv_assigned'))+'</span>';
+    return '<div class="ob-row"><b>'+esc(d.key)+'</b>'
+      + '<span class="ob-models">'+esc(t('ob_models').replace('{n}', d.model_count))+'</span>'
+      + free + state_ + (d.needs_key ? apply : '') + docs + '</div>';
+  });
+  const freeList = (ob.free_models || []).slice(0, 24).map(m =>
+    '<span title="'+esc(m.id)+'">'+esc(m.model || m.id)+'</span>').join('');
+  const freeLine = ob.free_count > 0
+    ? '<div class="ob-row"><b>'+esc(t('ob_free_list'))+'</b><span class="dim2">'
+      + esc(t('ob_free_avail').replace('{n}', ob.free_count))+'</span></div>'
+      + '<div class="ob-free-list">'+freeList+'</div>'
+    : '<div class="ob-row dim2">'+esc(t('ob_free_none'))+'</div>';
+  const planLine = (ob.needs_plan && ob.needs_plan.length)
+    ? '<div class="ob-row" style="color:var(--amber)">⚠️ '+esc(t('ob_needs_plan').replace('{p}', ob.needs_plan.join(' / ')))+'</div>'
+    : '';
+  b.innerHTML = '<div class="ob-row"><b>'+esc(t('ob_title'))+'</b>'
+    + (ob.needs_key && ob.needs_key.length
+        ? '<span>'+esc(t('ob_needs_key').replace('{p}', ob.needs_key.join(' / ')))+'</span>' : '')
+    + '</div>'
+    + planLine
+    + rows.join('')
+    + freeLine
+    + '<div class="dim2">'+esc(t('ob_hint'))+'</div>';
+  b.style.display = 'flex';
+}
+
+function renderDecisionBanner(){  const b = document.getElementById('dm-banner');
   const d = (typeof state !== 'undefined' && state.decision) || null;
   if (!d || d.status === 'ok') { b.style.display = 'none'; return; }
   const parts = [`<b>${t(d.status === 'degraded' ? 'dm_degraded'

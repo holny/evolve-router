@@ -41,6 +41,10 @@ pub struct Inner {
     pub ccache: Mutex<crate::relay::CompletionCache>,
     /// 按量 provider 余额缓存（provider key → /user/balance 响应节选；60s 节流刷新）
     pub payg_balance: Mutex<HashMap<String, Value>>,
+    /// 会话级模型拉黑（2026-10）：某模型对**这个会话的历史**返回请求形状类 4xx
+    /// （典型：deepseek 的 `reasoning_content must be passed back`）→ 该会话别再试它，
+    /// 其它会话不受影响。值 = model_id → (原因, 解禁时刻)
+    pub session_quarantine: Mutex<HashMap<String, HashMap<String, (String, u64)>>>,
     /// models.dev 参考刷新待执行（build_state 同步上下文不能 spawn，交给 start_background）
     pub modelsdev_refresh_due: bool,
     /// 进程内剔除表（用户裁决 2026-10）：协议不支持（如 Responses-only）且用户
@@ -139,13 +143,17 @@ pub fn build_state(config: FileConfig) -> AppState {
 }
 
 fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>) -> AppState {
+    let mut config = config;
     let mut modelsdev_refresh_due = false;
+    // 发现先跑：默认接入的"用户是否已有"判定要同时看配置与 agent 发现
+    let mut discovered = evolve_discovery::discover(&config.discovery.agents);
+    // 默认接入（用户需求 2026-10）：缺失则播种 opencode-go / openrouter
+    seed_default_providers(&mut config, &discovered, config_src.as_deref());
     // overrides 提前加载：removed_base_urls 过滤初始发现（重启不复活已删 provider）
     let ov = merge_config_providers(&config.data.dir, &config.providers);
     let removed: std::collections::HashSet<String> =
         ov.removed_base_urls.iter().cloned().collect();
 
-    let mut discovered = evolve_discovery::discover(&config.discovery.agents);
     discovered.retain(|m| !removed.contains(&m.base_url));
 
     // remote /models discovery FIRST (provider union), THEN models.dev
@@ -153,6 +161,8 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
     if config.catalog.remote_fetch {
         let mut base_records = config.model_records();
         base_records.extend(discovered.iter().cloned());
+        // providers 段里只有 base_url 的端点也要拉 /models（占位记录只用于分组）
+        base_records.extend(config.endpoint_placeholders());
         let self_origin = format!("{}:{}", config.server.host, config.server.port);
         discovered.extend(evolve_discovery::remote::discover_remote_blocking(
             &base_records,
@@ -313,6 +323,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         distiller,
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
+        session_quarantine: Mutex::new(HashMap::new()),
         modelsdev_refresh_due,
         excluded_models: Mutex::new(HashMap::new()),
     })
@@ -435,6 +446,117 @@ pub fn effective_overrides(st: &AppState) -> Overrides {
         .map(|g| g.clone())
         .unwrap_or_default();
     merge_config_providers(&st.config.data.dir, &providers)
+}
+
+/// 默认接入播种（用户需求 2026-10）：全新安装自动登记 opencode-go 与 openrouter。
+///
+/// 规则（用户口径）：**用户已有就不接入**——任一来源（配置文件 providers /
+/// agent 配置发现出的模型）已覆盖同一 host 即跳过；缺失才补一条
+/// `origin = "default"` 的空 key 条目（`api_key` 留空 → 面板/网页提示填入，
+/// 并给出申请入口），使网关开箱即用地展示这两个 provider 的模型清单
+/// （两者的 `/models` 都是公开接口）与其中的免费模型。
+///
+/// 幂等：落盘前先解析现有配置文本，无新增则不写。`config_src` 为 None
+/// （纯内存构建，如 CLI/tests）时只改内存配置、不写文件。
+fn seed_default_providers(
+    config: &mut FileConfig,
+    discovered: &[evolve_core::types::ModelRecord],
+    config_src: Option<&std::path::Path>,
+) {
+    let entry = |d: &evolve_core::provider_info::DefaultProvider| evolve_core::config::ProviderCfg {
+        key: d.key.to_string(),
+        base_url: d.base_url.to_string(),
+        api_key: None,
+        api_key_env: None,
+        protocol: Some("openai".into()),
+        plan_kind: Some(d.plan_kind.into()),
+        tier: None,
+        docs_url: Some(d.docs_url.into()),
+        disabled: None,
+        origin: Some("default".into()),
+        // 申请 key 的入口写进 source_path：面板/网页据此渲染"去申请"链接
+        source_path: Some(format!("default onboarding · key: {}", d.key_url)),
+    };
+    // 播种前的基线：用于"首次运行（无配置文件）"时的落盘基准
+    let base_before_seed = config.clone();
+    let covered =
+        |p: &evolve_core::config::ProviderCfg, d: &evolve_core::provider_info::DefaultProvider| {
+            evolve_core::provider_info::default_provider_for(&p.base_url)
+                .map(|x| x.key == d.key)
+                .unwrap_or(false)
+                || p.key == d.key
+        };
+    // 内存配置：配置里的 providers + agent 发现（已有就不动）
+    let known: Vec<String> = config
+        .providers
+        .iter()
+        .map(|p| p.base_url.clone())
+        .chain(discovered.iter().map(|m| m.base_url.clone()))
+        .collect();
+    let missing_in_memory: Vec<&evolve_core::provider_info::DefaultProvider> =
+        evolve_core::provider_info::DEFAULT_PROVIDERS
+            .iter()
+            .filter(|d| {
+                !config.providers.iter().any(|p| covered(p, d))
+                    && !known.iter().any(|b| {
+                        evolve_core::provider_info::default_provider_for(b).map(|x| x.key)
+                            == Some(d.key)
+                    })
+            })
+            .collect();
+    if !missing_in_memory.is_empty() {
+        let keys: Vec<&str> = missing_in_memory.iter().map(|d| d.key).collect();
+        tracing::info!(providers = ?keys, "default providers registered — an API key is needed to route with them");
+        config
+            .providers
+            .extend(missing_in_memory.into_iter().map(entry));
+    }
+    // ── 落盘：**只追加、绝不删改既有条目**（2026-10 审查修复）──────────────
+    // 旧实现先把 origin=default 的条目 retain 掉再加回空模板 → 用户在配置文件里
+    // 给开箱 provider 填的 api_key 每次启动都被静默抹掉，且每次启动都重写整个文件
+    // （注释/顺序丢失），连只读的 `evo-router report` 也会改配置。
+    let Some(path) = config_src else { return };
+    // 只对 JSON/JSONC 落盘（TOML 旧文件由迁移负责，别在这里改写格式）
+    let is_json = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .map(|e| e == "json" || e == "jsonc")
+        .unwrap_or(false);
+    if !is_json {
+        return;
+    }
+    let mut on_disk = if path.is_file() {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        match evolve_core::config::FileConfig::parse_text(&text, Some(path)) {
+            Ok(c) => c,
+            Err(e) => {
+                // 绝不覆盖解析失败的既有配置（会丢用户内容）
+                tracing::warn!(error = %e, path = %path.display(), "config unparsable — skipping default-provider write");
+                return;
+            }
+        }
+    } else {
+        // 首次运行：用**播种前**的基线（若用播种后的 config，missing 永远为空 → 不落盘）
+        base_before_seed
+    };
+    let missing: Vec<&evolve_core::provider_info::DefaultProvider> =
+        evolve_core::provider_info::DEFAULT_PROVIDERS
+            .iter()
+            .filter(|d| !on_disk.providers.iter().any(|p| covered(p, d)))
+            .collect();
+    if missing.is_empty() {
+        return; // 已覆盖 → 不写盘（保住用户 key / 注释 / 字段顺序）
+    }
+    let added: Vec<String> = missing.iter().map(|d| d.key.to_string()).collect();
+    on_disk.providers.extend(missing.into_iter().map(entry));
+    on_disk.providers.sort_by(|a, b| a.key.cmp(&b.key));
+    match evolve_core::config::write_config(path, &on_disk) {
+        Ok(()) => tracing::info!(
+            path = %path.display(), providers = ?added,
+            "missing default providers appended to config (existing entries preserved)"
+        ),
+        Err(e) => tracing::warn!(error = %e, path = %path.display(), "failed to persist default providers"),
+    }
 }
 
 pub fn merge_config_providers(
@@ -896,14 +1018,23 @@ impl Inner {
         }
     }
 
-    /// 重拉远程 /models：新模型合入，已删的不动
+    /// 重拉远程 /models：新模型合入，已删的不动。
+    /// `force` = 忽略 1h 缓存（每小时 tick 走强制；启动走缓存优先，但缓存
+    /// 未覆盖的 provider 分组会自动重取——见 discover_remote_blocking_ex）
     pub fn refresh_remote_models(&self) {
-        let base_records: Vec<evolve_core::types::ModelRecord> = self.engine.catalog_snapshot();
+        self.refresh_remote_models_ex(true)
+    }
+
+    pub fn refresh_remote_models_ex(&self, force: bool) {
+        let mut base_records: Vec<evolve_core::types::ModelRecord> = self.engine.catalog_snapshot();
+        // 只有 base_url 的 provider 的端点也要继续被拉取（占位记录只用于分组）
+        base_records.extend(self.config.endpoint_placeholders());
         let self_origin = format!("http://127.0.0.1:{}", self.config.server.port);
-        let fresh = evolve_discovery::remote::discover_remote_blocking(
+        let fresh = evolve_discovery::remote::discover_remote_blocking_ex(
             &base_records,
             &self.config.data.dir,
             Some(&self_origin),
+            force,
         );
         let removed: std::collections::HashSet<String> =
             load_overrides(&self.config.data.dir).removed_base_urls.into_iter().collect();
@@ -933,6 +1064,80 @@ impl Inner {
 mod provider_merge_tests {
     use super::*;
     use evolve_core::config::ProviderCfg;
+
+    /// 默认接入（用户需求 2026-10）：全新配置播种 opencode-go + openrouter，
+    /// 空 key 落盘（提示填 key），重复运行幂等
+    #[test]
+    fn default_providers_seeded_once_and_persisted() {
+        let dir = std::env::temp_dir().join(format!("er-seed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evo-router-config.jsonc");
+        let mut cfg = FileConfig::default();
+        assert!(cfg.providers.is_empty());
+        seed_default_providers(&mut cfg, &[], Some(&path));
+        let keys: Vec<&str> = cfg.providers.iter().map(|p| p.key.as_str()).collect();
+        assert!(keys.contains(&"openrouter") && keys.contains(&"opencode-go"), "got {keys:?}");
+        assert!(cfg.providers.iter().all(|p| p.api_key.is_none()), "seeded entries stay keyless");
+        assert!(cfg.providers.iter().all(|p| p.origin.as_deref() == Some("default")));
+        // 落盘：面板/网页据此提示填 key
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("openrouter") && text.contains("opencode.ai/zen/go"));
+        // 幂等：再跑一次不新增、文件不变（避免每次启动重写配置）
+        seed_default_providers(&mut cfg, &[], Some(&path));
+        assert_eq!(cfg.providers.len(), 2);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// 回归（2026-10 审查）：已播种的条目**用户填过 key** → 再次启动必须原样保留，
+    /// 且"无缺失"时不重写文件（否则每次启动抹 key + 丢注释）
+    #[test]
+    fn seeding_preserves_user_key_and_does_not_rewrite() {
+        let dir = std::env::temp_dir().join(format!("er-seed-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("evo-router-config.jsonc");
+        // 首次：写入两个默认项（空 key）
+        let mut cfg = FileConfig::default();
+        seed_default_providers(&mut cfg, &[], Some(&path));
+        assert!(path.is_file());
+        // 用户随后在配置文件里填上 key
+        let text = std::fs::read_to_string(&path).unwrap();
+        let filled = text.replace(
+            "\"key\": \"openrouter\",\n      \"base_url\": \"https://openrouter.ai/api/v1\",\n      \"api_key\": null,",
+            "\"key\": \"openrouter\",\n      \"base_url\": \"https://openrouter.ai/api/v1\",\n      \"api_key\": \"sk-user-key\",",
+        );
+        assert_ne!(filled, text, "fixture must actually contain the openrouter entry");
+        std::fs::write(&path, &filled).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+        // 再次启动：不得改动文件，key 必须还在
+        let mut cfg2 = FileConfig::default();
+        seed_default_providers(&mut cfg2, &[], Some(&path));
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before, "no rewrite when nothing is missing");
+        assert!(after.contains("sk-user-key"), "user key must be preserved: {after}");
+    }
+
+    /// 用户已有（配置里 / agent 发现里的）同 host provider → 不重复接入
+    #[test]
+    fn default_providers_skipped_when_user_already_has_them() {
+        let mut cfg = FileConfig::default();
+        cfg.providers.push(ProviderCfg {
+            key: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            api_key: Some("sk-or-user".into()),
+            ..Default::default()
+        });
+        let discovered = vec![evolve_core::types::ModelRecord {
+            id: "opencode-go/kimi-k3".into(),
+            provider: "opencode-go".into(),
+            base_url: "https://opencode.ai/zen/go/v1".into(),
+            ..Default::default()
+        }];
+        seed_default_providers(&mut cfg, &discovered, None);
+        assert_eq!(cfg.providers.len(), 1, "must not duplicate what the user already has");
+        assert_eq!(cfg.providers[0].api_key.as_deref(), Some("sk-or-user"));
+    }
 
     /// 自指条目（base_url 指向本机网关）不是上游 → 合并时跳过，不出现在 Provider 管理
     #[test]
@@ -1067,6 +1272,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/model-tags", axum::routing::get(crate::meta::api_model_tags_get).post(crate::meta::api_model_tags_post))
         .route("/api/report", axum::routing::get(crate::meta::api_report))
         .route("/api/models/active", axum::routing::post(crate::meta::api_models_active))
+        .route("/api/onboarding", axum::routing::get(crate::meta::api_onboarding))
+        .route("/api/portfolio", axum::routing::get(crate::meta::api_portfolio))
         .route(
             "/api/plans",
             axum::routing::get(crate::meta::api_plans).post(crate::meta::api_plans_set),

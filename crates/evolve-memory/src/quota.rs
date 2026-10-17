@@ -37,8 +37,25 @@ pub struct QuotaLedger {
     provider_gate: Mutex<HashMap<String, ProviderGateState>>,
 }
 
+/// provider 级故障类型（非配额）：网络不可达 / 鉴权或区域被拒。
+/// 与配额耗尽分开记账——恢复路径不同（配额等窗口重置，这两类靠探活回生）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderIssue {
+    Network,
+    Auth,
+}
+
+impl ProviderIssue {
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProviderIssue::Network => "network unreachable",
+            ProviderIssue::Auth => "auth/region rejected",
+        }
+    }
+}
+
 /// provider 配额闸门状态（plan_key 粒度；进程内寿命）
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ProviderGateState {
     /// 官方端点可查询配额（minimax/zhipu/zai/opencode-go）——决定恢复路径
     pub api_backed: bool,
@@ -52,6 +69,17 @@ pub struct ProviderGateState {
     pub probe_failures: u32,
     /// 探测进行中（探测单在飞时闸门暂开）
     pub probing: bool,
+    // ── 非配额故障（2026-10 新增：provider 级，连续失败达标才降级 + 定时探活）──
+    /// 当前故障类型（None = 无）
+    pub issue: Option<ProviderIssue>,
+    /// 连续失败计数（成功一次清零；达阈值才真正降级）
+    pub issue_fails: u32,
+    /// 当前正在计数的是哪种故障（None = 尚未开始计数）——切换类型时重新计数，
+    /// 但**未降级状态（issue=None）不能当成"切换了"**（否则计数永远回 0）
+    pub issue_counting: Option<ProviderIssue>,
+    /// 该故障的下次探测时刻（独立于配额探测调度）
+    pub issue_probe_at_ms: u64,
+    pub issue_probe_failures: u32,
 }
 
 impl ProviderGateState {
@@ -59,6 +87,16 @@ impl ProviderGateState {
     pub const PROBE_CAP_MS: u64 = 10 * 60 * 1000;
     /// API 型官方查询失败的兜底重试间隔（用户裁决：1h——官方窗口期短查询无意义）
     pub const API_RETRY_MS: u64 = 60 * 60 * 1000;
+    /// 非配额故障：连续失败达此数才降级（单次抖动不降级——用户裁决 2026-10-17）
+    pub const ISSUE_MIN_FAILS: u32 = 3;
+    /// 探活退避表（1m → 5m → 15m → 30m → 60m 封顶）
+    pub const ISSUE_BACKOFF_MS: [u64; 5] = [
+        60 * 1000,
+        5 * 60 * 1000,
+        15 * 60 * 1000,
+        30 * 60 * 1000,
+        60 * 60 * 1000,
+    ];
 
     pub fn backoff_ms(&self, now: u64) -> u64 {
         if self.api_backed {
@@ -68,6 +106,11 @@ impl ProviderGateState {
         }
         .saturating_sub(now.saturating_sub(self.probe_at_ms))
         .max(0)
+    }
+
+    /// 非配额故障的退避剩余（0 = 可以探测了）
+    pub fn issue_backoff_ms(&self, now: u64) -> u64 {
+        self.issue_probe_at_ms.saturating_sub(now)
     }
 }
 
@@ -105,9 +148,15 @@ impl QuotaLedger {
             .map(|w| w.scope.clone())
             .collect();
         if full.is_empty() {
-            if m.contains_key(provider) {
+            if let Some(e) = m.get_mut(provider) {
                 tracing::info!(provider = %provider, "provider quota gate opened (official windows show remaining)");
-                m.remove(provider);
+                // 配额开了，但网络/鉴权 issue 可能仍在 → 只清配额相关，保留故障状态
+                if e.issue.is_some() {
+                    e.windows_full.clear();
+                    e.reset_epoch_ms = None;
+                } else {
+                    m.remove(provider);
+                }
             }
             return;
         }
@@ -119,8 +168,7 @@ impl QuotaLedger {
             reset_epoch_ms: reset,
             since_ms: now,
             probe_at_ms: 0,
-            probe_failures: 0,
-            probing: false,
+            ..Default::default()
         });
         e.api_backed = true;
         e.windows_full = full;
@@ -138,8 +186,7 @@ impl QuotaLedger {
             reset_epoch_ms,
             since_ms: now,
             probe_at_ms: now + ProviderGateState::API_RETRY_MS,
-            probe_failures: 0,
-            probing: false,
+            ..Default::default()
         });
         if newly {
             tracing::warn!(provider = %provider, api = api_backed, "provider quota gate closed (upstream quota signal)");
@@ -154,9 +201,125 @@ impl QuotaLedger {
     /// 闸门关闭的 provider 名列表（账号级）——relay 据此在 quota 视图里
     /// 把该账号的全部模型余量清零（引擎按模型硬滤，替换早前 plan_pressure=1.5
     /// 的粗粒度方案：同 plan_key 多账号不再同伴受罚）
+    /// 上游失败记账（provider 级，非配额）：网络不可达 / 鉴权·区域被拒。
+    /// 连续失败达 `ISSUE_MIN_FAILS` 才真正降级（单次抖动不降级），降级后按
+    /// 退避表安排探活（1m→5m→15m→30m→60m）——**绝不永久沉默**。
+    /// 返回 true = 本次刚进入降级（调用方据此发事件）。
+    pub fn provider_failure(&self, provider: &str, issue: ProviderIssue, now: u64) -> bool {
+        if provider.is_empty() {
+            return false;
+        }
+        let Ok(mut m) = self.provider_gate.lock() else { return false };
+        let e = m.entry(provider.to_string()).or_default();
+        // 故障类型切换（网络↔鉴权）时重新计数，避免两类互相顶替把阈值刷满
+        if e.issue_counting != Some(issue) {
+            e.issue_counting = Some(issue);
+            e.issue_fails = 0;
+        }
+        e.issue_fails = e.issue_fails.saturating_add(1);
+        let newly = e.issue != Some(issue) && e.issue_fails >= ProviderGateState::ISSUE_MIN_FAILS;
+        if e.issue_fails >= ProviderGateState::ISSUE_MIN_FAILS {
+            e.issue = Some(issue);
+            let idx = (e.issue_probe_failures as usize).min(ProviderGateState::ISSUE_BACKOFF_MS.len() - 1);
+            e.issue_probe_at_ms = now + ProviderGateState::ISSUE_BACKOFF_MS[idx];
+            if newly {
+                tracing::warn!(
+                    provider = %provider, issue = issue.label(), fails = e.issue_fails,
+                    "provider degraded (non-quota) — excluded from the main pool, probed on backoff"
+                );
+            }
+        }
+        newly
+    }
+
+    /// 上游成功 = 真实可用的权威反证：清零 provider 级故障与连续失败计数。
+    /// 返回 true = 本次从降级恢复（调用方据此发事件/立刻放回组合）。
+    pub fn provider_success(&self, provider: &str) -> bool {
+        if provider.is_empty() {
+            return false;
+        }
+        let Ok(mut m) = self.provider_gate.lock() else { return false };
+        let Some(e) = m.get_mut(provider) else { return false };
+        let was = e.issue.is_some();
+        e.issue = None;
+        e.issue_fails = 0;
+        e.issue_counting = None;
+        e.issue_probe_at_ms = 0;
+        e.issue_probe_failures = 0;
+        if was {
+            tracing::info!(provider = %provider, "provider recovered — back in the pool");
+        }
+        was
+    }
+
+    /// 当前处于降级的 provider 名单（供引擎主池过滤）。
+    /// 含"已到探测时刻"者——探测若成功会立即清除降级状态。
+    pub fn provider_degraded(&self) -> Vec<String> {
+        let Ok(m) = self.provider_gate.lock() else { return Vec::new() };
+        m.iter()
+            .filter(|(_, e)| e.issue.is_some())
+            .map(|(k, _)| k.clone())
+            .collect()
+    }
+
+    /// provider 故障详情（面板展示 "degraded · next probe"）：(类型, 探测时刻, 连续失败数)
+    pub fn provider_issue_of(&self, provider: &str) -> Option<(ProviderIssue, u64, u32)> {
+        let m = self.provider_gate.lock().ok()?;
+        let e = m.get(provider)?;
+        e.issue.map(|i| (i, e.issue_probe_at_ms, e.issue_fails))
+    }
+
+    /// 探测调度：挑一个到期（且未在探测中）的降级 provider；`probing` 去重。
+    pub fn provider_issue_pick_probe(&self, now: u64) -> Option<String> {
+        let Ok(mut m) = self.provider_gate.lock() else { return None };
+        let mut best: Option<(u64, String)> = None;
+        for (k, e) in m.iter() {
+            if e.issue.is_none() || e.probing || now < e.issue_probe_at_ms {
+                continue;
+            }
+            if best.as_ref().map(|(t, _)| e.issue_probe_at_ms < *t).unwrap_or(true) {
+                best = Some((e.issue_probe_at_ms, k.clone()));
+            }
+        }
+        let (t, k) = best?;
+        if let Some(e) = m.get_mut(&k) {
+            e.probing = true;
+            e.issue_probe_at_ms = t;
+        }
+        Some(k)
+    }
+
+    /// 探测结论：成功 → 立即恢复（清降级）；失败 → 退避加一档重排。
+    pub fn provider_issue_probe_result(&self, provider: &str, ok: bool, now: u64) {
+        let Ok(mut m) = self.provider_gate.lock() else { return };
+        let Some(e) = m.get_mut(provider) else { return };
+        e.probing = false;
+        if ok {
+            e.issue = None;
+            e.issue_fails = 0;
+            e.issue_counting = None;
+            e.issue_probe_at_ms = 0;
+            tracing::info!(provider = %provider, "probe succeeded — provider revived");
+            if e.windows_full.is_empty() {
+                // 只承载 issue 的条目：恢复后整条移除（配额状态本就为空）
+                drop(e);
+                m.remove(provider);
+            }
+        } else {
+            e.issue_probe_failures = e.issue_probe_failures.saturating_add(1);
+            let idx = (e.issue_probe_failures as usize).min(ProviderGateState::ISSUE_BACKOFF_MS.len() - 1);
+            e.issue_probe_at_ms = now + ProviderGateState::ISSUE_BACKOFF_MS[idx];
+        }
+    }
+
     pub fn gate_blocked(&self) -> Vec<String> {
         let Ok(m) = self.provider_gate.lock() else { return Vec::new() };
-        m.keys().cloned().collect()
+        // 只返回**真正配额耗尽**的 provider：网络/鉴权降级记在 issue 字段里，
+        // 不能污染 "quota-gated" 语义（否则可用性标签与配额视图会误判）
+        m.iter()
+            .filter(|(_, e)| !e.windows_full.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect()
     }
 
     pub fn gate_get(&self, provider: &str) -> Option<ProviderGateState> {
@@ -557,6 +720,68 @@ fn parse_duration_ms(s: &str) -> Option<u64> {
 impl Default for QuotaLedger {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod provider_issue_tests {
+    use super::*;
+
+    /// 用户裁决：**连续失败数**达标才降级；降级后按退避表探活（不永久沉默）；
+    /// 成功一次立即恢复；故障类型切换要重新计数（网络↔鉴权不互相顶替）
+    #[test]
+    fn consecutive_failures_degrade_then_probe_revives() {
+        let q = QuotaLedger::new();
+        let t0 = 1_000_000u64;
+        // 前两次：单次抖动，不降级
+        assert!(!q.provider_failure("p", ProviderIssue::Network, t0));
+        assert!(!q.provider_failure("p", ProviderIssue::Network, t0 + 1));
+        assert!(q.provider_degraded().is_empty(), "two failures must not degrade");
+        // 第三次达阈值 → 降级
+        assert!(q.provider_failure("p", ProviderIssue::Network, t0 + 2));
+        assert_eq!(q.provider_degraded(), vec!["p".to_string()]);
+        let (issue, probe_at, fails) = q.provider_issue_of("p").unwrap();
+        assert_eq!(issue, ProviderIssue::Network);
+        assert_eq!(fails, 3);
+        // 退避：未到点不探测
+        assert!(q.provider_issue_pick_probe(probe_at - 1).is_none());
+        // 到点可探测（去重：探测中不再派）
+        assert_eq!(q.provider_issue_pick_probe(probe_at).as_deref(), Some("p"));
+        assert!(q.provider_issue_pick_probe(probe_at).is_none(), "probing must dedupe");
+        // 探测失败 → 退避加一档（下一次更远）
+        q.provider_issue_probe_result("p", false, probe_at);
+        let (_, probe_at2, _) = q.provider_issue_of("p").unwrap();
+        assert!(probe_at2 > probe_at, "backoff must grow: {probe_at2} > {probe_at}");
+        // 探测成功 → 立即恢复
+        q.provider_issue_probe_result("p", true, probe_at2);
+        assert!(q.provider_degraded().is_empty(), "probe success revives immediately");
+    }
+
+    /// 上游成功 = 权威反证：清零降级与连续失败计数
+    #[test]
+    fn routed_success_clears_degradation() {
+        let q = QuotaLedger::new();
+        for i in 0..3 {
+            q.provider_failure("p", ProviderIssue::Auth, 100 + i);
+        }
+        assert_eq!(q.provider_degraded(), vec!["p".to_string()]);
+        assert!(q.provider_success("p"), "was degraded → reported as revived");
+        assert!(q.provider_degraded().is_empty());
+        assert!(!q.provider_success("p"), "second call is a no-op");
+        assert!(q.provider_issue_of("p").is_none());
+    }
+
+    /// 网络→鉴权切换重新计数（避免两类互相顶替把阈值刷满）
+    #[test]
+    fn switching_issue_kind_restarts_the_counter() {
+        let q = QuotaLedger::new();
+        q.provider_failure("p", ProviderIssue::Network, 1);
+        q.provider_failure("p", ProviderIssue::Network, 2);
+        q.provider_failure("p", ProviderIssue::Auth, 3); // 切换 → 计数从 1
+        assert!(q.provider_degraded().is_empty(), "kind switch must restart counting");
+        q.provider_failure("p", ProviderIssue::Auth, 4);
+        assert!(q.provider_failure("p", ProviderIssue::Auth, 5));
+        assert_eq!(q.provider_issue_of("p").unwrap().0, ProviderIssue::Auth);
     }
 }
 

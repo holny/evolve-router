@@ -124,6 +124,9 @@ pub async fn chat_completions(
             let price_tiers = crate::meta::price_tier_map(&st);
             // 活跃集（最近发布/最近使用前 50 + 手动开关）
             let active_ids = crate::meta::active_id_set(&st);
+            // provider 级降级（网络/鉴权；连续失败达标才进）→ 不进主池
+            let degraded: std::collections::HashSet<String> =
+                st.quota.provider_degraded().into_iter().collect();
 
             // w2 provider 配额闸门：QUOTA_LIMITED 账号的模型配额视图清零
             // （引擎按模型硬滤 "quota remaining < est"——比 plan_pressure=1.5
@@ -181,6 +184,7 @@ pub async fn chat_completions(
                 plan_pressure: &plan_pressure,
                 redact: st.config.decision.redact,
                 price_tier_of: &price_tiers,
+                degraded_providers: &degraded,
                 active: &active_ids,
             };
             let d = st.engine.decide(input);
@@ -241,16 +245,28 @@ pub async fn chat_completions(
             let sweep_from = list.len();
             let cat = st.engine.catalog_snapshot();
             let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
-            for m in &cat {
-                if list.len() - sweep_from >= 6 {
-                    break;
-                }
-                if m.base_url.contains(&self_addr) {
-                    continue;
-                }
-                if seen.insert(m.id.clone()) {
-                    list.push(m.id.clone());
-                }
+            // 兜底候选（2026-10 修复）：旧实现是**盲取"目录前 6 个"**（不看窗口/
+            // 健康/供应商）——实测事故：一个 27 万 token 的请求被拖进 200k 窗口的
+            // 模型白试 429/404/400，且 opencode-go-github / MiniMax 全程没轮到
+            // （6 个名额被目录顺序靠前的供应商吃满）。现改为：**硬约束先过**
+            // （窗口/视觉）+ **按 provider 轮转**（每家先取 1 个再取第 2 个）+
+            // 无冷却的 provider 优先——真正"还有地方可试"。
+            let max_out = parsed
+                .get("max_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(4096)
+                .min(65_536);
+            for id in sweep_candidates(
+                &cat,
+                &seen,
+                est,
+                max_out,
+                &decision.judgment,
+                &self_addr,
+                &st,
+            ) {
+                seen.insert(id.clone());
+                list.push(id);
             }
             (list, sweep_from)
         }
@@ -278,7 +294,47 @@ pub async fn chat_completions(
     }
 
     let mut skipped: Vec<String> = Vec::new();
+    // 会话级拉黑剔除（2026-10）：该会话历史与某模型不兼容（请求形状类 4xx）→
+    // 本会话不再试它；**其它会话不受影响**。全部被拉黑时保留原列表（宁可再试
+    // 一次也不让会话彻底无路可走），并把剔除原因写进 skipped。
+    {
+        let now_q = evolve_memory::health::now();
+        if let Ok(mut q) = st.session_quarantine.lock() {
+            if let Some(per_model) = q.get_mut(&session_key) {
+                per_model.retain(|_, (_, until)| *until > now_q);
+                if per_model.is_empty() {
+                    q.remove(&session_key);
+                } else {
+                    let blocked: std::collections::HashMap<String, String> = per_model
+                        .iter()
+                        .map(|(m, (r, _))| (m.clone(), r.clone()))
+                        .collect();
+                    let kept: Vec<String> = attempts
+                        .iter()
+                        .filter(|id| !blocked.contains_key(*id))
+                        .cloned()
+                        .collect();
+                    if kept.is_empty() {
+                        tracing::warn!(session = %session_key, "all candidates are session-quarantined; retrying anyway");
+                    } else {
+                        for (id, r) in &blocked {
+                            if attempts.contains(id) {
+                                skipped.push(format!("{id}(session-quarantined: {r})"));
+                            }
+                        }
+                        attempts = kept;
+                    }
+                }
+            }
+        }
+    }
+
     let mut last_error: Option<(StatusCode, Bytes)> = None;
+    // 主因追踪（2026-10 用户裁决）：最终失败状态按**主因优先级**上报，而不是
+    // 兜底段最后一个尝试的状态码。实测误导：整链配额耗尽 + 兜底段撞一个 400
+    // （如 deepseek 的 reasoning_content）时，客户端只看到 400，误以为请求格式错。
+    // 优先级：配额/付款 5 > 上下文超限 4 > 鉴权 3 > 网络 2 > 瞬态 1 > 其它 0
+    let mut primary: Option<(u8, StatusCode, String)> = None;
     // ⑤ 质量级联兜底：成功但质量差的响应暂存，链耗尽时返回（降质好过硬报错）
     let mut quality_fallback: Option<(StatusCode, axum::http::HeaderMap, Bytes)> = None;
     // context overflow on one candidate means the session needs MORE window:
@@ -396,8 +452,13 @@ pub async fn chat_completions(
                     cand,
                     Failure { kind: HealthKind::Transient, message: "transport error".into(), until_epoch_ms: None },
                 );
+                // provider 级（连续 3 次才降级；降级后定时探活，不永久沉默）
+                note_provider_issue(&st, &record.provider, evolve_memory::quota::ProviderIssue::Network);
                 dead_routes.insert(record.base_url.clone());
                 skipped.push(format!("{cand}(transport)"));
+                if primary.as_ref().map(|(p, _, _)| 2 > *p).unwrap_or(true) {
+                    primary = Some((2, StatusCode::BAD_GATEWAY, format!("network unreachable ({cand})")));
+                }
                 last_error = Some((StatusCode::BAD_GATEWAY, Bytes::new()));
                 continue;
             }
@@ -496,6 +557,13 @@ pub async fn chat_completions(
                 && crate::meta::provider_is_api_backed(&st, &record.base_url);
             // 无 API 型：信任上游给的恢复期（唯一可信信号——月窗 9d9h 如实采用，
             // 用户裁决）；探活由 watchdog 独立周期探测兜底（不受此冷却阻挡）
+            // provider 级故障：鉴权/区域被拒（与配额、模型级问题分开记账）
+            match failure.kind {
+                HealthKind::AuthFailed => note_provider_issue(
+                    &st, &record.provider, evolve_memory::quota::ProviderIssue::Auth,
+                ),
+                _ => {}
+            }
             tracing::warn!(model = %cand, status = status.as_u16(), kind = failure.kind.label(), "upstream failure, marking health");
             st.events.record(json!({
                 "kind": "upstream_error",
@@ -576,7 +644,61 @@ pub async fn chat_completions(
                     ).await;
                 });
             }
+            // 会话级拉黑（2026-10）：400 且非配额/鉴权/上下文/不支持类 →
+            // 属"请求形状"问题（典型 deepseek `reasoning_content` 必须回传），
+            // 该会话历史与这个模型不兼容 → 本会话拉黑 30min，别再反复白试。
+            if status.as_u16() == 400
+                && !matches!(
+                    failure.kind,
+                    HealthKind::QuotaExhausted
+                        | HealthKind::PaymentRequired
+                        | HealthKind::AuthFailed
+                        | HealthKind::ContextOverflow
+                        | HealthKind::Unsupported
+                )
+            {
+                const QUARANTINE_MS: u64 = 30 * 60 * 1000;
+                let until = evolve_memory::health::now() + QUARANTINE_MS;
+                let reason = format!("request-shape rejected by {} (http 400)", record.upstream_model);
+                if let Ok(mut q) = st.session_quarantine.lock() {
+                    // 顺手清过期项 + 上限（会话数可能很多；无清理会无界增长）。
+                    // `until` = now + QUARANTINE_MS，反推 now 作为过期阈值
+                    let now_cut = until.saturating_sub(QUARANTINE_MS);
+                    q.retain(|_, m| {
+                        m.retain(|_, (_, u)| *u > now_cut);
+                        !m.is_empty()
+                    });
+                    if q.len() > 200 && !q.contains_key(&session_key) {
+                        // 超上限时丢掉一个任意旧会话（近似 LRU：HashMap 无法取最旧）
+                        if let Some(k) = q.keys().next().cloned() {
+                            q.remove(&k);
+                        }
+                    }
+                    q.entry(session_key.clone())
+                        .or_default()
+                        .insert(cand.clone(), (reason.clone(), until));
+                }
+                st.events.record(json!({
+                    "kind": "session_quarantined",
+                    "session": session_key, "model": cand,
+                    "reason": reason, "until_ms": until,
+                }));
+                tracing::warn!(model = %cand, session = %session_key,
+                    "model quarantined for this session only (request-shape 400)");
+            }
             skipped.push(format!("{cand}[{key_idx}]({kind_label})"));
+            {
+                let prio = match failure.kind {
+                    HealthKind::QuotaExhausted | HealthKind::PaymentRequired => 5u8,
+                    HealthKind::ContextOverflow => 4,
+                    HealthKind::AuthFailed => 3,
+                    HealthKind::Transient => 1,
+                    _ => 0,
+                };
+                if primary.as_ref().map(|(p, _, _)| prio > *p).unwrap_or(true) {
+                    primary = Some((prio, map_status(status), kind_label.clone()));
+                }
+            }
             last_error = Some((map_status(status), err_body));
             continue; // next key in pool, then next candidate
         }
@@ -595,6 +717,12 @@ pub async fn chat_completions(
         };
         if status.is_success() {
             st.health.mark_ok(&success_health_id);
+            if st.quota.provider_success(&record.provider) {
+                st.events.record(json!({
+                    "kind": "provider_state_changed",
+                    "provider": record.provider, "state": "ok", "source": "routed_success",
+                }));
+            }
         }
         // w2 gate：被路由到且成功 = 真实状态的反证——闸门立即开，状态不再显示
         // 配额受限；API 型当场强制刷新官方配额（充值/窗口重置即时可见）
@@ -941,6 +1069,7 @@ pub async fn chat_completions(
                 "skipped": skipped,
                 "filtered": decision.filtered,
                 "attempted": decision.chain,  // 全灭时降级链内容：让面板看清试了哪些
+                "primary_cause": primary.as_ref().map(|(_, _, l)| l.clone()),  // 主因（非最后一个尝试）
                 "scored": decision.scored,      // 各候选总分（不是无路可走，是都被熔断）
             })),
             agent: Some(crate::identity::agent_identity(&headers, &st.config.telemetry.agent_header)),
@@ -953,6 +1082,27 @@ pub async fn chat_completions(
     }
     let direct_raw = matches!(target, Target::Direct(_)) && last_error.is_some();
     let (status, err_body) = last_error.unwrap_or((StatusCode::BAD_GATEWAY, Bytes::new()));
+    // 全灭时：状态码取**主因**（配额/上下文 > 兜底段个别 400）；原因写进 message，
+    // 让调用方一眼看到"真正为什么不通"，而不是最后一个被试模型的状态码
+    let (status, err_body) = if direct_raw {
+        (status, err_body)
+    } else if let Some((_, pstatus, plabel)) = primary.clone() {
+        // 配额/上下文类主因的语义状态码优先于兜底段的 4xx
+        let status = if pstatus.as_u16() == 502 { status } else { pstatus };
+        let body = json!({
+            "error": {
+                "message": format!("all {} candidate route(s) failed — primary cause: {}", decision.chain.len().max(1), plabel),
+                "type": "evolve_all_failed",
+                "primary_cause": plabel,
+                "tried": skipped,
+            }
+        })
+        .to_string()
+        .into_bytes();
+        (status, Bytes::from(body))
+    } else {
+        (status, err_body)
+    };
     let mut resp = if direct_raw {
         let mut r = Response::builder().status(status)
             .header("content-type", "application/json")
@@ -963,7 +1113,20 @@ pub async fn chat_completions(
         r
     } else {
         {
-            let mut resp = json_error(map_status(status), "all routed upstreams failed; see x-ev-skipped for per-model reasons");
+            // 主因优先：有主因就用主因生成的 body（含 primary_cause），
+            // 否则回落到通用文案（老行为）
+            let mut resp = if !err_body.is_empty() {
+                Response::builder()
+                    .status(map_status(status))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(err_body))
+                    .unwrap()
+            } else {
+                json_error(
+                    map_status(status),
+                    "all routed upstreams failed; see x-ev-skipped for per-model reasons",
+                )
+            };
             if let Some(sec) = skipped.iter()
                 .filter_map(|s| s.split('(').last().and_then(|t| t.split('s').next()).and_then(|n| n.parse::<u64>().ok()))
                 .max()
@@ -1004,6 +1167,119 @@ fn fallback_eligible(status: u16) -> bool {
     // review#6：补 413（上下文超限→ContextOverflow 换模型）与 451（上游 WAF
     // 地域拦截——此前走"成功"路径被 mark_ok，实际上游根本不可用）
     matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
+}
+
+/// provider 级故障记账（网络/鉴权）：达阈值才降级并发出事件（面板据此显示
+/// `degraded · next probe`）；降级只影响"是否进主池"，兜底段与探活都会再给它机会。
+fn note_provider_issue(
+    st: &AppState,
+    provider: &str,
+    issue: evolve_memory::quota::ProviderIssue,
+) {
+    // 无凭据（还没填 key）不是"provider 故障"——不降级、不探活，交给 needs_key 提示
+    let has_credential = st
+        .engine
+        .catalog_snapshot()
+        .iter()
+        .any(|m| m.provider == provider && m.has_credential());
+    if !has_credential {
+        return;
+    }
+    let now = evolve_memory::health::now();
+    if st.quota.provider_failure(provider, issue, now) {
+        let (_, probe_at, fails) = st
+            .quota
+            .provider_issue_of(provider)
+            .unwrap_or((issue, 0, 0));
+        st.events.record(json!({
+            "kind": "provider_state_changed",
+            "provider": provider, "state": "degraded",
+            "issue": issue.label(), "consecutive_fails": fails,
+            "next_probe_ms": probe_at.saturating_sub(now),
+            "source": "upstream_failure",
+        }));
+    }
+}
+
+/// 兜底 sweep 候选（2026-10 修复，实测事故驱动）。
+///
+/// 旧实现盲取"目录里前 6 个模型"——不看请求硬约束、不看健康、不看供应商，
+/// 于是：
+/// - 27 万 token 的请求被拖进窗口只有 200k 的模型，白试一堆 429/404/400；
+/// - 6 个名额被目录顺序靠前的供应商吃满，`opencode-go-github`（独立额度）
+///   与 MiniMax（1M 窗口）**全程没轮到**，最终回一个误导性的 400。
+///
+/// 现规则（按序）：
+/// 1. **硬约束先过**：窗口放不下（`scoring::context_fits`）或有视觉需求但无
+///    视觉能力 → 不进兜底（不再拿注定失败的模型去撞）
+/// 2. **按 provider 轮转**：每家先取 1 个，再取第 2 个……直到取满 `SWEEP_MAX`
+///    ——保证跨供应商都有机会（单家网络/额度问题不再吃掉全部名额）
+/// 3. **无冷却的 provider 优先**：provider 内有模型在冷却 → 排后面（仍保留
+///    "全灭也要试"的兜底语义，只是次序靠后）
+pub(crate) fn sweep_candidates(
+    cat: &[evolve_core::types::ModelRecord],
+    seen: &std::collections::HashSet<String>,
+    est: u64,
+    max_output: u64,
+    j: &evolve_core::types::JudgmentSet,
+    self_addr: &str,
+    st: &AppState,
+) -> Vec<String> {
+    const SWEEP_MAX: usize = 6;
+    let health = st.health.snapshot();
+    let now = evolve_memory::health::now();
+    let needs_vision = j.needs_vision > evolve_core::thresholds::VISION;
+    // provider → 通过硬约束的候选（BTreeMap 保证遍历顺序稳定、可测）
+    let mut per: std::collections::BTreeMap<&str, Vec<&evolve_core::types::ModelRecord>> =
+        std::collections::BTreeMap::new();
+    for m in cat {
+        if seen.contains(&m.id) || m.base_url.contains(self_addr) {
+            continue;
+        }
+        // 无凭据模型不进兜底：默认接入的 provider 未填 key 时去撞 401 只会把它
+        // 误标成 provider 级降级（真实原因是"还没填 key"，由 needs_key 提示）
+        if !m.has_credential() {
+            continue;
+        }
+        if needs_vision && m.tiers.vision < evolve_core::thresholds::VISION {
+            continue;
+        }
+        if evolve_core::scoring::context_fits(m, est, max_output).is_err() {
+            continue;
+        }
+        per.entry(m.provider.as_str()).or_default().push(m);
+    }
+    let mut providers: Vec<(&str, &Vec<&evolve_core::types::ModelRecord>)> =
+        per.iter().map(|(k, v)| (*k, v)).collect();
+    providers.sort_by_key(|(k, models)| {
+        let cooling = models
+            .iter()
+            .filter(|m| {
+                health
+                    .get(&m.id)
+                    .map(|h| !h.available(now))
+                    .unwrap_or(false)
+            })
+            .count();
+        (cooling, *k)
+    });
+    let mut out: Vec<String> = Vec::new();
+    for round in 0.. {
+        let mut took = false;
+        for (_, models) in &providers {
+            if let Some(m) = models.get(round) {
+                took = true;
+                if out.len() >= SWEEP_MAX {
+                    return out;
+                }
+                out.push(m.id.clone());
+            }
+        }
+        if !took {
+            break;
+        }
+    }
+    out
 }
 
 /// 胜出队列（用户裁决 2026-10）：最终决策的 chain 去重后为主序列，不足

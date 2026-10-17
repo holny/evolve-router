@@ -29,7 +29,13 @@ redact = true
 #                              # (native-contract third parties, e.g. StartLux / Bamboo /v1/decisions)
 
 [catalog]
-remote_fetch = false        # M3
+# Remote /models discovery (hourly, 1h cache) + models.dev reference metadata.
+# ON by default: the default-onboarded providers (opencode-go, openrouter)
+# publish public /models endpoints, so this is what brings their model lists
+# (and their free models) into the catalog without any agent config.
+remote_fetch = true
+builtin_priors = true
+modelsdev_reference = true
 
 [quota]
 learn_from_headers = true   # M2

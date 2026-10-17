@@ -25,6 +25,9 @@ pub struct RoutingInput<'a> {
     /// S2 价格层标签（model_id → 0=cheap / 1=medium / 2=premium；空表 = 不启用硬闸）。
     /// 由 server 侧按 tags（自动推导 + 用户覆盖）计算后传入——引擎不碰 overrides。
     pub price_tier_of: &'a HashMap<String, u8>,
+    /// provider 级降级名单（网络不可达 / 鉴权·区域被拒；2026-10）——
+    /// 这些 provider 的模型**不进主池**（只进兜底段，探活成功后自动放回）
+    pub degraded_providers: &'a std::collections::HashSet<String>,
     /// 活跃集（用户裁决：最近发布/最近使用的前 50；空集 = 不启用过滤）——
     /// 非活跃模型不参与路由（Web 可手动开启，开启自动顶掉最低分者）
     pub active: &'a std::collections::HashSet<String>,
@@ -370,6 +373,15 @@ impl Engine {
                 filtered.push(FilteredOut {
                     model: m.id.clone(),
                     cause,
+                });
+                continue;
+            }
+            // provider 级降级（非配额故障）：不进主池。**不是永久封禁**——
+            // 兜底段仍会试、探活成功立即放回（见 quota::provider_failure/_success）
+            if input.degraded_providers.contains(&m.provider) {
+                filtered.push(FilteredOut {
+                    model: m.id.clone(),
+                    cause: format!("provider {} degraded (probed on backoff)", m.provider),
                 });
                 continue;
             }
@@ -1091,12 +1103,15 @@ mod explore_tests {
         let e = Engine::new(catalog3(), policy, Box::new(crate::heuristic::HeuristicJudge));
         let d = digest("你好");
         let h = HealthMap::new();
+        // 采样噪声是时间派生的（不可播种）→ 单次运行是概率性的。样本数取 60：
+        // 即使探索命中率低到 50%，"60 次全不探索"的概率也 < 1e-18（原 20 次约
+        // 千分之一，会在整套测试里偶发红——实测过一次）
         let mut explored_count = 0;
-        for _ in 0..20 {
+        for _ in 0..60 {
             let dec = e.decide(input("你好", 500, &d, None, &h));
             if dec.chosen != "mini" { explored_count += 1; }
         }
-        assert!(explored_count > 0, "explore_ratio=1.0 should produce exploration in 20 tries, got {explored_count}");
+        assert!(explored_count > 0, "explore_ratio=1.0 should produce exploration in 60 tries, got {explored_count}");
     }
 
     #[test]
@@ -1256,6 +1271,7 @@ mod tests {
             quota: &EMPTY_QUOTA,
             plan_pressure: &EMPTY_PRESSURE,
             price_tier_of: &EMPTY_TIERS,
+            degraded_providers: &EMPTY_DEGRADED,
             active: &EMPTY_ACTIVE,
             redact: true, // 测试默认走 redact 语义（advisor 禁用），与生产默认一致
         }
@@ -1263,6 +1279,8 @@ mod tests {
 
     pub(crate) static EMPTY_TIERS: std::sync::LazyLock<HashMap<String, u8>> =
         std::sync::LazyLock::new(HashMap::new);
+    pub(crate) static EMPTY_DEGRADED: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_ACTIVE: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_PRESSURE: std::sync::LazyLock<HashMap<String, f32>> =

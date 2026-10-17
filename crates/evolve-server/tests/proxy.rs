@@ -431,6 +431,368 @@ async fn chain_exhausted_sweeps_out_of_chain_models() {
 }
 
 #[tokio::test]
+async fn sweep_is_constraint_aware_and_rotates_across_providers() {
+    // 2026-10 事故复刻：主链全灭后，兜底段旧实现盲取"目录前 6 个"——
+    // ① 会把窗口放不下的模型拖进来白试（27 万 token 请求撞 200k 窗口的模型）
+    // ② 6 个名额被单一供应商的模型吃满，其它供应商（独立额度）全程没轮到
+    // 断言：窗口不足者**一次都不发**；跨供应商轮转后**能轮到**独立供应商的活模型。
+    let served: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let served2 = served.clone();
+    let app2 = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let served = served2.clone();
+            async move {
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                let model = v["model"].as_str().unwrap_or("unknown").to_string();
+                served.lock().unwrap().push(model.clone());
+                if model.starts_with("tiny") {
+                    // 窗口过小却被调用 = 兜底段没做硬约束（回归失败信号）
+                    return axum::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Body::from(json!({"model": model, "choices": [{"message": {"role": "assistant", "content": "SHOULD-NOT-HAPPEN"}}]}).to_string()))
+                        .unwrap();
+                }
+                // 主链（mock-*）与 flood 供应商全部额度耗尽 → 必走兜底段
+                if model.starts_with("mock") || model.starts_with("dead") {
+                    return axum::http::Response::builder()
+                        .status(402)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"error":{"message":"Insufficient Balance"}}"#))
+                        .unwrap();
+                }
+                axum::http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model": model, "choices": [{"message": {"role": "assistant", "content": "rescued"}}],
+                               "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+                            .to_string(),
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app2).await.unwrap() });
+
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir()
+        .join(format!("mr-test-sweep-rot-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let mk = |id: &str, provider: &str, upstream: &str, window: u64| ModelEntry {
+        id: id.into(),
+        provider: provider.into(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        upstream_model: Some(upstream.into()),
+        context_window: Some(window),
+        max_output: 4096,
+        cost: Some(Cost { input: 0.1, output: 0.4 }),
+        tiers: Tiers { reasoning: 0.6, coding: 0.6, vision: 0.0, agentic: 0.6 },
+        speed_tier: 0.6,
+        ..Default::default()
+    };
+    // ① 窗口过小（est*1.1 + max_output 放不下）→ 硬约束必须拦住它
+    cfg.models.push(mk("aa-small/tiny", "aa-small", "tiny-model", 64));
+    // ② 单一供应商 8 个模型全灭 → 旧实现会把 6 个兜底名额全给它
+    for i in 0..8 {
+        cfg.models.push(mk(&format!("flood/f{i}"), "flood", "dead-flood", 1_000_000));
+    }
+    // ③ 另一个供应商的活模型（目录顺序在最后 → 旧实现够不到）
+    cfg.models.push(mk("zz-rescue/rescue", "zz-rescue", "alive", 1_000_000));
+
+    let app = build_router(build_state(cfg));
+    let (status, headers, raw) = send(app, chat_request("auto", json!("请把这份需求书写完整"), json!({}))).await;
+    let served = served.lock().unwrap().clone();
+    assert_eq!(status, StatusCode::OK, "body: {}\nserved: {served:?}", String::from_utf8_lossy(&raw));
+    assert!(
+        !served.iter().any(|m| m.starts_with("tiny")),
+        "window-too-small model must never be called: {served:?}"
+    );
+    assert!(
+        served.iter().any(|m| m == "alive"),
+        "the independent provider's model must get a turn via rotation: {served:?}"
+    );
+    assert!(
+        served.iter().filter(|m| m.starts_with("dead-flood")).count() <= 2,
+        "one provider must not eat the whole sweep: {served:?}"
+    );
+    assert!(headers.get("x-ev-model").is_some());
+}
+
+/// 会话级拉黑（2026-10）：某模型对**这个会话的历史**返回请求形状 400
+/// （`reasoning_content must be passed back`）→ 该会话不再试它；**别的会话照用**。
+#[tokio::test]
+async fn request_shape_400_quarantines_model_for_that_session_only() {
+    let calls: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let calls2 = calls.clone();
+    let app2 = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |body: axum::body::Bytes| {
+            let calls = calls2.clone();
+            async move {
+                let v: Value = serde_json::from_slice(&body).unwrap();
+                let model = v["model"].as_str().unwrap_or("unknown").to_string();
+                calls.lock().unwrap().push(model.clone());
+                if model.contains("picker") {
+                    // 典型：deepseek 思考模式要求回传 reasoning_content
+                    return axum::http::Response::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            r#"{"error":{"message":"The `reasoning_content` in the thinking mode must be passed back to the API."}}"#,
+                        ))
+                        .unwrap();
+                }
+                axum::http::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"model": model, "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                               "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+                            .to_string(),
+                    ))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app2).await.unwrap() });
+
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir()
+        .join(format!("mr-test-quarantine-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let mk = |id: &str, upstream: &str| ModelEntry {
+        id: id.into(),
+        provider: format!("mock-{id}"),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        upstream_model: Some(upstream.into()),
+        context_window: Some(1_000_000),
+        max_output: 4096,
+        cost: Some(Cost { input: 0.1, output: 0.1 }),
+        tiers: Tiers { reasoning: 0.7, coding: 0.7, vision: 0.0, agentic: 0.7 },
+        speed_tier: 0.6,
+        ..Default::default()
+    };
+    cfg.models = vec![mk("picker", "picker-model"), mk("good", "good-model")];
+    let st = build_state(cfg);
+    let app = build_router(st.clone());
+
+    // 第一次：picker 被判请求形状 400 → 本会话拉黑，随后 good 顶上成功
+    let req = |sess: &str| {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("content-type", "application/json")
+            .header("x-ev-session", sess)
+            .body(Body::from(
+                json!({"model": "auto", "messages": [{"role": "user", "content": "你好"}]}).to_string(),
+            ))
+            .unwrap()
+    };
+    let (status, _h, _b) = send(app.clone(), req("s1")).await;
+    assert_eq!(status, StatusCode::OK, "second candidate must rescue");
+    assert!(
+        calls.lock().unwrap().iter().any(|m| m == "picker-model"),
+        "picker is tried once: {:?}",
+        calls.lock().unwrap()
+    );
+    assert!(st.session_quarantine.lock().unwrap().contains_key("s1"));
+
+    // 第二次（同会话）：picker 不再被调用，且**原因写明是会话拉黑**
+    // （不是笼统的"冷却"——这样排查时能区分"模型坏了"与"本会话历史不兼容"）
+    let before = calls.lock().unwrap().len();
+    let (status, headers, _b) = send(app.clone(), req("s1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let after: Vec<String> = calls.lock().unwrap()[before..].to_vec();
+    assert!(
+        !after.iter().any(|m| m == "picker-model"),
+        "quarantined model must not be retried in the same session: {after:?}"
+    );
+    let _ = headers;
+    // 会话隔离：拉黑只记在 s1 名下，s2 不继承。说明：紧接着的第二次请求里
+    // picker 同时还在**模型级冷却**中（400 → transient），所以"本会话不再试它"
+    // 是两层机制共同的结论；会话拉黑是更持久的那一层（30min，跨模型级冷却
+    // 30s 过期之后仍生效），且带人读原因
+    let reason = st
+        .session_quarantine
+        .lock()
+        .unwrap()
+        .get("s1")
+        .and_then(|m| m.get("picker"))
+        .map(|(r, _)| r.clone())
+        .unwrap_or_default();
+    assert!(
+        reason.contains("request-shape") && reason.contains("picker"),
+        "quarantine reason must be human-readable: {reason}"
+    );
+
+    // 会话隔离：拉黑只记在 s1 名下，s2 不继承（s2 是否真能试 picker 取决于
+    // 模型级冷却是否已过期——那是另一层机制，这里只断言"没有把 s2 也拉黑"）
+    let q = st.session_quarantine.lock().unwrap();
+    assert!(q.contains_key("s1"));
+    assert!(!q.contains_key("s2"), "quarantine must not leak across sessions");
+}
+
+/// /api/events 的窗口/类型过滤（面板"最近 10 天请求"的数据源）：
+/// kind=chat 只回 chat；since_ms 早于下界就停；两者可组合且保持 oldest-first。
+#[tokio::test]
+async fn events_endpoint_filters_by_kind_and_since() {
+    let app = build_router(build_state(test_config(9101)));
+    let dir = std::env::temp_dir()
+        .join(format!("mr-test-events-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    drop(app);
+    // 直接写一份事件文件，验证过滤语义（边界稳定、不依赖真实流量）
+    let cfg = test_config(9101);
+    let now = evolve_memory::health::now();
+    let ev_path = evolve_core::config::events_file(&cfg.data.dir, false);
+    evolve_core::config::ensure_parent(&ev_path);
+    let lines: Vec<String> = vec![
+        json!({"kind": "chat", "ts": now - 20 * 24 * 3600 * 1000, "chosen": "old"}).to_string(),
+        json!({"kind": "quota_state_changed", "ts": now - 1000, "provider": "p"}).to_string(),
+        json!({"kind": "chat", "ts": now - 500, "chosen": "recent"}).to_string(),
+    ];
+    std::fs::write(&ev_path, lines.join("\n") + "\n").unwrap();
+    let app = build_router(build_state(cfg));
+    let since = now - 10 * 24 * 3600 * 1000;
+    let (status, _h, raw) = send(
+        app,
+        get(&format!("/api/events?kind=chat&since_ms={since}&limit=50")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let arr = json_body(&raw);
+    let arr = arr.as_array().expect("array");
+    let kinds: Vec<&str> = arr.iter().filter_map(|e| e["kind"].as_str()).collect();
+    assert_eq!(kinds, vec!["chat"], "only chat events survive kind filter: {kinds:?}");
+    let chosen: Vec<&str> = arr.iter().filter_map(|e| e["chosen"].as_str()).collect();
+    assert_eq!(chosen, vec!["recent"], "events older than since_ms must be dropped: {chosen:?}");
+    let _ = dir;
+}
+
+/// /api/portfolio：组合视图数据源（provider 名额 + 格位覆盖 + 免费直通车）
+#[tokio::test]
+async fn portfolio_reports_slots_cells_and_free() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/portfolio")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    assert!(j["cap"].as_u64().unwrap() >= 50, "cap floor is 50: {j}");
+    assert!(j["slot_cap_per_provider"].as_u64().unwrap() >= 3);
+    let ps = j["providers"].as_array().expect("providers array");
+    assert!(!ps.is_empty(), "mock models must appear as providers");
+    for p in ps {
+        for k in ["provider", "models", "slots", "slot_cap", "free", "pinned", "cells", "issue"] {
+            assert!(p.get(k).is_some(), "/api/portfolio provider missing `{k}`");
+        }
+        let cells = p["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), 9, "capability×price matrix is 3×3: {}", cells.len());
+        let names: Vec<&str> = cells.iter().filter_map(|c| c["cell"].as_str()).collect();
+        for want in ["basic/cheap", "powerful/premium", "standard/medium"] {
+            assert!(names.contains(&want), "missing cell {want}: {names:?}");
+        }
+        // 名额展示必须自洽：占名额的选中数 ≤ 上限（免费直通车与 pin 不计入，
+        // 否则会出现 "slots 30 / cap 14" 这种自相矛盾的展示——web 与面板同源）
+        assert!(
+            p["slots"].as_u64().unwrap() <= p["slot_cap"].as_u64().unwrap(),
+            "slot-consuming selection must respect the cap: {} vs {}",
+            p["slots"],
+            p["slot_cap"]
+        );
+        assert!(p.get("free_selected").is_some(), "free_selected must be reported separately");
+        assert!(
+            p.get("models_endpoint").is_some(),
+            "models_endpoint keeps the portfolio consistent with the provider cards"
+        );
+    }
+    for k in [
+        "providers", "selected", "selected_total", "models", "free", "free_selected", "pinned",
+    ] {
+        assert!(j["totals"].get(k).is_some(), "totals missing `{k}`");
+    }
+    // totals.selected 与 cap 同口径（只算占名额的）；含免费的合计单列
+    assert!(
+        j["totals"]["selected"].as_u64().unwrap() <= j["cap"].as_u64().unwrap(),
+        "totals.selected must share the cap's scope: {j}"
+    );
+    assert!(
+        j["totals"]["selected_total"].as_u64().unwrap() >= j["totals"]["selected"].as_u64().unwrap()
+    );
+}
+
+/// 主因优先（2026-10）：整链配额/上下文失败时，返回的状态与原因必须体现
+/// **主因**，而不是兜底段最后一个模型的状态码（实测误导：以为是请求格式错）
+#[tokio::test]
+async fn all_failed_reports_primary_cause_not_last_attempt() {
+    // 上游：先按请求模型区分——"primary" 模型返回 429（配额），其余返回 400（请求形状）
+    let app2 = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|body: axum::body::Bytes| async move {
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            let model = v["model"].as_str().unwrap_or("unknown").to_string();
+            let (code, msg) = if model.contains("429") {
+                (429u16, r#"{"error":{"message":"quota exhausted"}}"#.to_string())
+            } else {
+                (400u16, r#"{"error":{"message":"bad request shape"}}"#.to_string())
+            };
+            axum::http::Response::builder()
+                .status(code)
+                .header("content-type", "application/json")
+                .body(Body::from(msg))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app2).await.unwrap() });
+
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir()
+        .join(format!("mr-test-primary-{}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    let mk = |id: &str, upstream: &str, inp: f32| ModelEntry {
+        id: id.into(),
+        provider: format!("mock-{id}"),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        upstream_model: Some(upstream.into()),
+        context_window: Some(1_000_000),
+        max_output: 4096,
+        cost: Some(Cost { input: inp, output: inp }),
+        tiers: Tiers { reasoning: 0.7, coding: 0.7, vision: 0.0, agentic: 0.7 },
+        speed_tier: 0.6,
+        ..Default::default()
+    };
+    // 配额型（429）应该是主因，即便它排在前面、后面还有个 400
+    cfg.models = vec![
+        mk("quota", "mock-429", 0.1),
+        mk("shape", "mock-400", 0.3),
+    ];
+    let app = build_router(build_state(cfg));
+    let (status, headers, raw) = send(app, chat_request("auto", json!("你好"), json!({}))).await;
+    let body = String::from_utf8_lossy(&raw).to_string();
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "quota is the primary cause: {body}");
+    assert!(
+        body.contains("quota") || headers.get("x-ev-skipped").is_some(),
+        "primary cause must be visible: {body}"
+    );
+    assert!(
+        body.contains("primary cause"),
+        "the message must name the primary cause: {body}"
+    );
+}
+
+#[tokio::test]
 async fn plugin_feedback_updates_flywheel_reliability_inputs() {
     let port = spawn_mock_upstream().await;
     let mut cfg = test_config(port);
@@ -967,6 +1329,78 @@ fn assert_no_camel(obj: &Value, ctx: &str) {
 
 fn get(uri: &str) -> Request<Body> {
     Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+// ---------------- 免费模型 + 默认接入（onboarding） ----------------
+
+/// 免费模型（命名带 `free` 段）在同等条件下优先：两条定价/能力完全相同的模型，
+/// 只有名字不同（一条 `-free`）→ 路由必须落在免费那条。
+#[tokio::test]
+async fn free_model_is_preferred_at_equal_quality() {
+    let port = spawn_mock_upstream().await;
+    let mut cfg = test_config(port);
+    let mkfree = |id: &str, upstream: &str| ModelEntry {
+        id: id.into(),
+        provider: format!("mock-{id}"),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        upstream_model: Some(upstream.into()),
+        context_window: Some(128_000),
+        max_output: 4096,
+        cost: Some(Cost { input: 0.0, output: 0.0 }),
+        tiers: Tiers { reasoning: 0.75, coding: 0.75, vision: 0.0, agentic: 0.75 },
+        speed_tier: 0.7,
+        ..Default::default()
+    };
+    cfg.models = vec![
+        mkfree("twin-paid", "mock-twin-paid"),
+        mkfree("twin-free", "mock-twin-free"),
+    ];
+    let app = build_router(build_state(cfg));
+    let (status, headers, raw) = send(app, chat_request("auto", json!("explain the routing policy"), json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "body: {}", String::from_utf8_lossy(&raw));
+    assert_eq!(headers["x-ev-model"], "twin-free", "free twin must win: {}", headers["x-ev-reason"].to_str().unwrap_or(""));
+}
+
+/// /api/onboarding：默认接入清单（opencode-go + openrouter）与免费模型清单——
+/// 面板/网页"提醒填 key + 可用免费模型"的数据源
+#[tokio::test]
+async fn onboarding_reports_defaults_free_models_and_key_urls() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/onboarding")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    let d = j["defaults"].as_array().expect("defaults array");
+    assert_eq!(d.len(), 2, "opencode-go + openrouter are the default onboarding set");
+    for row in d {
+        for k in [
+            "key", "base_url", "key_url", "docs_url", "has_key", "needs_key", "model_count", "free_models",
+        ] {
+            assert!(row.get(k).is_some(), "/api/onboarding default row missing `{k}`");
+        }
+        assert!(
+            row["key_url"].as_str().unwrap_or("").starts_with("https://"),
+            "apply-key URL is required to guide the user: {row}"
+        );
+        assert_eq!(row["needs_key"], !row["has_key"].as_bool().unwrap_or(false));
+    }
+    let names: Vec<&str> = d.iter().filter_map(|r| r["key"].as_str()).collect();
+    assert!(names.contains(&"openrouter") && names.contains(&"opencode-go"), "got {names:?}");
+    assert!(j.get("free_count").is_some() && j["free_models"].is_array());
+    assert!(j.get("catalog_ready").is_some());
+}
+
+/// provider 行带免费模型数与"缺 key"标记（面板/网页据此提示填 key）
+#[tokio::test]
+async fn provider_rows_expose_free_count_and_needs_key() {
+    let app = build_router(build_state(test_config(9101)));
+    let (status, _h, raw) = send(app, get("/api/providers")).await;
+    assert_eq!(status, StatusCode::OK);
+    let j = json_body(&raw);
+    for p in j["providers"].as_array().expect("providers array") {
+        assert!(p.get("free_models").is_some(), "provider row missing `free_models`");
+        assert!(p.get("needs_key").is_some(), "provider row missing `needs_key`");
+        assert!(p.get("key_url").is_some(), "provider row missing `key_url`");
+    }
 }
 
 #[tokio::test]

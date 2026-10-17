@@ -130,6 +130,67 @@ pub const PROVIDERS: &[ProviderInfo] = &[
     },
 ];
 
+/// 开箱即用的**默认接入** provider（用户需求 2026-10）：全新安装自动登记，
+/// 用户已有同名或同 host 的 provider（配置 / agent 发现 / 目录任一来源）则跳过。
+/// 两者都提供公开的 `/models` 列表端点（无需 key 即可拉到模型清单）——
+/// 因此登记后立刻能看到"有哪些模型/哪些免费模型"，只差一个 key 才能实际路由。
+#[derive(Clone, Copy, Debug)]
+pub struct DefaultProvider {
+    /// provider 名（进 catalog 的 provider 前缀）
+    pub key: &'static str,
+    pub base_url: &'static str,
+    /// **申请 API key 的官方入口**（面板/网页"填入 key"时的指引链接）
+    pub key_url: &'static str,
+    /// 官方文档
+    pub docs_url: &'static str,
+    /// coding | agent | go | api
+    pub plan_kind: &'static str,
+}
+
+/// 默认接入清单（顺序即面板展示优先级）
+pub const DEFAULT_PROVIDERS: &[DefaultProvider] = &[
+    DefaultProvider {
+        key: "openrouter",
+        base_url: "https://openrouter.ai/api/v1",
+        key_url: "https://openrouter.ai/keys",
+        docs_url: "https://openrouter.ai/docs/quickstart",
+        plan_kind: "api",
+    },
+    DefaultProvider {
+        key: "opencode-go",
+        base_url: "https://opencode.ai/zen/go/v1",
+        key_url: "https://opencode.ai/auth",
+        docs_url: "https://opencode.ai/docs/go/",
+        plan_kind: "go",
+    },
+];
+
+/// base_url → 默认接入条目（hostname 后缀匹配；非默认 provider 返回 None）
+pub fn default_provider_for(base_url: &str) -> Option<&'static DefaultProvider> {
+    let host = base_url
+        .split("://")
+        .nth(1)
+        .unwrap_or(base_url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    DEFAULT_PROVIDERS.iter().find(|d| {
+        let dh = d
+            .base_url
+            .split("://")
+            .nth(1)
+            .unwrap_or("")
+            .split('/')
+            .next()
+            .unwrap_or("");
+        !host.is_empty() && host == dh.to_lowercase()
+    })
+}
+
 /// 官方价目表条目（按 1M tokens 计；provider 币种；空闲档价格——高峰按 peak_factor 折算）
 #[derive(Clone, Copy, Debug)]
 pub struct PriceSheet {
@@ -280,6 +341,26 @@ pub fn summary(base_url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 默认接入清单：opencode-go 与 openrouter，按 host 命中，带申请 key 入口
+    #[test]
+    fn default_providers_registry() {
+        assert_eq!(DEFAULT_PROVIDERS.len(), 2);
+        let or = default_provider_for("https://openrouter.ai/api/v1").expect("openrouter");
+        assert_eq!(or.key, "openrouter");
+        assert_eq!(or.key_url, "https://openrouter.ai/keys");
+        let go = default_provider_for("https://opencode.ai/zen/go/v1").expect("opencode-go");
+        assert_eq!(go.key, "opencode-go");
+        assert!(go.key_url.starts_with("https://opencode.ai/"));
+        // 同 host 的其它路径（github 转发变体）也算同一默认 provider
+        assert_eq!(
+            default_provider_for("https://opencode.ai/zen/go/v1/chat/completions").map(|d| d.key),
+            Some("opencode-go")
+        );
+        // 非默认 provider 不受影响
+        assert!(default_provider_for("https://api.deepseek.com").is_none());
+        assert!(default_provider_for("http://127.0.0.1:9101/v1").is_none());
+    }
 
     fn epoch(y: i64, mo: i64, d: i64, h: i64, mi: i64) -> u64 {
         let days = days_from_ymd(&format!("{y:04}-{mo:02}-{d:02}")).unwrap();

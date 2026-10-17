@@ -86,6 +86,9 @@ pub struct DecisionSlotCfg {
     pub think_mode: Option<String>,
 }
 
+/// 注意：这里保持**全 false**（代码内默认=关闭远端拉取，测试/CLI 构建不联网）。
+/// 面向用户"默认开启"的是 `config/evo-router.default.toml`（首次运行据此生成
+/// 用户配置）——默认接入的 provider 靠它把模型清单与免费模型带进来。
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
 #[serde(default)]
 pub struct CatalogCfg {
@@ -371,9 +374,29 @@ pub fn to_jsonc(cfg: &FileConfig) -> String {
     header.to_string() + &body + "\n"
 }
 
+/// 规范配置文件路径（`~/.evo-router/evo-router-config.jsonc`）。
+/// 首次运行（无任何配置文件）时以嵌入默认配置生成——网关的 provider 清单、
+/// 默认接入与面板/网页的"填 key"提示都依赖一个真实存在的配置文件。
+pub fn canonical_config_path() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| Path::new(&h).join(".evo-router").join(DEFAULT_CONFIG_NAME))
+}
+
+/// 写出配置文件（规范 JSONC + 0600 + 自动建父目录）。导出 provider / 迁移 / 播种共用。
+pub fn write_config(path: &Path, cfg: &FileConfig) -> std::io::Result<()> {
+    ensure_parent(path);
+    std::fs::write(path, to_jsonc(cfg))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 /// 一次性迁移：读到旧名配置 → 写出规范名（旧文件保留为 .migrated）
-pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path::PathBuf> {
-    let dir = found.parent()?;
+pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path::PathBuf> {    let dir = found.parent()?;
     let target = dir.join(DEFAULT_CONFIG_NAME);
     if found == target || target.exists() {
         return None;
@@ -556,6 +579,26 @@ impl FileConfig {
     pub fn model_records(&self) -> Vec<ModelRecord> {
         self.models.iter().map(|m| self.resolve_model(m)).collect()
     }
+
+    /// 仅供远端 `/models` 拉取分组用的**端点占位记录**：`providers` 段里只声明了
+    /// base_url、没有任何 `[[models]]` 的 provider（如默认接入的 openrouter）也必须
+    /// 被拉取模型清单——否则它的 `/models` 永远不会被访问，目录里就看不到它的
+    /// 模型与免费模型。占位记录只在 `provider_groups` 里用于分组，**不进目录**。
+    pub fn endpoint_placeholders(&self) -> Vec<ModelRecord> {
+        self.providers
+            .iter()
+            .filter(|p| !p.base_url.trim().is_empty() && p.disabled != Some(true))
+            .map(|p| ModelRecord {
+                id: format!("{}/__endpoint__", p.key),
+                provider: p.key.clone(),
+                base_url: p.base_url.trim_end_matches('/').to_string(),
+                api_key: p.api_key.clone(),
+                api_key_env: p.api_key_env.clone(),
+                upstream_model: "__endpoint__".into(),
+                ..Default::default()
+            })
+            .collect()
+    }
 }
 
 /// 数据目录与配置文件名（对外命名铁律：不出现裸 `evolve`，用 evo-router / EvolveRouter / ER）
@@ -568,12 +611,52 @@ pub const LEGACY_CONFIG_NAMES: [&str; 3] = ["evo-router.toml", "evo-router.jsonc
 /// 改名前的旧默认值（仅用于兼容与一次性迁移）
 pub const LEGACY_DATA_DIR: &str = "~/.evolve";
 
+/// macOS TCC 保护目录（「文稿」「桌面」「下载」及 iCloud Drive）。
+///
+/// 从这些目录下启动网关时，去 stat **相对 cwd** 的候选配置会让系统弹出
+/// "EvolveRouter.app 想访问文稿文件夹中的文件"——只是探测文件名而已。
+/// 判断纯路径、不触发任何文件系统访问（避免"为了判断而 stat"再触发弹窗）。
+pub fn is_tcc_protected_dir(dir: &Path) -> bool {
+    let s = dir.to_string_lossy();
+    let s = s.trim_end_matches('/');
+    let suffixes = [
+        "/Documents",
+        "/Desktop",
+        "/Downloads",
+        "/Library/Mobile Documents",
+    ];
+    // 目录本身或其任意父级落在保护目录内
+    let mut cur = s.to_string();
+    loop {
+        if suffixes.iter().any(|x| cur.ends_with(x)) {
+            return true;
+        }
+        match cur.rfind('/') {
+            Some(0) | None => return false,
+            Some(i) => cur.truncate(i),
+        }
+    }
+}
+
+/// 是否跳过 **cwd 相对** 的配置候选（cwd 落在 TCC 保护目录内 → 探测会弹窗）
+fn skip_cwd_candidates() -> bool {
+    std::env::current_dir()
+        .map(|d| is_tcc_protected_dir(&d))
+        .unwrap_or(false)
+}
+
 pub fn default_config_paths() -> Vec<std::path::PathBuf> {
-    // 规范名优先（JSONC = 带注释的 JSON，注释即文档）；旧名随后（升级兼容，读到即迁移）
-    let mut paths = vec![Path::new(DEFAULT_CONFIG_NAME).to_path_buf()];
-    paths.push(Path::new(DEFAULT_CONFIG_NAME_JSON).to_path_buf());
-    for n in LEGACY_CONFIG_NAMES {
-        paths.push(Path::new(n).to_path_buf());
+    // 规范名优先（JSONC = 带注释的 JSON，注释即文档）；旧名随后（升级兼容，读到即迁移）。
+    // cwd 相对候选**在 TCC 保护目录内一律跳过**：那会让 macOS 反复弹
+    // "想访问文稿文件夹"（实测：从 ~/Documents/... 下启动网关就弹）。
+    // 需要在别处用配置请显式 `--config <path>`。
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if !skip_cwd_candidates() {
+        paths.push(Path::new(DEFAULT_CONFIG_NAME).to_path_buf());
+        paths.push(Path::new(DEFAULT_CONFIG_NAME_JSON).to_path_buf());
+        for n in LEGACY_CONFIG_NAMES {
+            paths.push(Path::new(n).to_path_buf());
+        }
     }
     if let Ok(home) = std::env::var("HOME") {
         let dir = Path::new(&home).join(".evo-router");
@@ -588,8 +671,10 @@ pub fn default_config_paths() -> Vec<std::path::PathBuf> {
         let legacy = Path::new(&home).join(".evolve");
         paths.push(legacy.join("evo-router.toml"));
         paths.push(legacy.join("evolve.toml"));
-        // 更早的 cwd 位置
-        paths.push(Path::new("evolve.toml").to_path_buf());
+        // 更早的 cwd 位置（同样受 TCC 守卫约束）
+        if !skip_cwd_candidates() {
+            paths.push(Path::new("evolve.toml").to_path_buf());
+        }
     }
     paths
 }
@@ -827,6 +912,50 @@ mod data_dir_tests {
 
     /// HOME 是进程级全局变量：并行测试会互相污染（踩到过），统一串行化
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 端点占位记录：只有 base_url 的 provider 也要被远端 /models 拉取覆盖
+    #[test]
+    fn endpoint_placeholders_cover_keyless_providers() {
+        let mut cfg = FileConfig::default();
+        cfg.providers.push(ProviderCfg {
+            key: "openrouter".into(),
+            base_url: "https://openrouter.ai/api/v1/".into(),
+            api_key: Some("k".into()),
+            ..Default::default()
+        });
+        cfg.providers.push(ProviderCfg {
+            key: "off".into(),
+            base_url: "https://example.test/v1".into(),
+            disabled: Some(true),
+            ..Default::default()
+        });
+        let ph = cfg.endpoint_placeholders();
+        assert_eq!(ph.len(), 1, "disabled providers are not fetched: {ph:?}");
+        assert_eq!(ph[0].provider, "openrouter");
+        assert_eq!(ph[0].base_url, "https://openrouter.ai/api/v1", "trailing slash trimmed for grouping");
+        assert_eq!(ph[0].key_values(), vec!["k".to_string()]);
+        // 占位记录有独特的 upstream_model，绝不会与真实模型混淆
+        assert_eq!(ph[0].upstream_model, "__endpoint__");
+        assert!(!ph[0].is_free());
+    }
+
+    /// TCC 守卫：~/Documents、~/Desktop、~/Downloads、iCloud 下不探测 cwd 相对配置
+    /// （那是 "EvolveRouter 想访问文稿文件夹" 弹窗的根因）
+    #[test]
+    fn tcc_protected_dirs_are_detected_by_path_only() {
+        for p in [
+            "/Users/u/Documents",
+            "/Users/u/Documents/proj",
+            "/Users/u/Desktop/x",
+            "/Users/u/Downloads",
+            "/Users/u/Library/Mobile Documents/com~apple~CloudDocs",
+        ] {
+            assert!(is_tcc_protected_dir(Path::new(p)), "should be protected: {p}");
+        }
+        for p in ["/", "/Applications", "/Users/u", "/Users/u/.evo-router", "/tmp/x"] {
+            assert!(!is_tcc_protected_dir(Path::new(p)), "should not be protected: {p}");
+        }
+    }
 
     #[test]
     fn default_config_paths_prefer_new_names() {

@@ -15,12 +15,16 @@ public enum Config {
 
     /// 网关子进程日志（追加）：归类到 ~/.evo-router/logs/
     static let gatewayLogURL: URL = {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".evo-router", isDirectory: true)
-            .appendingPathComponent("logs", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("gateway-child.log")
+        let logs = dataDirURL.appendingPathComponent("logs", isDirectory: true)
+        // 必须把 logs/ 一起建出来：首次安装时 CreateFile 因父目录不存在会失败，
+        // 子进程 stdout/stderr 不落盘，而 dm_degraded_hint 正指向这个文件
+        try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        return logs.appendingPathComponent("gateway-child.log")
     }()
+
+    /// 数据目录（~/.evo-router）——同时作为网关子进程的 cwd（非 TCC 保护目录）
+    static let dataDirURL: URL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".evo-router", isDirectory: true)
 
     static var gatewayURL: URL {
         URL(fileURLWithPath: siblingGatewayURL.path)

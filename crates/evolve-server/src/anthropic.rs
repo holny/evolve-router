@@ -69,6 +69,8 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                     }));
                 }
             }
+            let degraded: std::collections::HashSet<String> =
+                st.quota.provider_degraded().into_iter().collect();
             let input = RoutingInput {
                 session_key: &session_key,
                 features,
@@ -84,6 +86,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 plan_pressure: &plan_pressure,
                 redact: st.config.decision.redact,
                 price_tier_of: &crate::meta::price_tier_map(&st),
+                degraded_providers: &degraded,
                 active: &crate::meta::active_id_set(&st),
             };
             let d = st.engine.decide(input);

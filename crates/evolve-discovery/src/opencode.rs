@@ -228,9 +228,13 @@ fn extract_models(root: &Value) -> Vec<ModelRecord> {
                 .unwrap_or(false);
             let reasoning = mv.get("reasoning").and_then(|v| v.as_bool()).unwrap_or(false);
             let tool_call = mv.get("tool_call").and_then(|v| v.as_bool()).unwrap_or(true);
-            let cost = mv.get("cost").map(|c| Cost {
-                    input: c.get("input").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
-                    output: c.get("output").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32,
+            let cost = mv.get("cost").and_then(|c| {
+                    // 必须同时给出 input/output 才算价格——缺失时留 None，
+                    // 否则 `unwrap_or(0.0)` 会造出"0 价"（污染有效成本估算与展示）
+                    Some(Cost {
+                        input: c.get("input").and_then(|v| v.as_f64())? as f32,
+                        output: c.get("output").and_then(|v| v.as_f64())? as f32,
+                    })
                 });
             records.push(ModelRecord {
                 id: format!("{provider_id}/{model_key}"),

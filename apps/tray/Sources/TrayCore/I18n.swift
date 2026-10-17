@@ -18,6 +18,7 @@ let T: [String: String] = [
     "last_sync": "synced",
     "recent": "Recent requests",
     "providers": "Providers",
+    "models": "Models",
     "cooldown": "cooldown",
     "disabled": "disabled",
     "payg": "payg",
@@ -46,8 +47,10 @@ let T: [String: String] = [
     "dm_retrying": "retrying in %ds",
     "dm_retrying_now": "retrying on the next request",
     "dm_degraded_hint": "Check the slot endpoint / api_key in evo-router-config.jsonc (details: ~/.evo-router/logs/gateway-child.log)",
-    "top6_by_usage": "top 6 by usage",
+    "window_today": "today",
+    "window_yesterday": "yesterday",
     "providers_duty": "plan tier · fetched model list · probed quota · assigned to routing",
+    "quota_src_legend": "quota shows nothing when read from the provider's official API; \"headers\" = upstream headers, \"estimated\" = gateway estimate",
     "restart": "Restart",
     "inflight_n": "%d in flight",
     "inflight_hint": "requests being processed right now (streams included) — the tooltip lists model and age",
@@ -56,6 +59,10 @@ let T: [String: String] = [
     "inflight_confirm_go": "Restart anyway",
     "restart_help": "Restart the gateway (applies [server]/[policy]/[[models]] changes)",
     "cfg_dirty": "Config changed — restart to apply",
+    "getKey": "get key",
+    "noKey": "no key",
+    "free_hint": "free models: preferred by routing and not billed to plan quota",
+    "degraded": "degraded",
 ]
 
 public func t(_ key: String) -> String {

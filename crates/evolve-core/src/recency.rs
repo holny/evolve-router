@@ -147,6 +147,204 @@ pub fn select_active(
     active
 }
 
+// ───────────────────────── 组合（portfolio）2026-10 用户裁决 ─────────────────────────
+// 旧模型：单一**全局**活跃集（新发布 20 + 近用 30 的前 50）——谁新模型多谁通吃。
+// 实测事故：zen 一次上几十个新模型 → 占掉 50 里的 41 个，把 MiniMax(1M 窗口)、
+// volc、zhipu glm-5.3 全挤出可路由范围；一家额度耗尽/网络故障即"全军覆没"。
+// 新模型 = **Provider 组合**：provider 名额上限 + 每家内 能力×价位 矩阵覆盖 +
+// 免费直通车（必选、不占名额）。目标（用户原话）：交给智能决策时**覆盖所有可用
+// provider**、**覆盖 价钱×能力 各档位** 都有模型，同时兼顾活跃与新模型。
+
+/// 组合下限（provider 少时也至少这么多，保持现状体验）
+pub const PORTFOLIO_MIN_CAP: usize = 50;
+/// 每家健康 provider 的名义名额（组合上限 = max(下限, 家数 × 此值)）
+pub const SLOTS_PER_HEALTHY_PROVIDER: usize = 8;
+/// 每家保底名额（模型少的小供应商也能进组合）
+pub const PROVIDER_MIN_SLOTS: usize = 3;
+/// 单家最多占总名额比例（防"新模型多的供应商"刷屏）
+pub const PROVIDER_MAX_SHARE: f32 = 0.25;
+/// 每家内"新发布"保底名额
+pub const PROVIDER_NEWEST_MIN: usize = 2;
+/// 每家内"近 14 天用过"保底名额
+pub const PROVIDER_RECENT_MIN: usize = 3;
+
+/// 组合候选（由 server 侧从 catalog + 标签 + 用量组装）
+#[derive(Debug, Clone)]
+pub struct PortfolioItem {
+    pub id: String,
+    pub provider: String,
+    /// 能力档 0=basic / 1=standard / 2=powerful
+    pub cap_rank: u8,
+    /// 价位档 0=cheap / 1=medium / 2=premium
+    pub price_rank: u8,
+    /// 免费模型：**直通车**（必选，不占 provider 名额）
+    pub free: bool,
+    pub release_ts: Option<u64>,
+    pub last_used_ms: Option<u64>,
+    /// 配额余量 0..1（未知按 0.5）——额度多的 provider 权重更高
+    pub quota_ratio: f32,
+    /// 用户手动 pin（不占名额）
+    pub pinned: bool,
+}
+
+/// 动态名额：最少 `PORTFOLIO_MIN_CAP`，随健康 provider 数放大
+pub fn portfolio_cap(healthy_providers: usize) -> usize {
+    PORTFOLIO_MIN_CAP.max(healthy_providers.saturating_mul(SLOTS_PER_HEALTHY_PROVIDER))
+}
+
+/// 单 provider 名额上限
+pub fn provider_slot_cap(cap: usize) -> usize {
+    ((cap as f32 * PROVIDER_MAX_SHARE) as usize).max(PROVIDER_MIN_SLOTS)
+}
+
+/// 选组合（顺序即 UI/日志展示顺序）：
+/// ① pin（不占名额）② 免费直通车（不占名额）③ 每 provider 按权重分名额，
+/// 家内**先补满 能力×价位 9 格**（每格取代表作）④ 再按 新发布/近期使用 补齐。
+pub fn select_portfolio(items: &[PortfolioItem], now_ms: u64) -> Vec<String> {
+    use std::collections::{BTreeMap, HashSet};
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let push = |id: &str, out: &mut Vec<String>, seen: &mut HashSet<String>| {
+        if seen.insert(id.to_string()) {
+            out.push(id.to_string());
+        }
+    };
+    // 计入名额的只有"非免费且非 pin"的模型（用户裁决 2026-10）——
+    // 用独立计数器，别拿 out.len() 与 cap 比（那样免费会把上限吃掉）
+    let mut slot_used = 0usize;
+    // ① 用户 pin：最高优先，不占名额
+    for it in items.iter().filter(|i| i.pinned) {
+        push(&it.id, &mut out, &mut seen);
+    }
+    // ② 免费直通车：必选、不占名额（免费是"必然可用"的保底覆盖）
+    for it in items.iter().filter(|i| i.free) {
+        push(&it.id, &mut out, &mut seen);
+    }
+    // ③ 按 provider 分组
+    let mut by_provider: BTreeMap<&str, Vec<&PortfolioItem>> = BTreeMap::new();
+    for it in items {
+        by_provider.entry(it.provider.as_str()).or_default().push(it);
+    }
+    let providers = by_provider.len();
+    let cap = portfolio_cap(providers);
+    let share_cap = provider_slot_cap(cap);
+    // 权重 = 1 + 配额余量均值 + 免费模型数×0.1（额度多的多给名额）
+    let weight = |list: &[&PortfolioItem]| -> f32 {
+        let n = list.len().max(1) as f32;
+        let q = list.iter().map(|i| i.quota_ratio.clamp(0.0, 1.0)).sum::<f32>() / n;
+        let f = list.iter().filter(|i| i.free).count() as f32;
+        1.0 + q + f * 0.1
+    };
+    let total_w: f32 = by_provider.values().map(|l| weight(l)).sum::<f32>().max(1e-6);
+    // 家内排序：新发布 > 近期使用 > id（稳定）
+    let rank_key = |i: &PortfolioItem| -> (u64, u64) {
+        let rel = i.release_ts.unwrap_or(0);
+        let used = i
+            .last_used_ms
+            .filter(|ts| now_ms.saturating_sub(*ts) <= USED_WINDOW_MS)
+            .unwrap_or(0);
+        (rel, used)
+    };
+    for (provider, list) in &by_provider {
+        let slots = (((cap as f32) * weight(list) / total_w).round() as usize)
+            .clamp(PROVIDER_MIN_SLOTS, share_cap);
+        let mut budget = slots;
+        // ③a 矩阵覆盖：9 格各取一个代表（格内按 rank_key 取最优）
+        let mut cells: BTreeMap<(u8, u8), Vec<&PortfolioItem>> = BTreeMap::new();
+        for it in list.iter() {
+            cells
+                .entry((it.cap_rank.min(2), it.price_rank.min(2)))
+                .or_default()
+                .push(it);
+        }
+        for (_cell, mut members) in cells {
+            if budget == 0 {
+                break;
+            }
+            members.sort_by(|a, b| rank_key(b).cmp(&rank_key(a)).then(a.id.cmp(&b.id)));
+            if let Some(best) = members.first()
+                && !seen.contains(&best.id)
+            {
+                push(&best.id, &mut out, &mut seen);
+                budget -= 1;
+                slot_used += 1;
+            }
+        }
+        // ③b 家内保底：新发布 ≥2、近用 ≥3（不足不硬凑）
+        let mut newest = 0usize;
+        let mut recent = 0usize;
+        let mut ordered: Vec<&PortfolioItem> = list.clone();
+        ordered.sort_by(|a, b| rank_key(b).cmp(&rank_key(a)).then(a.id.cmp(&b.id)));
+        for it in &ordered {
+            if budget == 0 {
+                break;
+            }
+            let is_new = it.release_ts.is_some() && newest < PROVIDER_NEWEST_MIN;
+            let is_recent = it
+                .last_used_ms
+                .map(|ts| now_ms.saturating_sub(ts) <= USED_WINDOW_MS)
+                .unwrap_or(false)
+                && recent < PROVIDER_RECENT_MIN;
+            if (is_new || is_recent) && !seen.contains(&it.id) {
+                push(&it.id, &mut out, &mut seen);
+                budget -= 1;
+                slot_used += 1;
+                if is_new {
+                    newest += 1;
+                }
+                if is_recent {
+                    recent += 1;
+                }
+            }
+        }
+        // ③c 余量按 新发布/近用 综合序补齐
+        for it in &ordered {
+            if budget == 0 {
+                break;
+            }
+            if !seen.contains(&it.id) {
+                push(&it.id, &mut out, &mut seen);
+                budget -= 1;
+                slot_used += 1;
+            }
+        }
+        let _ = provider;
+    }
+    // ④ 空缺补齐（需求少、供应商少时别浪费名额）：份额上限只在"供给充足"时生效——
+    // 若按份额分完仍没到组合上限，而某些家还有没入选的模型，则轮转补进来。
+    // （单供应商 41 个模型只取 12 个是浪费；多家争抢时防刷屏的初衷仍然成立）
+    if slot_used < cap {
+        let mut rest: BTreeMap<&str, Vec<&PortfolioItem>> = BTreeMap::new();
+        for (provider, list) in &by_provider {
+            let mut left: Vec<&PortfolioItem> =
+                list.iter().filter(|i| !seen.contains(&i.id)).copied().collect();
+            left.sort_by(|a, b| rank_key(b).cmp(&rank_key(a)).then(a.id.cmp(&b.id)));
+            if !left.is_empty() {
+                rest.insert(*provider, left);
+            }
+        }
+        let mut round = 0usize;
+        while slot_used < cap {
+            let mut took = false;
+            for left in rest.values() {
+                if slot_used >= cap {
+                    break;
+                }
+                if let Some(it) = left.get(round) {
+                    took = true;
+                    push(&it.id, &mut out, &mut seen);
+                    slot_used += 1;
+                }
+            }
+            if !took {
+                break;
+            }
+            round += 1;
+        }
+    }
+    out
+}
+
 /// 启用一个模型会顶掉谁（UI 预告）：当前活跃集里分数最低者。
 /// `exclude` = 刚被启用、已进入活跃集的那个模型（不能算作自己顶自己）。
 pub fn swap_victim(ranked: &[(String, u64)], active: &[String], exclude: Option<&str>) -> Option<String> {
@@ -216,6 +414,122 @@ mod tests {
         // 顶替预告：排除自己后取真正最低者
         let v = swap_victim(&by_used, &a2, Some("zzz"));
         assert!(v.is_some());
+    }
+
+    fn item(id: &str, provider: &str, cap: u8, price: u8, free: bool) -> PortfolioItem {
+        PortfolioItem {
+            id: id.into(),
+            provider: provider.into(),
+            cap_rank: cap,
+            price_rank: price,
+            free,
+            release_ts: Some(1_700_000_000_000),
+            last_used_ms: None,
+            quota_ratio: 0.5,
+            pinned: false,
+        }
+    }
+
+    /// 用户裁决的核心：单一 provider 的模型再多也不能刷屏（zen 41/50 事故）
+    #[test]
+    fn portfolio_caps_any_single_provider_share() {
+        let mut items: Vec<PortfolioItem> = (0..60)
+            .map(|i| item(&format!("zen/m{i}"), "zen", (i % 3) as u8, ((i / 3) % 3) as u8, false))
+            .collect();
+        // 另外 3 家各有足够模型（供给充足时份额上限才该生效）
+        for p in ["minimax", "volc", "zhipu"] {
+            for c in 0..20 {
+                items.push(item(&format!("{p}/m{c}"), p, (c % 3) as u8, ((c / 3) % 3) as u8, false));
+            }
+        }
+        let out = select_portfolio(&items, 1_700_000_000_000);
+        let cap = portfolio_cap(4);
+        let share = provider_slot_cap(cap);
+        let zen = out.iter().filter(|i| i.starts_with("zen/")).count();
+        assert!(
+            zen <= share + 1,
+            "one provider must not flood the pool ({share}/+1 of {cap}): zen took {zen}"
+        );
+        // 供给充足时其余每家也应拿满份额（不再被一家挤出局）
+        for p in ["minimax", "volc", "zhipu"] {
+            let n = out.iter().filter(|i| i.starts_with(&format!("{p}/"))).count();
+            assert!(n >= share, "{p} should get its share of {share}: got {n} — {out:?}");
+        }
+    }
+
+    /// 能力×价位 9 格覆盖：每家每格都尽量有代表
+    #[test]
+    fn portfolio_covers_capability_and_price_cells() {
+        let mut items: Vec<PortfolioItem> = Vec::new();
+        for cap in 0..3u8 {
+            for price in 0..3u8 {
+                items.push(item(&format!("p/c{cap}p{price}"), "p", cap, price, false));
+            }
+        }
+        let out = select_portfolio(&items, 1_700_000_000_000);
+        for cap in 0..3u8 {
+            for price in 0..3u8 {
+                let id = format!("p/c{cap}p{price}");
+                assert!(out.contains(&id), "cell cap{cap}/price{price} missing: {out:?}");
+            }
+        }
+    }
+
+    /// 免费直通车 + pin：必选且不占名额（名额被占满也要在）
+    #[test]
+    fn portfolio_free_models_ride_free() {
+        let mut items: Vec<PortfolioItem> = vec![item("p/free-1", "p", 0, 0, true)];
+        for i in 0..40 {
+            items.push(item(&format!("p/m{i}"), "p", (i % 3) as u8, ((i / 3) % 3) as u8, false));
+        }
+        let mut pinned = item("q/pinned", "q", 1, 1, false);
+        pinned.pinned = true;
+        items.push(pinned);
+        assert_eq!(portfolio_cap(1), PORTFOLIO_MIN_CAP);
+        let out = select_portfolio(&items, 1_700_000_000_000);
+        assert!(out.contains(&"p/free-1".to_string()), "free is a must: {out:?}");
+        assert!(out.contains(&"q/pinned".to_string()), "pinned is a must: {out:?}");
+        // 单供应商 41 个模型 + 免费 + pin：组合上限 50 没满 → 全部纳入
+        // （免费/pin 是"额外"的，不吃名额——若吃名额就不会是 43）
+        assert_eq!(out.len(), 42, "free/pinned ride free on top of the slots: {out:?}");
+    }
+
+    /// 免费/pin 不占名额：即使共享同一个 provider，也要在名额耗尽后仍被纳入
+    #[test]
+    fn portfolio_free_does_not_consume_the_cap() {
+        // 12 个付费（恰好填满该 provider 的份额上限）+ 3 个免费
+        let mut items: Vec<PortfolioItem> = (0..12)
+            .map(|i| item(&format!("p/m{i}"), "p", (i % 3) as u8, ((i / 3) % 3) as u8, false))
+            .collect();
+        for f in 0..3 {
+            items.push(item(&format!("p/free{f}"), "p", 0, 0, true));
+        }
+        let cap = portfolio_cap(1);
+        let share = provider_slot_cap(cap);
+        let out = select_portfolio(&items, 1_700_000_000_000);
+        let paid = out.iter().filter(|i| i.starts_with("p/m")).count();
+        assert_eq!(paid, share, "paid models fill the share cap: {paid} vs {share}");
+        for f in 0..3 {
+            assert!(out.contains(&format!("p/free{f}")), "free must always be in: {out:?}");
+        }
+        assert_eq!(out.len(), share + 3, "free rides on top of the cap: {out:?}");
+    }
+
+    /// 动态名额：provider 多时放大（最少 50）
+    #[test]
+    fn portfolio_cap_grows_with_provider_count() {
+        assert_eq!(portfolio_cap(0), PORTFOLIO_MIN_CAP);
+        assert_eq!(portfolio_cap(6), PORTFOLIO_MIN_CAP);
+        assert_eq!(portfolio_cap(8), 64);
+        // 每家 12 个（总供给 96 > 上限 64）→ 应恰好填满动态上限
+        let items: Vec<PortfolioItem> = (0..8)
+            .flat_map(|p| {
+                (0..12).map(move |i| item(&format!("p{p}/m{i}"), &format!("p{p}"), (i % 3) as u8, ((i / 3) % 3) as u8, false))
+            })
+            .collect();
+        let out = select_portfolio(&items, 1_700_000_000_000);
+        assert_eq!(out.len(), portfolio_cap(8), "dynamic cap must be filled: {}", out.len());
+        assert!(out.len() > PORTFOLIO_MIN_CAP, "cap should grow: {}", out.len());
     }
 
     #[test]

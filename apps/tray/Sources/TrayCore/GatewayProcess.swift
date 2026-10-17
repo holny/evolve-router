@@ -49,6 +49,10 @@ public final class GatewayProcess: ObservableObject {
         let p = Process()
         p.executableURL = Config.gatewayURL
         p.arguments = ["serve"]
+        // 子进程 cwd 固定为数据目录（~/.evo-router，非 TCC 保护目录）：
+        // 若继承到 ~/Documents / ~/Desktop 之类的工作目录，网关探测"相对 cwd 的
+        // 候选配置名"就会让 macOS 反复弹"想访问文稿文件夹中的文件"（实测）
+        p.currentDirectoryURL = Config.dataDirURL
         let log = FileHandle(forWritingAtPath: Config.gatewayLogURL.path) ?? {
             FileManager.default.createFile(atPath: Config.gatewayLogURL.path, contents: nil)
             return FileHandle(forWritingAtPath: Config.gatewayLogURL.path)

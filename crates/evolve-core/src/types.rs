@@ -118,6 +118,29 @@ impl Default for ModelRecord {
     }
 }
 
+impl ModelRecord {
+    /// 免费模型（2026-10 用户需求：周期性识别免费模型并优先使用）。
+    /// 判据 = 模型名（`upstream_model`，退 `id`）带独立的 `free` 段
+    /// （`-free` / `_free` / `.free` / `/free` / `:free`）——opencode/zen 与
+    /// OpenRouter 对免费模型的命名约定，models.dev 的 `opencode-go`/`opencode`
+    /// 条目亦完全一致（两处目录里每个免费模型名都带 `-free`）。因此该信号精确、
+    /// 无假阳性，且随每小时远端 /models 扫描 + 每日 models.dev 刷新自动跟进。
+    ///
+    /// **为何不用"目录价 0/0"**（曾试，实测误判）：models.dev 的 0/0 还表示
+    /// "订阅套餐内含"，而 canon 全局兜底会取**其它 provider** 的条目——
+    /// 实测 `opencode-go/qwen3.7-max`、`opencode-go/qwen3.6-plus` 被兜底匹配到
+    /// `alibaba-token-plan`（0/0，套餐内含），一旦据此判"免费"就会去优先使用
+    /// 实际要烧配额的模型。故只保留命名信号。
+    pub fn is_free(&self) -> bool {
+        let name = if self.upstream_model.is_empty() {
+            self.id.to_lowercase()
+        } else {
+            self.upstream_model.to_lowercase()
+        };
+        name.split(['-', '/', '_', '.', ':']).any(|s| s == "free")
+    }
+}
+
 /// 国内厂商按人民币计价；其余默认美元（可被配置显式覆盖）
 pub fn infer_currency(provider: &str) -> &'static str {
     let p = provider.to_lowercase();

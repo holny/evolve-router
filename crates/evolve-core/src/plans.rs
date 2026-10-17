@@ -282,6 +282,11 @@ pub fn model_price_hint(base_url: &str, model_id: &str) -> Option<f32> {
 pub fn credit_multipliers(base_url: &str, model_id: &str) -> Option<(f64, f64, f64)> {
     let p = plan_for(base_url)?;
     let m = model_id.to_lowercase();
+    // 免费模型（名称带 `-free` 段，opencode/zen 约定）：不消耗方案配额 →
+    // 消耗系数 0，配额用量与限额展示不再被免费调用污染
+    if m.split(['-', '/', '_', '.']).any(|s| s == "free") {
+        return Some((0.0, 0.0, 0.0));
+    }
     match p.key {
         "zhipu-coding" | "zai-devpack" | "minimax-coding" => {
             if m.contains("flash") { Some((2.3, 0.56, 8.0)) } else { Some((6.9, 1.7, 24.0)) }
@@ -340,6 +345,8 @@ pub fn plan_key_for(base_url: &str) -> Option<&'static str> {
 /// - ZaiMonitor     : 同 Zhipu（z.ai 域名）
 /// - OpencodeZen    : GET {host}/zen/go/v1/usage（rolling/weekly/monthly 百分比）
 /// - DeepseekBalance: GET {host}/user/balance（按量余额，非窗口）
+/// - OpenrouterCredits: GET {host}/api/v1/key（limit_remaining/usage_monthly，
+///   退 /api/v1/credits 的 total_credits-total_usage）——按量余额，非窗口
 /// - None           : 无官方配额端点 → 响应头学习 / 网关推算
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QuotaApi {
@@ -348,6 +355,7 @@ pub enum QuotaApi {
     ZaiMonitor,
     OpencodeZen,
     DeepseekBalance,
+    OpenrouterCredits,
 }
 
 impl QuotaApi {
@@ -357,6 +365,11 @@ impl QuotaApi {
             self,
             QuotaApi::MinimaxRemains | QuotaApi::ZhipuMonitor | QuotaApi::ZaiMonitor | QuotaApi::OpencodeZen
         )
+    }
+
+    /// 按量余额型（非窗口）：走 payg_balance 拉取与展示
+    pub fn balance_based(&self) -> bool {
+        matches!(self, QuotaApi::DeepseekBalance | QuotaApi::OpenrouterCredits)
     }
 }
 
@@ -385,6 +398,8 @@ pub fn quota_api_for(base_url: &str) -> Option<QuotaApi> {
         Some(QuotaApi::OpencodeZen)
     } else if host.ends_with("api.deepseek.com") {
         Some(QuotaApi::DeepseekBalance)
+    } else if host.ends_with("openrouter.ai") {
+        Some(QuotaApi::OpenrouterCredits)
     } else if lower.contains("minimax") {
         Some(QuotaApi::MinimaxRemains)
     } else {
@@ -438,6 +453,27 @@ pub fn plan_credits_used_by_id(model_id: &str, in_tok: f64, cached_tok: f64, out
 mod tests {
     use super::*;
 
+    /// OpenRouter：按量余额型（非窗口），额度走 /api/v1/key 与 /api/v1/credits
+    #[test]
+    fn openrouter_maps_to_credits_quota_api() {
+        let api = quota_api_for("https://openrouter.ai/api/v1");
+        assert_eq!(api, Some(QuotaApi::OpenrouterCredits));
+        assert!(!api.unwrap().window_based(), "OpenRouter is pay-as-you-go, not windowed");
+        assert!(api.unwrap().balance_based(), "OpenRouter quota comes from the balance endpoints");
+        // 非默认 host 不受影响
+        assert_eq!(quota_api_for("https://api.deepseek.com"), Some(QuotaApi::DeepseekBalance));
+        assert!(quota_api_for("http://127.0.0.1:9101/v1").is_none());
+    }
+
+    /// 免费模型不吃配额：消耗系数为 0（名称带 `-free` / `:free` 段）
+    #[test]
+    fn free_models_burn_no_plan_quota() {
+        let go = "https://opencode.ai/zen/go/v1";
+        assert_eq!(credit_multipliers(go, "opencode-go/beam-free"), Some((0.0, 0.0, 0.0)));
+        assert_eq!(plan_credits_used(go, "opencode-go/longcat-2.5-preview-free", 1e6, 0.0, 1e5), 0.0);
+        // 付费模型仍按官方单价折算（非零）
+        assert!(plan_credits_used(go, "opencode-go/kimi-k3", 1e6, 0.0, 1e5) > 0.0);
+    }
     #[test]
     fn matches_by_base_url() {
         assert_eq!(

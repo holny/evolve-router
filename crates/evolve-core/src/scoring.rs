@@ -51,6 +51,11 @@ pub const PLAN_QUOTA_BONUS: f32 = 0.05;
 pub const RECENCY_BONUS: f32 = 0.05;
 pub const RECENCY_WINDOW_MS: u64 = 2 * 3600 * 1000;
 
+/// 免费模型偏好幅度（用户需求 2026-10：优先使用免费模型）：免费模型边际成本
+/// 为零且不消耗配额，同等条件下应优先用掉。幅度刻意保持很小（10%）——明显
+/// 更强的付费模型仍会胜出（难度高时质量主导，弱免费模型仍被质量门槛挡掉）。
+pub const FREE_BONUS: f32 = 0.10;
+
 /// 难度-费用联动（用户裁决：简单任务用便宜模型，复杂任务可以用贵的模型）。
 /// 难度 0：成本权重 ×2、质量权重 ×0.75（省钱优先）；
 /// 难度 3：成本权重 ×0.4、质量权重满额（成本让位，质量主导）。
@@ -216,13 +221,22 @@ pub fn score_all_tiered(
     let min_price = candidates
         .iter()
         .filter(|m| !m.plan)
+        .filter(|m| !m.is_free())
         .filter_map(|m| est_cost(m, est_input, est_output, telemetry.get(&m.id)))
+        // 防御：负价/非有限值不参与锚点（上游"动态定价 -1"哨兵之类），
+        // 否则 min_price 为负 → 其它模型成本因子全变 0
+        .filter(|p| p.is_finite() && *p >= 0.0)
         .fold(f32::MAX, f32::min);
     // 订阅模型配额消耗强度（官方系数折算）：**按方案分组取最小**——
     // 不同方案的系数不可比（智谱积分 vs Go 美元），全局取最小会稀释基准
     let mut hints: HashMap<&str, f32> = HashMap::new();
     let mut scheme_min: HashMap<String, f32> = HashMap::new();
     for m in candidates.iter().filter(|m| m.plan) {
+        // 免费模型不入方案基准：其配额消耗为 0，会把他成员的成本因子压到 0
+        // （成本因子 = 方案最小值/自身值）——免费模型单独走 is_free 分支
+        if m.is_free() {
+            continue;
+        }
         if let Some(h) = crate::plans::model_price_hint(&m.base_url, &m.id) {
             // 峰谷折扣（provider_info）：非高峰半价 → 有效成本更低（错峰优先）
             let h = h * crate::provider_info::peak_factor_now(&m.base_url);
@@ -243,7 +257,10 @@ pub fn score_all_tiered(
                 Some(obs) => 0.7 * prior_speed + 0.3 * obs.clamp(0.0, 1.0),
                 None => prior_speed,
             };
-            let c = if m.plan {
+            let c = if m.is_free() {
+                // 免费模型：边际成本为零、不烧配额 → 成本因子置满
+                1.0
+            } else if m.plan {
                 // 订阅套餐：配额内边际成本≈0，但配额消耗速率按官方系数折算
                 // （同方案内旗舰烧配额是轻量模型的数倍——简单任务便宜模型胜出）
                 match hints.get(m.id.as_str()) {
@@ -307,6 +324,10 @@ pub fn score_all_tiered(
                 if age < RECENCY_WINDOW_MS {
                     score *= 1.0 + RECENCY_BONUS * (1.0 - age as f32 / RECENCY_WINDOW_MS as f32);
                 }
+            }
+            // 免费模型偏好（见 FREE_BONUS）：零成本零配额消耗，同等条件下优先
+            if m.is_free() {
+                score *= 1.0 + FREE_BONUS;
             }
             CandidateScore { model_id: m.id.clone(), score, q, s, c, r, h, uw: user_w, bias, qp: 1.0 }
         })
@@ -484,6 +505,76 @@ mod difficulty_cost_tests {
         let sb = scores.iter().find(|s| s.model_id == "plan-b").unwrap().score;
         assert!(sa > sb, "recently used model gets the affinity bonus: {sa} vs {sb}");
         assert!(sa / sb < 1.06, "bonus must stay small (<6%): {sa} vs {sb}");
+    }
+
+    /// 回归（2026-10 审查）：池内若混入负成本（上游"动态定价 -1"哨兵），
+    /// 成本锚点必须忽略它，其它模型的成本因子不能被压成 0
+    #[test]
+    fn negative_cost_does_not_poison_the_price_anchor() {
+        use crate::types::Cost;
+        let mk = |id: &str, cost: Cost| ModelRecord {
+            id: id.into(),
+            provider: "p".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: Some("k".into()),
+            upstream_model: id.into(),
+            context_window: Some(1_000_000),
+            max_output: 4096,
+            cost: Some(cost),
+            tiers: Tiers { reasoning: 0.8, coding: 0.8, vision: 0.0, agentic: 0.8 },
+            speed_tier: 0.5,
+            source: Source::User,
+            ..Default::default()
+        };
+        let weird = mk("p/neg", Cost { input: -1_000_000.0, output: -1_000_000.0 });
+        let paid = mk("p/paid", Cost { input: 1.0, output: 2.0 });
+        let refs = vec![&weird, &paid];
+        let j = judge(Domain::Code, 1.0);
+        let w = PolicyWeights { quality: 0.35, speed: 0.15, cost: 0.25, stability: 0.15, headroom: 0.10 };
+        let out = score_all(&refs, &j, 1.0, 10_000, 4_000, &w, &TelemetrySnapshot::new());
+        let p = out.iter().find(|s| s.model_id == "p/paid").unwrap();
+        assert!(p.c > 0.5, "paid model's cost factor must stay healthy: {}", p.c);
+    }
+
+    /// 免费模型（用户需求 2026-10）：识别（目录价 0/0 或 `-free` 命名）+
+    /// 成本因子置满 + 不得把同池付费模型的成本因子压到 0
+    #[test]
+    fn free_model_detection_and_preference() {
+        use crate::types::Cost;
+        let mk = |id: &str, cost: Option<Cost>| ModelRecord {
+            id: id.into(),
+            provider: "p".into(),
+            base_url: "https://api.example.com/v1".into(),
+            api_key: Some("k".into()),
+            upstream_model: id.into(),
+            context_window: Some(1_000_000),
+            max_output: 4096,
+            cost,
+            tiers: Tiers { reasoning: 0.8, coding: 0.8, vision: 0.0, agentic: 0.8 },
+            speed_tier: 0.5,
+            source: Source::User,
+            ..Default::default()
+        };
+        // 命名信号：`-free` 段（见 ModelRecord::is_free）
+        assert!(mk("p/beam-free", None).is_free());
+        assert!(mk("p/x_free", None).is_free());
+        // 目录价 0/0 **不**算免费：可能来自其它 provider 的套餐条目（实测误判）
+        assert!(!mk("p/qwen3.7-max", Some(Cost { input: 0.0, output: 0.0 })).is_free());
+        assert!(!mk("p/x-2", Some(Cost { input: 1.0, output: 2.0 })).is_free());
+        assert!(!mk("p/freebie", None).is_free(), "substring must not match");
+
+        let free = mk("p/a-free", Some(Cost { input: 0.0, output: 0.0 }));
+        let paid = mk("p/b", Some(Cost { input: 1.0, output: 2.0 }));
+        let refs = vec![&free, &paid];
+        let j = judge(Domain::Code, 1.0);
+        let w = PolicyWeights { quality: 0.35, speed: 0.15, cost: 0.25, stability: 0.15, headroom: 0.10 };
+        let tel = TelemetrySnapshot::new();
+        let out = score_all(&refs, &j, 1.0, 10_000, 4_000, &w, &tel);
+        let f = out.iter().find(|s| s.model_id == "p/a-free").unwrap();
+        let b = out.iter().find(|s| s.model_id == "p/b").unwrap();
+        assert!(b.c > 0.5, "paid model's cost factor must not be zeroed: {}", b.c);
+        assert!(f.c >= b.c, "free gets the top cost factor: {} vs {}", f.c, b.c);
+        assert!(f.score > b.score, "equal quality must prefer free: {} vs {}", f.score, b.score);
     }
 }
 
