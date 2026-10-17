@@ -79,6 +79,10 @@ OpenAI-compatible clients use `http://127.0.0.1:8787/v1` with model `auto`; Clau
 
 ## How a request is routed
 
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="820" alt="EvolveRouter architecture">
+</p>
+
 ```mermaid
 flowchart TD
     A["request · model = auto"] --> B{"hard constraints<br/>context window · vision · credential"}

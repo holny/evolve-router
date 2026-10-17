@@ -79,6 +79,10 @@ OpenAI 兼容客户端：`http://127.0.0.1:8787/v1`，模型填 `auto`；Claude 
 
 ## 请求怎么被路由
 
+<p align="center">
+  <img src="docs/assets/architecture.svg" width="820" alt="EvolveRouter 架构">
+</p>
+
 ```mermaid
 flowchart TD
     A["请求 · model = auto"] --> B{"硬约束<br/>上下文窗口 · 视觉 · 凭据"}
