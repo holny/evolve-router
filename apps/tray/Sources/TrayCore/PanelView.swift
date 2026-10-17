@@ -1042,8 +1042,13 @@ public struct PanelView: View {
     }
 
     private func quitAll() {
-        Task {
+        Task { @MainActor in
+            // 无论本 app 是否 spawn 过网关，退出前都停掉它（守卫在 stop 内部：
+            // owned=false 且无子进程 → 直接返回，不会误杀外部实例）
             await GatewayProcess.shared.stop()
+            GatewayProcess.shared.stopGatewayWithSigterm()
+            // launchd KeepAlive(Crashed)：SIGKILL 会被当成"崩溃"而自动拉起——
+            // 正常退出必须走 NSApp.terminate 自身，不能用 kill
             NSApp.terminate(nil)
         }
     }

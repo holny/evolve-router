@@ -106,6 +106,44 @@ public final class GatewayProcess: ObservableObject {
         owned = false
     }
 
+    /// Quit 时的兜底：本 app 实例可能不是网关的父进程（launchd RunAtLoad 直启
+    /// 面板、外部脚本起网关），`owned=false` 时 stop() 是 no-op。按进程名找到
+    /// `evo-router serve` 发 SIGTERM（等 8s 排空，与网关自身的 drain 一致），
+    /// 仍存活才 SIGKILL。找不到/已退出都是 no-op。
+    public func stopGatewayWithSigterm() {
+        let out = Process()
+        out.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        out.arguments = ["-f", "evo-router serve"]
+        let pipe = Pipe()
+        out.standardOutput = pipe
+        out.standardError = Pipe()
+        do {
+            try out.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            out.waitUntilExit()
+            let pids = String(decoding: data, as: UTF8.self)
+                .split(separator: "\n")
+                .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+            for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+                kill(pid, SIGTERM)
+            }
+            // 给排空留时间（60s 上限之内先等 8s，拖太久反而像"退不出"）
+            for _ in 0..<80 {
+                usleep(100_000)
+                var alive = false
+                for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+                    if kill(pid, 0) == 0 { alive = true }
+                }
+                if !alive { return }
+            }
+            for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+                kill(pid, SIGKILL)
+            }
+        } catch {
+            // pgrep 不可用等极端情况：忽略（NSApp.terminate 照常走）
+        }
+    }
+
     public func networkHealthy() async -> Bool {
         var req = URLRequest(url: URL(string: Config.baseURL + "/healthz")!)
         req.timeoutInterval = 2
