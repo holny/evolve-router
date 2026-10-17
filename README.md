@@ -26,15 +26,10 @@ opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
      zhipu · Z.ai · MiniMax · volces · opencode zen · DeepSeek · any OpenAI/Anthropic API
 ```
 
-<p align="center">
-  <img src="docs/assets/dashboard.png" width="760" alt="Dashboard: live decisions, onboarding, provider cards">
-  <img src="docs/assets/panel.png" width="280" alt="macOS menu-bar panel: providers, recent requests">
-</p>
-
 ## Contents
 
 - [Install](#install) · [Point your agent at it](#point-your-agent-at-it)
-- [How a request is routed](#how-a-request-is-routed) · [Price-aware layers](#price-aware-layers)
+- [How a request is routed](#how-a-request-is-routed) · [The routing formula](#the-routing-formula-step-by-step) · [Price-aware layers](#price-aware-layers)
 - [Decision model (optional)](#decision-model-optional) · [Request tags](#request-tags)
 - [macOS menu-bar panel](#macos-menu-bar-panel) · [Dashboard](#dashboard)
 - [Configuration](#configuration) · [Operations](#operations)
@@ -122,56 +117,63 @@ flowchart TD
 
 Strategy parameters are versioned and must pass `evo-router backtest` (replay on real production events, judged by Performance-Gap-Recovered) before adoption. Every learned quantity is clamped (bias ∈ [0.7, 1.3], distillation shift ≤ 0.15).
 
-### How it scores
+## The routing formula, step by step
 
-`d ∈ [0,1]` is the calibrated difficulty (`D/3`); `q` quality, `s` speed, `c` cost, `r` reliability, `h` headroom.
+![EvolveRouter formula](docs/assets/formula.png)
 
-```
-# 1. quality — difficulty steepens the requirement
-tier = tier_for_domain(domain, tiers)          # coding / reasoning / agentic / vision
-q    = 1 - d * (1 - tier ^ (1 + 2d))
-q   *= 0.6 + 0.4 * max(tier, reasoning)        # only when high_stakes
+The card above is the overview of the scoring core (steps 2–5). The pool rules that decide *what is routable* are in step 6. Every quantity is named and visible in the event log.
 
-# 2. quality floor — easy tasks are permissive, hard tasks are not
-floor(d) = 0.50 + 0.35 * d
+### Step 1 — Hard filters *(binary gates, no formula)*
 
-# 3. difficulty-linked weights (easy -> cost, hard -> quality)
-w_cost    = w_c * (2.0 - 1.6 * d)
-w_quality = w_q * (0.75 + 0.25 * d)            # rest unchanged, then normalized
-w_cost   *= 1 + 1.5 * tight                    # BaRP Eq.1, quota pressure in [0,1]
+Context window too small for the estimate → out. Task needs vision, the model has none → out. **Provider degraded** (network/auth), **quota exhausted** or **cooling** → out of the main pool (it stays in the fallback sweep and is probed). Per-model quota already empty → out. Not in the **routing portfolio** → out. Pareto-dominated on every factor → out. What survives is the eligible set.
 
-# 4. effective cost (per 1M tokens, plan currency)
-in_eff = price_in_miss * (1 - hit_rate) + price_in_hit * hit_rate
-cost   = (est_in / 1e6) * in_eff + (est_out / 1e6) * price_out
-cost  *= peak_factor(now)                      # e.g. DeepSeek peak = 2x
+### Step 2 — Dynamic weights *(difficulty-linked × quota-aware — [BaRP](https://arxiv.org/abs/2510.07429) Eq.1)*
 
-# 5. cost factor (higher = cheaper; two rulers that are never mixed)
-pay-as-you-go:  c = clamp(min_price / cost, 0, 1)
-subscription:   c = clamp(scheme_min / quota_intensity, 0.05, 1)
-unknown cost:   c = 0.5                        # neutral — never "free"
+$$\mathbf{W} = \operatorname{norm}\big(\mathbf{w}^{\mathrm{diff}}(d) \odot \mathbf{w}^{\mathrm{quota}}(t)\big)$$
 
-# 6. score
-S  = w_q*q + w_s*s + w_c*c + w_r*r + w_h*h
-r  = 0.5*r_long + 0.3*r_30 + 0.2*r_10          # layers merged when missing
-h  = (context_window - est_tokens) / context_window
-S *= clamp(sqrt(user_weight * learned_bias), 0.4, 1.8)
-S *= 1 + 0.05 * recency(<= 2h)                 # cache-prefix affinity
-S *= 1 + 0.10 * free                           # free model, bounded
+$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \mathrel{*}= 1 + 1.5t$$
 
-# 7. portfolio — what is routable at all
-CAP     = max(50, 8 * healthy_providers)
-w_i     = 1 + quota_headroom_i + 0.1 * free_i
-slots_i = clamp(round(CAP * w_i / sum(w)), 3, 0.25 * CAP)
-# free and pinned models are always in and do not consume slots
+*What happens:* a hard task (`d` high) tilts weights toward quality; a simple task tilts toward cost. Independently, when many eligible candidates are quota-tight (`t → 1`), the cost weight rises ×(1+1.5t) and quality yields ×(1−0.25t). No quota data → `t` undefined → weights untouched.
 
-# 8. health — recovery, not exile
-provider: 3 consecutive failures -> fallback only, probe at 1m, 5m, 15m, 30m, 60m
-          first success -> back in the pool immediately
-model:    per failure class cooldown (quota -> window reset, unsupported -> 5h, transient -> 30s..10m)
-session:  request-shape 4xx -> that (session, model) only, 30 min
-```
+### Step 3 — Five-factor score *(+ advisor, user weight, recency, free)*
 
-Every learned quantity is clamped (`bias ∈ [0.7, 1.3]`, distillation shift ≤ 0.15), and strategy changes must pass `evo-router backtest` on real events before adoption.
+$$\mathrm{base}(m) = \sum_k W_k\, f_k(m), \qquad f_k \in \{\text{quality, speed, cost, reliability, headroom}\}$$
+
+$$q(m) = 1 - d\big(1 - \tau(m)^{1+2d}\big), \qquad \text{floor}(d) = 0.50 + 0.35d$$
+
+$$r(m) = 0.5\,r_{\mathrm{long}} + 0.3\,r_{30} + 0.2\,r_{10}, \qquad h(m) = \frac{\text{window} - \hat{t}}{\text{window}}$$
+
+$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \mathrel{*}= \text{peak}(t)$$
+
+$$c_{\text{payg}} = \operatorname{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \operatorname{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
+
+$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \underbrace{\big(1 + 0.15c_r\big)}_{\text{advisor}}\cdot \underbrace{\operatorname{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)}_{\text{user weight }\times\text{ learned bias}}\cdot \underbrace{\big(1 + 0.05r_m\big)}_{\text{recency} \le 2h}\cdot \underbrace{\big(1 + 0.10 f_m\big)}_{\text{free model}}$$
+
+*What happens:* each candidate is priced **in its plan's own currency** (credits / dollars / AFP) before cost scoring, with cache hit vs miss and peak/off-peak windows baked in. Two cost rulers exist and are never mixed: pay-as-you-go compares against the pool's cheapest effective cost, subscriptions compare against the cheapest quota-burn in their own scheme. A model with **no** cost data scores `0.5` — neutral, never "free". The advisor (decision model, seeing anonymized profiles of the top-8) can boost its pick by up to +15 % when `c_r > 0.3`. Free models get a bounded +10 % and are excluded from the cost anchor and from plan-quota accounting.
+
+### Step 4 — Thompson exploration *(uncertainty-driven — [BayesianRouter](https://arxiv.org/abs/2510.02850) Eqs.4–6)*
+
+$$\mu_0 = 0.15 + 0.70\,\mathrm{rank}(q_m), \quad \alpha = \mu_0\nu_0 + s, \quad \beta = (1-\mu_0)\nu_0 + f, \quad \nu_0 = 8$$
+$$\tilde{\theta} \sim \mathrm{Beta}(\alpha,\beta), \qquad \mathrm{final}(m) \mathrel{*}= 1 + 3\rho\,(\tilde{\theta} - \mathbb{E}[\theta])$$
+
+*What happens:* `s` / `f` are the model's recent success/failure counts. A model with few observations has a wide posterior → large sampling offset → it gets tried. A well-observed model has a narrow posterior → offset vanishes → no more free chances. `ρ = explore_ratio` (default 0.1, i.e. ±3 % typical jitter). The prior mean uses the *rank* of the quality factor among candidates, because absolute `q` values saturate near 1.0 and a saturated prior would silently kill exploration.
+
+### Step 5 — Flywheel bias *(two-stage normalization + baseline-relative update)*
+
+$$\text{norm}(v) = \operatorname{clamp}\!\left(\frac{v-\bar{x}}{q_{80}-q_{20}},0,1\right), \qquad \mathrm{reward} = w_{\mathrm{ok}}\,\text{norm}(\mathrm{ok}) + (1-w_{\mathrm{ok}})\big(1-\text{norm}(\ln \mathrm{ms})\big)$$
+$$B(m) = \operatorname{clamp}\!\big(1 + (\mathrm{reward}_m - \operatorname{median}_{m'}\mathrm{reward}_{m'})\,\gamma,\ 0.7,\ 1.3\big)$$
+
+*What happens:* the last 30 outcomes per model become a reward in [0,1], normalized against the model's own rolling mean and spread (that is what makes a 200 ms model and a 20 s model comparable). The bias learns the **advantage over the cross-model median**, not absolute outcomes — when the whole workload gets harder, every reward drops together and the bias stays still. The flywheel can only fine-tune: `|B| ≤ 1.3`, and the decision model's judgment stays the ceiling.
+
+### Step 6 — Routing portfolio and health *(what is routable at all)*
+
+$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota\_headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \operatorname{clamp}\!\left(\operatorname{round}\!\Big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\Big), 3, 0.25\,\mathrm{CAP}\right)$$
+
+*What happens:* `P` healthy providers; each provider gets a slot budget proportional to its headroom, capped at 25 % of the pool so a provider that ships many models cannot take every slot. Inside a provider the **capability × price cells** are filled first, then newest / recently used. Free and pinned models are always in and do not consume slots. Health walks back, it does not exile: **3 consecutive failures** move a provider to fallback-only and schedule probes at **1 m, 5 m, 15 m, 30 m, 60 m**; the first success returns it immediately. A request-shape 4xx quarantines that *(session, model)* pair for **30 min** only.
+
+### Step 7 — After routing
+
+Quality cascade: a *successful* response that is degenerate / empty / has broken tool calls is discarded and the next chain candidate is tried — stricter at the chain head, looser further down. Failures are classified (quota · auth · network · context · request shape); the reported status is the **primary** cause, not the last attempt's. The fallback sweep is constraint-aware (window/vision) and rotates across providers. Repeated identical requests hit a local completion cache. Every event records `regret = best-available-score − chosen-score`, and every strategy change must survive `evo-router backtest` (replay on real events) before it ships.
 
 ### Price-aware layers
 

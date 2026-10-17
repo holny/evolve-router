@@ -26,15 +26,10 @@ opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
      zhipu · Z.ai · MiniMax · volces · opencode zen · DeepSeek · 任意 OpenAI/Anthropic API
 ```
 
-<p align="center">
-  <img src="docs/assets/dashboard.png" width="760" alt="网页面板：开箱接入、实时决策流、Provider 卡">
-  <img src="docs/assets/panel.png" width="280" alt="macOS 菜单栏面板：Providers / Recent requests">
-</p>
-
 ## 目录
 
 - [安装](#安装) · [接入你的 Agent](#接入你的-agent)
-- [请求怎么被路由](#请求怎么被路由) · [价格感知层](#价格感知层)
+- [请求怎么被路由](#请求怎么被路由) · [路由决策公式](#路由决策公式分步推导) · [价格感知层](#价格感知层)
 - [决策模型（可选）](#决策模型可选) · [请求标签](#请求标签)
 - [macOS 菜单栏面板](#macos-菜单栏面板) · [网页面板](#网页面板)
 - [配置](#配置) · [运维](#运维)
@@ -122,56 +117,63 @@ flowchart TD
 
 策略参数版本化，必须通过 `evo-router backtest`（真实生产事件回放 + PGR 裁决）才可采纳；所有学习量都有夹紧（偏置 ∈ [0.7, 1.3]，蒸馏单步 ≤ 0.15）。
 
-### 怎么算分（公式）
+## 路由决策公式（分步推导）
 
-`d ∈ [0,1]` 为校准后的难度（`D/3`）；`q` 质量、`s` 速度、`c` 成本、`r` 可靠、`h` 余量。
+![EvolveRouter formula](docs/assets/formula-zh.png)
 
-```
-# 1. 质量——难度越高，对档位的要求越陡
-tier = tier_for_domain(domain, tiers)          # coding / reasoning / agentic / vision
-q    = 1 - d * (1 - tier ^ (1 + 2d))
-q   *= 0.6 + 0.4 * max(tier, reasoning)        # 仅 high_stakes
+上图是**评分内核**（第 2–5 步）的总览；决定"什么能进路由"的组合规则见第 6 步。每个量都有名字，都能在事件日志里找到。
 
-# 2. 质量门槛——简单任务松，困难任务紧
-floor(d) = 0.50 + 0.35 * d
+### 第 1 步 — 硬过滤 *（无公式：二元门）*
 
-# 3. 难度联动权重（简单→成本，困难→质量）
-w_cost    = w_c * (2.0 - 1.6 * d)
-w_quality = w_q * (0.75 + 0.25 * d)            # 其余不变，最后归一化
-w_cost   *= 1 + 1.5 * tight                    # BaRP Eq.1，配额压力 ∈ [0,1]
+上下文窗口不够 → 出局。任务要视觉、模型不支持 → 出局。**provider 降级**（网络/鉴权）、**配额耗尽**或**冷却中** → 不进主池（仍进兜底段并定时探活）。单模型配额已空 → 出局。不在**路由组合**里 → 出局。五因子全面被支配（Pareto）→ 出局。活下来的构成候选集。
 
-# 4. 有效成本（每 1M tokens，方案币种）
-in_eff = price_in_miss * (1 - hit_rate) + price_in_hit * hit_rate
-cost   = (est_in / 1e6) * in_eff + (est_out / 1e6) * price_out
-cost  *= peak_factor(now)                      # 例：DeepSeek 高峰 = 2x
+### 第 2 步 — 动态权重 *（难度联动 × 配额感知——[BaRP](https://arxiv.org/abs/2510.07429) Eq.1）*
 
-# 5. 成本因子（越大越便宜；两把尺，绝不混用）
-按量:    c = clamp(min_price / cost, 0, 1)
-订阅:    c = clamp(scheme_min / quota_intensity, 0.05, 1)
-成本未知: c = 0.5                               # 中性——不冒充免费
+$$\mathbf{W} = \text{norm}\big(\mathbf{w}^{\mathrm{diff}}(d) \odot \mathbf{w}^{\mathrm{quota}}(t)\big)$$
 
-# 6. 总分
-S  = w_q*q + w_s*s + w_c*c + w_r*r + w_h*h
-r  = 0.5*r_long + 0.3*r_30 + 0.2*r_10          # 缺层归并
-h  = (context_window - est_tokens) / context_window
-S *= clamp(sqrt(user_weight * learned_bias), 0.4, 1.8)
-S *= 1 + 0.05 * recency(<= 2h)                 # 缓存前缀亲和
-S *= 1 + 0.10 * free                           # 免费模型，幅度有界
+$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \mathrel{*}= 1 + 1.5t$$
 
-# 7. 组合——决定"什么能进路由"
-CAP     = max(50, 8 * healthy_providers)
-w_i     = 1 + quota_headroom_i + 0.1 * free_i
-slots_i = clamp(round(CAP * w_i / sum(w)), 3, 0.25 * CAP)
-# 免费与 pin 必选且不占名额
+*发生了什么*：难任务（`d` 高）权重倒向质量；简单任务倒向成本。独立地，当候选中配额紧张的比例升高（`t → 1`）时，成本权重 ×(1+1.5t)、质量让位 ×(1−0.25t)。无配额数据 → 不干预。
 
-# 8. 健康——是"暂避"不是"判死"
-provider: 连续 3 次失败 → 只进兜底，按 1m / 5m / 15m / 30m / 60m 探活
-          首次成功 → 立即回到主池
-model:    按失败类别冷却（配额→窗口重置，未上架→5h，瞬态→30s..10m）
-session:  请求形状 4xx → 仅该 (会话, 模型)，30 分钟
-```
+### 第 3 步 — 五因子评分 *（+ advisor、用户权重、近期偏好、免费加成）*
 
-所有学习量都被夹紧（`bias ∈ [0.7, 1.3]`、蒸馏位移 ≤ 0.15）；策略改动必须先过 `evo-router backtest`（真实事件回放）才允许采用。
+$$\mathrm{base}(m) = \sum_k W_k \cdot f_k(m), \qquad f_k \in \{\text{质量, 速度, 成本, 可靠, 余量}\}$$
+
+$$q(m) = 1 - d\big(1 - \tau(m)^{1+2d}\big), \qquad \text{floor}(d) = 0.50 + 0.35d$$
+
+$$r(m) = 0.5\,r_{\mathrm{long}} + 0.3\,r_{30} + 0.2\,r_{10}, \qquad h(m) = \frac{\text{window} - \hat{t}}{\text{window}}$$
+
+$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \mathrel{*}= \text{peak}(t)$$
+
+$$c_{\text{payg}} = \operatorname{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \operatorname{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
+
+$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \underbrace{\big(1 + 0.15c_r\big)}_{\text{advisor}}\cdot \underbrace{\operatorname{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)}_{\text{用户权重}\times\text{学习偏置}}\cdot \underbrace{\big(1 + 0.05r_m\big)}_{\text{近期} \le 2h}\cdot \underbrace{\big(1 + 0.10 f_m\big)}_{\text{免费模型}}$$
+
+*发生了什么*：每个候选先**按其方案自己的货币计价**（积分 / 美元 / AFP），并把缓存命中价与峰谷窗口算进有效成本。两把成本尺子绝不混用：按量模型与池内最便宜的有效成本比，订阅模型与**同方案**内最轻的配额消耗比。**无成本数据**的模型记 `0.5`——中性，绝不冒充免费。advisor（决策模型，看 top-8 匿名画像）在 `c_r > 0.3` 时可为举荐加最多 +15%。免费模型有界 +10%，且**不计入成本锚点、不计入套餐配额消耗**。
+
+### 第 4 步 — Thompson 探索 *（不确定性驱动——[BayesianRouter](https://arxiv.org/abs/2510.02850) Eqs.4–6）*
+
+$$\mu_0 = 0.15 + 0.70\,\mathrm{rank}(q_m), \quad \alpha = \mu_0 \nu_0 + s, \quad \beta = (1-\mu_0)\nu_0 + f, \quad \nu_0 = 8$$
+$$\tilde{\theta} \sim \mathrm{Beta}(\alpha, \beta), \qquad \mathrm{final}(m) \mathrel{*}= 1 + 3\rho(\tilde{\theta} - \mathbb{E}[\theta])$$
+
+*发生了什么*：s/f 是该模型近窗成败计数。观测少的模型后验宽 → 采样偏移大 → 被多试；观测足的模型后验窄 → 偏移消失 → 不再白给机会。ρ = `explore_ratio`（默认 0.1，典型扰动 ±3%）。先验均值 μ₀ 取质量因子的候选集**相对位次**——绝对 q 值普遍贴顶 1.0，饱和的先验会让探索静默死亡（实测教训）。
+
+### 第 5 步 — 飞轮偏置 *（两阶段归一化 + 基线相对更新）*
+
+$$\text{norm}(v) = \text{clamp}\!\left(\frac{v - \bar{x}}{q_{80} - q_{20}},\ 0,\ 1\right), \qquad \mathrm{reward} = w_{\mathrm{ok}} \cdot \text{norm}(\mathrm{ok}) + (1{-}w_{\mathrm{ok}})\big(1 - \text{norm}(\ln \mathrm{ms})\big)$$
+$$B(m) = \text{clamp}\big(1 + (\mathrm{reward}_m - \mathrm{median}_{m'}\mathrm{reward}_{m'}) \cdot \gamma,\ 0.7,\ 1.3\big)$$
+
+*发生了什么*：每个模型近 30 条结果（成功 + 延迟，ln 压缩）归一成 [0,1] 的 reward——先对自己的滚动均值中心化，再按自己的 20/80 分位距缩放（这让 200ms 的模型和 20s 的模型可比）。bias 学的是**相对跨模型中位数的优势**，不是绝对结果——整个工作负载变难时所有 reward 同降、中位数跟着动、bias 纹丝不动。飞轮只能微调：|B| ≤ 1.3，决策模型的判定是天花板。
+
+### 第 6 步 — 路由组合与健康 *（决定"什么能进路由"）*
+
+$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{配额余量}_i + 0.1\,\text{免费数}_i, \qquad \mathrm{slots}_i = \operatorname{clamp}\!\left(\operatorname{round}\!\Big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\Big), 3, 0.25\,\mathrm{CAP}\right)$$
+
+*发生了什么*：`P` 为健康 provider 数；每家按配额余量分到名额，单家**封顶 25%**——新模型多的 provider 吃不下全部名额。每家内先补齐**能力×价位 9 格**，再按新发布 / 近期使用补足；免费与 pin 必选且**不占名额**。健康是"暂避"不是"判死"：**连续 3 次失败** → 只进兜底，按 **1m / 5m / 15m / 30m / 60m** 探活，首次成功**立即**回主池；请求形状类 4xx 只拉黑该 *(会话, 模型)* **30 分钟**。
+
+### 第 7 步 — 路由之后
+
+质量级联：**成功但**退化 / 空响应 / 工具调用损坏的响应被丢弃，试链下一候选——链首最严、逐级放宽。失败会被归因（配额 · 鉴权 · 网络 · 上下文 · 请求形状），对外状态取**主因**而不是最后一次尝试。兜底段**约束感知**（窗口/视觉）并按 provider 轮转。逻辑相同的重复请求命中本地完成缓存。每个事件记录 `regret = 最优可得分 − 实选分`；任何策略变更必须先过 `evo-router backtest`（真实事件回放）才能上线。
 
 ### 价格感知层
 
@@ -228,6 +230,11 @@ session:  请求形状 4xx → 仅该 (会话, 模型)，30 分钟
 
 ## macOS 菜单栏面板
 
+<p align="center">
+  <img src="docs/assets/panel.png" width="300" alt="Providers 与 Recent requests（浅色）">
+  <img src="docs/assets/panel-models.png" width="300" alt="Models 视图：行内报错原因（浅色）">
+</p>
+
 面板是原生 SwiftUI 应用，徽章本身就是状态灯（空闲 / 路由中 / 上次失败 / 已停止 / 启动中）。
 
 | 区域 | 展示 |
@@ -242,6 +249,10 @@ session:  请求形状 4xx → 仅该 (会话, 模型)，30 分钟
 **重启是优雅的。** SIGINT/SIGTERM 后停止接新请求、**等在飞请求（含正在进行的 SSE 流）收尾**（上游卡死时 60s 上限兜底并记 WARN）、flush 飞轮再退出。重启不会截断正在生成的流；若有在飞请求，面板会先弹确认框。**不要对网关用 `kill -9`。**
 
 ## 网页面板
+
+<p align="center">
+  <img src="docs/assets/dashboard.png" width="820" alt="网页面板（浅色）：开箱接入、实时决策流、Provider 卡">
+</p>
 
 `http://127.0.0.1:8787/` —— 零构建，与面板同源同口径，视图更宽：
 
