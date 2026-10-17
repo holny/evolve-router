@@ -129,9 +129,9 @@ Context window too small for the estimate → out. Task needs vision, the model 
 
 ### Step 2 — Dynamic weights *(difficulty-linked × quota-aware — [BaRP](https://arxiv.org/abs/2510.07429) Eq.1)*
 
-$$\mathbf{W} = \operatorname{norm}\big(\mathbf{w}^{\mathrm{diff}}(d) \odot \mathbf{w}^{\mathrm{quota}}(t)\big)$$
+$$\mathbf{W} = \mathrm{norm}\big(\mathbf{w}^{\mathrm{diff}}(d) \odot \mathbf{w}^{\mathrm{quota}}(t)\big)$$
 
-$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \mathrel{*}= 1 + 1.5t$$
+$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \leftarrow w^{\mathrm{cost}}\,(1 + 1.5t)$$
 
 *What happens:* a hard task (`d` high) tilts weights toward quality; a simple task tilts toward cost. Independently, when many eligible candidates are quota-tight (`t → 1`), the cost weight rises ×(1+1.5t) and quality yields ×(1−0.25t). No quota data → `t` undefined → weights untouched.
 
@@ -143,31 +143,31 @@ $$q(m) = 1 - d\big(1 - \tau(m)^{1+2d}\big), \qquad \text{floor}(d) = 0.50 + 0.35
 
 $$r(m) = 0.5\,r_{\mathrm{long}} + 0.3\,r_{30} + 0.2\,r_{10}, \qquad h(m) = \frac{\text{window} - \hat{t}}{\text{window}}$$
 
-$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \mathrel{*}= \text{peak}(t)$$
+$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \leftarrow \text{cost}\cdot\text{peak}(t)$$
 
-$$c_{\text{payg}} = \operatorname{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \operatorname{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
+$$c_{\text{payg}} = \mathrm{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \mathrm{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
 
-$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \underbrace{\big(1 + 0.15c_r\big)}_{\text{advisor}}\cdot \underbrace{\operatorname{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)}_{\text{user weight }\times\text{ learned bias}}\cdot \underbrace{\big(1 + 0.05r_m\big)}_{\text{recency} \le 2h}\cdot \underbrace{\big(1 + 0.10 f_m\big)}_{\text{free model}}$$
+$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \big(1 + 0.15c_r\big)\cdot \mathrm{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)\cdot \big(1 + 0.05r_m\big)\cdot \big(1 + 0.10 f_m\big)$$
 
 *What happens:* each candidate is priced **in its plan's own currency** (credits / dollars / AFP) before cost scoring, with cache hit vs miss and peak/off-peak windows baked in. Two cost rulers exist and are never mixed: pay-as-you-go compares against the pool's cheapest effective cost, subscriptions compare against the cheapest quota-burn in their own scheme. A model with **no** cost data scores `0.5` — neutral, never "free". The advisor (decision model, seeing anonymized profiles of the top-8) can boost its pick by up to +15 % when `c_r > 0.3`. Free models get a bounded +10 % and are excluded from the cost anchor and from plan-quota accounting.
 
 ### Step 4 — Thompson exploration *(uncertainty-driven — [BayesianRouter](https://arxiv.org/abs/2510.02850) Eqs.4–6)*
 
 $$\mu_0 = 0.15 + 0.70\,\mathrm{rank}(q_m), \quad \alpha = \mu_0\nu_0 + s, \quad \beta = (1-\mu_0)\nu_0 + f, \quad \nu_0 = 8$$
-$$\tilde{\theta} \sim \mathrm{Beta}(\alpha,\beta), \qquad \mathrm{final}(m) \mathrel{*}= 1 + 3\rho\,(\tilde{\theta} - \mathbb{E}[\theta])$$
+$$\tilde{\theta} \sim \mathrm{Beta}(\alpha,\beta), \qquad \mathrm{final}(m) \leftarrow \mathrm{final}(m)\big(1 + 3\rho(\tilde{\theta} - \mathbb{E}[\theta])\big)$$
 
 *What happens:* `s` / `f` are the model's recent success/failure counts. A model with few observations has a wide posterior → large sampling offset → it gets tried. A well-observed model has a narrow posterior → offset vanishes → no more free chances. `ρ = explore_ratio` (default 0.1, i.e. ±3 % typical jitter). The prior mean uses the *rank* of the quality factor among candidates, because absolute `q` values saturate near 1.0 and a saturated prior would silently kill exploration.
 
 ### Step 5 — Flywheel bias *(two-stage normalization + baseline-relative update)*
 
-$$\text{norm}(v) = \operatorname{clamp}\!\left(\frac{v-\bar{x}}{q_{80}-q_{20}},0,1\right), \qquad \mathrm{reward} = w_{\mathrm{ok}}\,\text{norm}(\mathrm{ok}) + (1-w_{\mathrm{ok}})\big(1-\text{norm}(\ln \mathrm{ms})\big)$$
-$$B(m) = \operatorname{clamp}\!\big(1 + (\mathrm{reward}_m - \operatorname{median}_{m'}\mathrm{reward}_{m'})\,\gamma,\ 0.7,\ 1.3\big)$$
+$$\text{norm}(v) = \mathrm{clamp}\!\left(\frac{v-\bar{x}}{q_{80}-q_{20}},0,1\right), \qquad \mathrm{reward} = w_{\mathrm{ok}}\,\text{norm}(\mathrm{ok}) + (1-w_{\mathrm{ok}})\big(1-\text{norm}(\ln \mathrm{ms})\big)$$
+$$B(m) = \mathrm{clamp}\!\big(1 + (\mathrm{reward}_m - \mathrm{median}_{m'}\mathrm{reward}_{m'})\,\gamma,\ 0.7,\ 1.3\big)$$
 
 *What happens:* the last 30 outcomes per model become a reward in [0,1], normalized against the model's own rolling mean and spread (that is what makes a 200 ms model and a 20 s model comparable). The bias learns the **advantage over the cross-model median**, not absolute outcomes — when the whole workload gets harder, every reward drops together and the bias stays still. The flywheel can only fine-tune: `|B| ≤ 1.3`, and the decision model's judgment stays the ceiling.
 
 ### Step 6 — Routing portfolio and health *(what is routable at all)*
 
-$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota\_headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \operatorname{clamp}\!\left(\operatorname{round}\!\Big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\Big), 3, 0.25\,\mathrm{CAP}\right)$$
+$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota\_headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \mathrm{clamp}\!\left(\mathrm{round}\!\big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\big), 3, 0.25\,\mathrm{CAP}\right)$$
 
 *What happens:* `P` healthy providers; each provider gets a slot budget proportional to its headroom, capped at 25 % of the pool so a provider that ships many models cannot take every slot. Inside a provider the **capability × price cells** are filled first, then newest / recently used. Free and pinned models are always in and do not consume slots. Health walks back, it does not exile: **3 consecutive failures** move a provider to fallback-only and schedule probes at **1 m, 5 m, 15 m, 30 m, 60 m**; the first success returns it immediately. A request-shape 4xx quarantines that *(session, model)* pair for **30 min** only.
 

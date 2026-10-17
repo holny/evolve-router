@@ -131,7 +131,7 @@ flowchart TD
 
 $$\mathbf{W} = \text{norm}\big(\mathbf{w}^{\mathrm{diff}}(d) \odot \mathbf{w}^{\mathrm{quota}}(t)\big)$$
 
-$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \mathrel{*}= 1 + 1.5t$$
+$$w^{\mathrm{diff}}_{\mathrm{cost}} = w_c\,(2 - 1.6d), \qquad w^{\mathrm{diff}}_{\mathrm{quality}} = w_q\,(0.75 + 0.25d), \qquad w^{\mathrm{cost}} \leftarrow w^{\mathrm{cost}}\,(1 + 1.5t)$$
 
 *发生了什么*：难任务（`d` 高）权重倒向质量；简单任务倒向成本。独立地，当候选中配额紧张的比例升高（`t → 1`）时，成本权重 ×(1+1.5t)、质量让位 ×(1−0.25t)。无配额数据 → 不干预。
 
@@ -143,18 +143,18 @@ $$q(m) = 1 - d\big(1 - \tau(m)^{1+2d}\big), \qquad \text{floor}(d) = 0.50 + 0.35
 
 $$r(m) = 0.5\,r_{\mathrm{long}} + 0.3\,r_{30} + 0.2\,r_{10}, \qquad h(m) = \frac{\text{window} - \hat{t}}{\text{window}}$$
 
-$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \mathrel{*}= \text{peak}(t)$$
+$$\text{cost}(m) = \frac{\hat{i}}{10^6}\big[p_{\text{miss}}(1-h_c) + p_{\text{hit}}h_c\big] + \frac{\hat{o}}{10^6}p_{\text{out}}, \qquad \text{cost} \leftarrow \text{cost}\cdot\text{peak}(t)$$
 
-$$c_{\text{payg}} = \operatorname{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \operatorname{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
+$$c_{\text{payg}} = \mathrm{clamp}\!\left(\frac{\min_p \text{cost}}{\text{cost}(m)},0,1\right), \qquad c_{\text{plan}} = \mathrm{clamp}\!\left(\frac{\min_{\text{scheme}}\kappa}{\kappa(m)},0.05,1\right), \qquad c_{\text{unknown}} = 0.5$$
 
-$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \underbrace{\big(1 + 0.15c_r\big)}_{\text{advisor}}\cdot \underbrace{\operatorname{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)}_{\text{用户权重}\times\text{学习偏置}}\cdot \underbrace{\big(1 + 0.05r_m\big)}_{\text{近期} \le 2h}\cdot \underbrace{\big(1 + 0.10 f_m\big)}_{\text{免费模型}}$$
+$$\mathrm{final}(m) = \mathrm{base}(m)\cdot \big(1 + 0.15c_r\big)\cdot \mathrm{clamp}\!\big(\sqrt{u_m\beta_m},0.4,1.8\big)\cdot \big(1 + 0.05r_m\big)\cdot \big(1 + 0.10 f_m\big)$$
 
 *发生了什么*：每个候选先**按其方案自己的货币计价**（积分 / 美元 / AFP），并把缓存命中价与峰谷窗口算进有效成本。两把成本尺子绝不混用：按量模型与池内最便宜的有效成本比，订阅模型与**同方案**内最轻的配额消耗比。**无成本数据**的模型记 `0.5`——中性，绝不冒充免费。advisor（决策模型，看 top-8 匿名画像）在 `c_r > 0.3` 时可为举荐加最多 +15%。免费模型有界 +10%，且**不计入成本锚点、不计入套餐配额消耗**。
 
 ### 第 4 步 — Thompson 探索 *（不确定性驱动——[BayesianRouter](https://arxiv.org/abs/2510.02850) Eqs.4–6）*
 
 $$\mu_0 = 0.15 + 0.70\,\mathrm{rank}(q_m), \quad \alpha = \mu_0 \nu_0 + s, \quad \beta = (1-\mu_0)\nu_0 + f, \quad \nu_0 = 8$$
-$$\tilde{\theta} \sim \mathrm{Beta}(\alpha, \beta), \qquad \mathrm{final}(m) \mathrel{*}= 1 + 3\rho(\tilde{\theta} - \mathbb{E}[\theta])$$
+$$\tilde{\theta} \sim \mathrm{Beta}(\alpha, \beta), \qquad \mathrm{final}(m) \leftarrow \mathrm{final}(m)\big(1 + 3\rho(\tilde{\theta} - \mathbb{E}[\theta])\big)$$
 
 *发生了什么*：s/f 是该模型近窗成败计数。观测少的模型后验宽 → 采样偏移大 → 被多试；观测足的模型后验窄 → 偏移消失 → 不再白给机会。ρ = `explore_ratio`（默认 0.1，典型扰动 ±3%）。先验均值 μ₀ 取质量因子的候选集**相对位次**——绝对 q 值普遍贴顶 1.0，饱和的先验会让探索静默死亡（实测教训）。
 
@@ -167,7 +167,7 @@ $$B(m) = \text{clamp}\big(1 + (\mathrm{reward}_m - \mathrm{median}_{m'}\mathrm{r
 
 ### 第 6 步 — 路由组合与健康 *（决定"什么能进路由"）*
 
-$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{配额余量}_i + 0.1\,\text{免费数}_i, \qquad \mathrm{slots}_i = \operatorname{clamp}\!\left(\operatorname{round}\!\Big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\Big), 3, 0.25\,\mathrm{CAP}\right)$$
+$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{配额余量}_i + 0.1\,\text{免费数}_i, \qquad \mathrm{slots}_i = \mathrm{clamp}\!\left(\mathrm{round}\!\big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\big), 3, 0.25\,\mathrm{CAP}\right)$$
 
 *发生了什么*：`P` 为健康 provider 数；每家按配额余量分到名额，单家**封顶 25%**——新模型多的 provider 吃不下全部名额。每家内先补齐**能力×价位 9 格**，再按新发布 / 近期使用补足；免费与 pin 必选且**不占名额**。健康是"暂避"不是"判死"：**连续 3 次失败** → 只进兜底，按 **1m / 5m / 15m / 30m / 60m** 探活，首次成功**立即**回主池；请求形状类 4xx 只拉黑该 *(会话, 模型)* **30 分钟**。
 
