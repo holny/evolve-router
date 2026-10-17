@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#development"><img src="https://img.shields.io/badge/tests-225%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="#development"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
 </p>
 
@@ -25,6 +25,11 @@ opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
                     ▼
      zhipu · Z.ai · MiniMax · volces · opencode zen · DeepSeek · any OpenAI/Anthropic API
 ```
+
+<p align="center">
+  <img src="docs/assets/dashboard.png" width="760" alt="Dashboard: live decisions, onboarding, provider cards">
+  <img src="docs/assets/panel.png" width="280" alt="macOS menu-bar panel: providers, recent requests">
+</p>
 
 ## Contents
 
@@ -74,23 +79,37 @@ OpenAI-compatible clients use `http://127.0.0.1:8787/v1` with model `auto`; Clau
 
 ## How a request is routed
 
-```
-request ─▶ digest signals ─▶ session stickiness (device-cache aware)
-        ─▶ judge slot chain (decision model, + rule second opinion)
-        ─▶ difficulty calibration (rolling quantiles → 70/20/10)
-        ─▶ hard filters (context window · vision · circuit breaking · quota · active set · price tier)
-        ─▶ dynamic weights (difficulty-linked × quota-aware) × tier ratio controller
-        ─▶ five-factor score (quality · speed · cost · reliability · headroom) × flywheel bias × user weight
-        ─▶ Thompson exploration (Beta posterior — uncertainty-driven)
-        ─▶ winner queue → upstream, failing over on error *and* on poor quality
-        ─▶ observe outcome → flywheel (reliability · bias · calibration) + ratio observation
+```mermaid
+flowchart TD
+    A["request · model = auto"] --> B{"hard constraints<br/>context window · vision · credential"}
+    B -- "cannot fit" --> X["filtered out<br/>(reason recorded)"]
+    B --> C{"provider health<br/>degraded · quota exhausted · cooling"}
+    C -- "unavailable" --> X
+    C --> D["portfolio<br/>per-provider slots · capability×price cells<br/>free models always in"]
+    D --> E["judge<br/>decision model + rule second opinion<br/>8 signals"]
+    E --> F["difficulty calibration<br/>rolling quantiles → 7:2:1"]
+    F --> G["dynamic weights<br/>difficulty-linked × quota-aware"]
+    G --> H["five-factor score<br/>quality · speed · cost · reliability · headroom<br/>× flywheel bias × user weight × recency × free bonus"]
+    H --> I{"price-tier gate<br/>cheap / medium / premium"}
+    I -- "all gated" --> I2["gate yields<br/>before quality does"]
+    I --> J["Thompson exploration<br/>Beta posterior"]
+    I2 --> J
+    J --> K["winner queue<br/>provider round-robin, up to 5"]
+    K --> L["upstream"]
+    L -- "failure" --> M["classify<br/>quota · auth · network · context · request shape"]
+    M --> N["provider degrade<br/>≥3 consecutive → probe 1m…60m"]
+    M --> O["session quarantine<br/>request-shape 4xx → this session only"]
+    M --> P["constraint-aware sweep<br/>provider rotation"]
+    P --> L
+    L -- "success" --> Q["event + flywheel<br/>reliability · bias · calibration"]
+    Q --> F
 ```
 
 | Step | What it does |
 |---|---|
 | **Judge** | A pluggable **decision model** reads the request (domain, difficulty, vision need, triviality, tool density, stakes, session depth, size). A built-in multilingual heuristic judge runs as an independent second opinion (take-conservative fusion). If the decision model is unreachable the rules take over — **a decision-model outage never blocks routing** |
 | **Difficulty calibration** | Rolling-quantile calibration reshapes the judge's raw difficulty onto the 7:2:1 target, so a biased judge cannot flood the router with "hard" tasks |
-| **Hard filters** | Context window, vision capability, provider/endpoint circuit breakers, per-model quota, the active set, and the price-tier gate |
+| **Hard filters** | Context window, vision capability, provider health (degraded / quota exhausted / cooling), per-model quota, and the price-tier gate — each rejection is recorded with its reason |
 | **Dynamic weights** | Difficulty-linked (easy → cost matters 2×, quality 0.75×; hard → the reverse) and quota-aware ([BaRP](https://arxiv.org/abs/2510.07429) Eq.1) |
 | **Five-factor score** | Quality · speed · cost · reliability · headroom. Cost is an *effective* cost: official price sheets, per-plan credit multipliers, cache-hit vs miss (~1/50), peak/off-peak windows. Reliability blends long-term 50 % / last-30 30 % / last-10 20 % |
 | **Exploration** | Beta posterior per model with the judge's quality as prior mean; Thompson sampling explores sample-poor models and converges on sample-rich ones |
@@ -99,6 +118,57 @@ request ─▶ digest signals ─▶ session stickiness (device-cache aware)
 
 Strategy parameters are versioned and must pass `evo-router backtest` (replay on real production events, judged by Performance-Gap-Recovered) before adoption. Every learned quantity is clamped (bias ∈ [0.7, 1.3], distillation shift ≤ 0.15).
 
+### How it scores
+
+`d ∈ [0,1]` is the calibrated difficulty (`D/3`); `q` quality, `s` speed, `c` cost, `r` reliability, `h` headroom.
+
+```
+# 1. quality — difficulty steepens the requirement
+tier = tier_for_domain(domain, tiers)          # coding / reasoning / agentic / vision
+q    = 1 - d * (1 - tier ^ (1 + 2d))
+q   *= 0.6 + 0.4 * max(tier, reasoning)        # only when high_stakes
+
+# 2. quality floor — easy tasks are permissive, hard tasks are not
+floor(d) = 0.50 + 0.35 * d
+
+# 3. difficulty-linked weights (easy -> cost, hard -> quality)
+w_cost    = w_c * (2.0 - 1.6 * d)
+w_quality = w_q * (0.75 + 0.25 * d)            # rest unchanged, then normalized
+w_cost   *= 1 + 1.5 * tight                    # BaRP Eq.1, quota pressure in [0,1]
+
+# 4. effective cost (per 1M tokens, plan currency)
+in_eff = price_in_miss * (1 - hit_rate) + price_in_hit * hit_rate
+cost   = (est_in / 1e6) * in_eff + (est_out / 1e6) * price_out
+cost  *= peak_factor(now)                      # e.g. DeepSeek peak = 2x
+
+# 5. cost factor (higher = cheaper; two rulers that are never mixed)
+pay-as-you-go:  c = clamp(min_price / cost, 0, 1)
+subscription:   c = clamp(scheme_min / quota_intensity, 0.05, 1)
+unknown cost:   c = 0.5                        # neutral — never "free"
+
+# 6. score
+S  = w_q*q + w_s*s + w_c*c + w_r*r + w_h*h
+r  = 0.5*r_long + 0.3*r_30 + 0.2*r_10          # layers merged when missing
+h  = (context_window - est_tokens) / context_window
+S *= clamp(sqrt(user_weight * learned_bias), 0.4, 1.8)
+S *= 1 + 0.05 * recency(<= 2h)                 # cache-prefix affinity
+S *= 1 + 0.10 * free                           # free model, bounded
+
+# 7. portfolio — what is routable at all
+CAP     = max(50, 8 * healthy_providers)
+w_i     = 1 + quota_headroom_i + 0.1 * free_i
+slots_i = clamp(round(CAP * w_i / sum(w)), 3, 0.25 * CAP)
+# free and pinned models are always in and do not consume slots
+
+# 8. health — recovery, not exile
+provider: 3 consecutive failures -> fallback only, probe at 1m, 5m, 15m, 30m, 60m
+          first success -> back in the pool immediately
+model:    per failure class cooldown (quota -> window reset, unsupported -> 5h, transient -> 30s..10m)
+session:  request-shape 4xx -> that (session, model) only, 30 min
+```
+
+Every learned quantity is clamped (`bias ∈ [0.7, 1.3]`, distillation shift ≤ 0.15), and strategy changes must pass `evo-router backtest` on real events before adoption.
+
 ### Price-aware layers
 
 | Layer | What it does |
@@ -106,7 +176,7 @@ Strategy parameters are versioned and must pass `evo-router backtest` (replay on
 | **Model tags** (capability / price) | Auto-derived by quantile (70/20/10 in both dimensions) over the **currently usable pool** only — cooling, quota-gated and keyless models are excluded dynamically; user-editable in the dashboard, and locked by contract tests |
 | **Price-tier gate** | L1 tasks may use `cheap` models only, L2 opens `medium`, L3 everything — with an **inversion exception** (a pricier model whose effective cost ≤ the allowed pool's median passes) and a quality-first relaxation (the gate yields before quality does) |
 | **Ratio controller** | Watches the actual chosen-tier mix and nudges it back toward 7:2:1 |
-| **Active set** | Only the newest-released (20-slot floor by release date) plus recently-used (14 days) models are routable; everything else stays visible and one click away |
+| **Routing portfolio** | The routable pool is a **per-provider portfolio**, not one global list: `cap = max(50, healthy providers × 8)`, each provider ≤ 25 % of it. Inside a provider the capability × price cells are filled first, then newest / recently used. Free models are always in and do not consume slots, and pinned models do not either. This keeps one provider that ships many models from taking every slot — and keeps large-context models reachable |
 | **Supply awareness** | Subscription quota (it expires!) ranks above pay-as-you-go spend. API-queryable providers refresh through a 90 s quota watchdog; others are probed with real requests every 5–10 min |
 
 ## Decision model (optional)
@@ -154,6 +224,11 @@ Request-side tags live on the request rows; model-side tags live in the Model li
 
 ## macOS menu-bar panel
 
+<p align="center">
+  <img src="docs/assets/panel.png" width="300" alt="Providers and recent requests">
+  <img src="docs/assets/panel-models.png" width="300" alt="Models view with inline failure reasons">
+</p>
+
 The panel is a native SwiftUI app; the badge itself is the status light (idle / routing / last request failed / stopped / starting).
 
 | Area | What it shows |
@@ -161,13 +236,17 @@ The panel is a native SwiftUI app; the badge itself is the status light (idle / 
 | Header | gateway state (`Running · 8787`) + version · clock + `judged by decision model + rules` / `judged by rules only` (**configured** path, not the last request's outcome) |
 | Banner | the *why* when something is off: `Decision model not configured` · `Decision model unreachable (timeout) · retrying in 26s` · `configured — applying` |
 | Metrics | requests / success rate / tokens for **today** or **yesterday** (calendar windows, persisted in hourly buckets) |
-| Providers card | a top-6-by-usage snapshot with proportional quota bars, cooldown countdowns, PAYG balances; toggles between provider and per-model views |
-| Recent requests | the last few decisions with the tags above; `<N> in flight` on the title line lists what is being generated right now |
+| Providers / Models card | up to 12 providers (or 50 used models) in a scrollable, **three-line** row: name + state (quota bar / balance / `5h full` warning, right-aligned) · data (`tokens · hit% · t/s · TTFT`) · tags (tier · models · free · degraded · get key). Failure reasons are inline (`fail 25%`, `unsupported model 4m`, `no key`) |
+| Recent requests | the last 60 requests within 10 days, scrollable; `<N> in flight` on the title line lists what is being generated right now |
 | Controls | GitHub · Dashboard · **Stop/Start** · **Restart** · Quit · autostart |
 
 **Restarts are graceful.** SIGINT/SIGTERM stops accepting new requests, lets in-flight ones (including live SSE streams) finish — up to a 60 s cap for a stuck upstream, which is logged — flushes the flywheel, then exits. Restarting never truncates a running generation; if requests are in flight, the panel asks for confirmation first. Never `kill -9` a gateway you want to keep clean.
 
 ## Dashboard
+
+<p align="center">
+  <img src="docs/assets/dashboard.png" width="820" alt="Dashboard: onboarding, live decisions, provider cards">
+</p>
 
 `http://127.0.0.1:8787/` — zero build, same data as the panel, wider:
 
@@ -211,7 +290,7 @@ A provider is more than a base URL. The **Providers card** (panel and dashboard 
 | **Plan tier** | The plan is detected from the base URL and the tier you pick (`lite` / `pro` / `max` / `go` / `go-plus`) drives that plan's window allowances | tier chip on every row; editable per plan in the dashboard |
 | **Model list** | The gateway fetches the provider's `/models` (and scans agent configs), and keeps the catalog in sync — new models appear, removed ones are pruned, protocol-unsupported ones are dropped in-process | `N models` on the row (endpoint-level, so two accounts on one endpoint agree), full list in the dashboard |
 | **Quota probing** | Quota numbers come from the official API or upstream response headers where the vendor reports them, and are *estimated* otherwise; a 90 s watchdog refreshes the ones we can query, and the rest are probed with real requests every 5–10 min | `quota obs` / `quota hdr` / `quota est` marker + the quota bar and `5h / monthly full` countdowns |
-| **Assignment** | An enabled, available provider's models join the routing candidates — subject to the active set, the price-tier gate and per-model quota. Disabled, cooling or exhausted providers are marked and stay out | `assigned` / `disabled` / `unavailable` badge on the row |
+| **Assignment** | An enabled, available provider's models join the **portfolio** (per-provider slots + capability × price coverage) — subject to provider health, the price-tier gate and per-model quota. Disabled, degraded, cooling or exhausted providers are marked and stay out of the main pool (they remain in the fallback sweep and are probed) | `assigned` / `disabled` / `unavailable` badge on the row |
 
 ### Where provider credentials come from
 

@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#开发"><img src="https://img.shields.io/badge/tests-225%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="#开发"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
 </p>
 
@@ -25,6 +25,11 @@ opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
                     ▼
      zhipu · Z.ai · MiniMax · volces · opencode zen · DeepSeek · 任意 OpenAI/Anthropic API
 ```
+
+<p align="center">
+  <img src="docs/assets/dashboard.png" width="760" alt="网页面板：开箱接入、实时决策流、Provider 卡">
+  <img src="docs/assets/panel.png" width="280" alt="macOS 菜单栏面板：Providers / Recent requests">
+</p>
 
 ## 目录
 
@@ -74,23 +79,37 @@ OpenAI 兼容客户端：`http://127.0.0.1:8787/v1`，模型填 `auto`；Claude 
 
 ## 请求怎么被路由
 
-```
-请求 ─▶ 摘要信号 ─▶ 会话粘性（含缓存经济判断）
-     ─▶ 判定槽位链（决策模型 + 规则第二意见）
-     ─▶ 难度校准（滚动分位 → 7:2:1）
-     ─▶ 硬过滤（上下文窗口 · 视觉 · 熔断 · 配额 · 活跃集 · 价位闸）
-     ─▶ 动态权重（难度联动 × 配额感知）× 层级比例控制器
-     ─▶ 五因子评分（质量 · 速度 · 成本 · 可靠 · 余量）× 飞轮偏置 × 用户权重
-     ─▶ Thompson 探索（Beta 后验——不确定性驱动）
-     ─▶ 胜出队列 → 上游；错误**与质量不佳**都会升级到下一候选
-     ─▶ 观测结果 → 飞轮（可靠性 · 偏置 · 校准）+ 比例观测
+```mermaid
+flowchart TD
+    A["请求 · model = auto"] --> B{"硬约束<br/>上下文窗口 · 视觉 · 凭据"}
+    B -- "放不下" --> X["出局<br/>（原因记录）"]
+    B --> C{"provider 健康<br/>降级 · 配额耗尽 · 冷却"}
+    C -- "不可用" --> X
+    C --> D["组合<br/>每 provider 名额 · 能力×价位格<br/>免费模型必选"]
+    D --> E["判定<br/>决策模型 + 规则第二意见<br/>8 个信号"]
+    E --> F["难度校准<br/>滚动分位 → 7:2:1"]
+    F --> G["动态权重<br/>难度联动 × 配额感知"]
+    G --> H["五因子评分<br/>质量 · 速度 · 成本 · 可靠 · 余量<br/>× 飞轮偏置 × 用户权重 × 近期偏好 × 免费加成"]
+    H --> I{"价位闸<br/>cheap / medium / premium"}
+    I -- "全被闸" --> I2["闸门让位<br/>先保质量"]
+    I --> J["Thompson 探索<br/>Beta 后验"]
+    I2 --> J
+    J --> K["胜出队列<br/>provider 轮转，至多 5"]
+    K --> L["上游"]
+    L -- "失败" --> M["归因<br/>配额 · 鉴权 · 网络 · 上下文 · 请求形状"]
+    M --> N["provider 降级<br/>连续 3 次 → 1m…60m 探活"]
+    M --> O["会话拉黑<br/>请求形状 4xx → 仅本会话"]
+    M --> P["约束感知兜底<br/>provider 轮转"]
+    P --> L
+    L -- "成功" --> Q["事件 + 飞轮<br/>可靠 · 偏置 · 校准"]
+    Q --> F
 ```
 
 | 环节 | 做什么 |
 |---|---|
 | **判定** | 可插拔**决策模型**读请求（领域、难度、视觉、trivial、工具密度、高风险、会话深度、体量）；内置多语言启发式判官作为独立第二意见（取严融合）。决策模型不可达时规则接管——**判定故障永不阻塞路由** |
 | **难度校准** | 滚动分位把判定器的原始难度重塑到 7:2:1 目标，判定器系统性偏移也无法把路由灌满"难题" |
-| **硬过滤** | 上下文窗口、视觉能力、provider/端点熔断、单模型配额、活跃集、价位闸 |
+| **硬过滤** | 上下文窗口、视觉能力、provider 健康（降级 / 配额耗尽 / 冷却）、单模型配额、价位闸——每个出局都记录具体原因 |
 | **动态权重** | 难度联动（简单 → 成本权重 ×2、质量 ×0.75；困难反之）与配额感知（[BaRP](https://arxiv.org/abs/2510.07429) Eq.1） |
 | **五因子评分** | 质量 · 速度 · 成本 · 可靠 · 余量。成本是**有效成本**：官方价目、方案积分系数、缓存命中 vs 未命中（约 1/50）、峰谷时段。可靠性 = 长期 50% + 近 30 次 30% + 近 10 次 20% |
 | **探索** | 每个模型 Beta 后验（判定器质量作先验均值）；Thompson 采样让样本少的自动多试、样本足的自动收敛 |
@@ -99,6 +118,57 @@ OpenAI 兼容客户端：`http://127.0.0.1:8787/v1`，模型填 `auto`；Claude 
 
 策略参数版本化，必须通过 `evo-router backtest`（真实生产事件回放 + PGR 裁决）才可采纳；所有学习量都有夹紧（偏置 ∈ [0.7, 1.3]，蒸馏单步 ≤ 0.15）。
 
+### 怎么算分（公式）
+
+`d ∈ [0,1]` 为校准后的难度（`D/3`）；`q` 质量、`s` 速度、`c` 成本、`r` 可靠、`h` 余量。
+
+```
+# 1. 质量——难度越高，对档位的要求越陡
+tier = tier_for_domain(domain, tiers)          # coding / reasoning / agentic / vision
+q    = 1 - d * (1 - tier ^ (1 + 2d))
+q   *= 0.6 + 0.4 * max(tier, reasoning)        # 仅 high_stakes
+
+# 2. 质量门槛——简单任务松，困难任务紧
+floor(d) = 0.50 + 0.35 * d
+
+# 3. 难度联动权重（简单→成本，困难→质量）
+w_cost    = w_c * (2.0 - 1.6 * d)
+w_quality = w_q * (0.75 + 0.25 * d)            # 其余不变，最后归一化
+w_cost   *= 1 + 1.5 * tight                    # BaRP Eq.1，配额压力 ∈ [0,1]
+
+# 4. 有效成本（每 1M tokens，方案币种）
+in_eff = price_in_miss * (1 - hit_rate) + price_in_hit * hit_rate
+cost   = (est_in / 1e6) * in_eff + (est_out / 1e6) * price_out
+cost  *= peak_factor(now)                      # 例：DeepSeek 高峰 = 2x
+
+# 5. 成本因子（越大越便宜；两把尺，绝不混用）
+按量:    c = clamp(min_price / cost, 0, 1)
+订阅:    c = clamp(scheme_min / quota_intensity, 0.05, 1)
+成本未知: c = 0.5                               # 中性——不冒充免费
+
+# 6. 总分
+S  = w_q*q + w_s*s + w_c*c + w_r*r + w_h*h
+r  = 0.5*r_long + 0.3*r_30 + 0.2*r_10          # 缺层归并
+h  = (context_window - est_tokens) / context_window
+S *= clamp(sqrt(user_weight * learned_bias), 0.4, 1.8)
+S *= 1 + 0.05 * recency(<= 2h)                 # 缓存前缀亲和
+S *= 1 + 0.10 * free                           # 免费模型，幅度有界
+
+# 7. 组合——决定"什么能进路由"
+CAP     = max(50, 8 * healthy_providers)
+w_i     = 1 + quota_headroom_i + 0.1 * free_i
+slots_i = clamp(round(CAP * w_i / sum(w)), 3, 0.25 * CAP)
+# 免费与 pin 必选且不占名额
+
+# 8. 健康——是"暂避"不是"判死"
+provider: 连续 3 次失败 → 只进兜底，按 1m / 5m / 15m / 30m / 60m 探活
+          首次成功 → 立即回到主池
+model:    按失败类别冷却（配额→窗口重置，未上架→5h，瞬态→30s..10m）
+session:  请求形状 4xx → 仅该 (会话, 模型)，30 分钟
+```
+
+所有学习量都被夹紧（`bias ∈ [0.7, 1.3]`、蒸馏位移 ≤ 0.15）；策略改动必须先过 `evo-router backtest`（真实事件回放）才允许采用。
+
 ### 价格感知层
 
 | 层 | 做什么 |
@@ -106,7 +176,7 @@ OpenAI 兼容客户端：`http://127.0.0.1:8787/v1`，模型填 `auto`；Claude 
 | **模型标签**（能力 / 价位） | 按分位自动推导（两个维度各 70/20/10），分母只算**当前可用池**（冷却/配额受限/无 key 的模型动态排除）；网页可改，契约测试锁定 |
 | **价位闸** | L1 只许 `cheap`、L2 放到 `medium`、L3 全开——带**倒挂例外**（更贵但有效成本 ≤ 允许池中位数的放行）与质量优先的例外放宽 |
 | **比例控制器** | 观测实际选用的层级分布，把成本乘子往 7:2:1 目标纠偏 |
-| **活跃集** | 只有最近发布（按发布日期 20 个保底）与最近使用（14 天）的模型可路由；其余在面板可见、一键启用 |
+| **路由组合** | 可路由池是**按 provider 的组合**，不再是单一全局名单：`cap = max(50, 健康 provider × 8)`，单家 ≤25%；每家内先补齐 能力×价位 9 格，再按新发布 / 近期使用补足。免费模型必选且**不占名额**，pin 也不占。这样新模型多的 provider 吃不下全部名额，大上下文模型也不会被挤到够不着 |
 | **供给感知** | 订阅配额（会过期！）优先于按量花费；可 API 查询的 provider 由 90s 看门狗刷新，其余每 5-10 分钟真实请求探测 |
 
 ## 决策模型（可选）
@@ -161,7 +231,7 @@ OpenAI 兼容客户端：`http://127.0.0.1:8787/v1`，模型填 `auto`；Claude 
 | 头行 | 网关状态（`Running · 8787`）+ 版本号 · 时钟 + `judged by decision model + rules`／`judged by rules only`（**配置的**判定路径，不是最近一条请求的结果） |
 | 横幅 | 异常时说明**原因**：`Decision model not configured` · `Decision model unreachable (timeout) · retrying in 26s` · `configured — applying` |
 | 指标 | **今天 / 昨天**的请求数、成功率、tokens（本地日历口径，小时桶持久化） |
-| Providers 卡 | 用量 top 6 快照：配额进度条、冷却倒计时、按量余额；可在 Provider / Model 两视图间切换 |
+| Providers / Models 卡 | 最多 12 家 provider（或 50 个用过的模型），**三行**滚动行：名称 + 状态（配额条 / 余额 / `5h full` 警告，右对齐）· 数据（`tokens · hit% · t/s · TTFT`）· 标签（档位 · 模型数 · 免费 · 降级 · 去申请 key）。失败原因行内直出（`fail 25%`、`unsupported model 4m`、`no key`） |
 | Recent requests | 最近几条决策 + 上述标签；标题右侧 `<N> in flight` 列出**正在生成**的请求 |
 | 控制 | GitHub · Dashboard · **Stop/Start** · **Restart** · Quit · 开机自启开关 |
 
@@ -211,7 +281,7 @@ Provider 不只是一条 base URL。**Providers 卡**（面板与网页一致）
 | **方案档位** | 方案由 base URL 自动识别，你选的档位（`lite` / `pro` / `max` / `go` / `go-plus`）决定该方案的窗口额度 | 每行的档位胶囊；网页按方案可改 |
 | **模型清单** | 网关拉取 provider 的 `/models`（并扫描 Agent 配置）保持目录同步——新模型入选、下架删除、协议不支持的进程内剔除 | 行上 `N models`（**端点级**，同端点两账号显示一致），完整清单在网页 |
 | **配额探测** | 有官方 API / 上游响应头就用真的，没有则由网关推算；可查询的由 90s 看门狗刷新，其余每 5-10 分钟真实请求探测 | `quota obs` / `quota hdr` / `quota est` 标记 + 配额条与 `5h / monthly full` 倒计时 |
-| **路由分配** | 启用且可用的 provider，其模型进入路由候选——受活跃集、价位闸、单模型配额约束；禁用/冷却/配额耗尽的行会标注并不进候选 | 行上的 `assigned` / `disabled` / `unavailable` 徽章 |
+| **路由分配** | 启用且可用的 provider，其模型进入**组合**（每 provider 名额 + 能力×价位格覆盖）——受 provider 健康、价位闸、单模型配额约束；禁用/降级/冷却/配额耗尽的行会标注并不进主池（仍进兜底与探活） | 行上的 `assigned` / `disabled` / `unavailable` 徽章 |
 
 ### Provider 凭据到底从哪来
 
