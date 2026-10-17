@@ -28,6 +28,10 @@ pub struct RoutingInput<'a> {
     /// provider 级降级名单（网络不可达 / 鉴权·区域被拒；2026-10）——
     /// 这些 provider 的模型**不进主池**（只进兜底段，探活成功后自动放回）
     pub degraded_providers: &'a std::collections::HashSet<String>,
+    /// 启动时从历史事件回填的 `真实 prompt_tokens / 估算` 比值（model → ratio）。
+    /// 新进程里 telemetry 还没有带 est_tok 的样本，先靠它让容量判定立刻校准；
+    /// 一旦该模型积累出新样本，telemetry 的实时比值优先。
+    pub token_ratio_backfill: &'a HashMap<String, f32>,
     /// 活跃集（用户裁决：最近发布/最近使用的前 50；空集 = 不启用过滤）——
     /// 非活跃模型不参与路由（Web 可手动开启，开启自动顶掉最低分者）
     pub active: &'a std::collections::HashSet<String>,
@@ -364,7 +368,9 @@ impl Engine {
                 .telemetry
                 .get(&m.id)
                 .and_then(|t| t.token_ratio())
-                .unwrap_or(1.0);
+                .or_else(|| input.token_ratio_backfill.get(&m.id).copied())
+                .unwrap_or(1.0)
+                .clamp(0.5, 2.5);
             let m_est = ((est as f32 * calib * tok_ratio) as u64).max(est / 2);
             // 订阅方案预算硬保护：消耗超 95% 直接出局（留最后余量给硬任务）
             let p_key = crate::plans::plan_key_for(&m.base_url)
@@ -1322,12 +1328,15 @@ mod tests {
             plan_pressure: &EMPTY_PRESSURE,
             price_tier_of: &EMPTY_TIERS,
             degraded_providers: &EMPTY_DEGRADED,
+            token_ratio_backfill: &EMPTY_RATIO,
             active: &EMPTY_ACTIVE,
             redact: true, // 测试默认走 redact 语义（advisor 禁用），与生产默认一致
         }
     }
 
     pub(crate) static EMPTY_TIERS: std::sync::LazyLock<HashMap<String, u8>> =
+        std::sync::LazyLock::new(HashMap::new);
+    pub(crate) static EMPTY_RATIO: std::sync::LazyLock<HashMap<String, f32>> =
         std::sync::LazyLock::new(HashMap::new);
     pub(crate) static EMPTY_DEGRADED: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);

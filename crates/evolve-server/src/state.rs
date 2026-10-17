@@ -41,6 +41,8 @@ pub struct Inner {
     pub ccache: Mutex<crate::relay::CompletionCache>,
     /// 按量 provider 余额缓存（provider key → /user/balance 响应节选；60s 节流刷新）
     pub payg_balance: Mutex<HashMap<String, Value>>,
+    /// 启动回填的 token 估算修正比（model → 真实/估算 中位数，见 build_state）
+    pub token_ratio_backfill: HashMap<String, f32>,
     /// 会话级模型拉黑（2026-10）：某模型对**这个会话的历史**返回请求形状类 4xx
     /// （典型：deepseek 的 `reasoning_content must be passed back`）→ 该会话别再试它，
     /// 其它会话不受影响。值 = model_id → (原因, 解禁时刻)
@@ -265,6 +267,8 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         .build()
         .expect("http client");
 
+    // token 估算的历史校准（读事件尾部；必须在 config move 进 Inner 之前算）
+    let token_ratio_backfill = backfill_token_ratios(&config.data.dir);
     let initial_providers = config.providers.clone();
     let slot_health = chain.as_ref().map(|c| c.health.clone());
     // 当前生效的判定配置（api_live 的状态来源；热加载后由 reload_config 更新）
@@ -324,6 +328,7 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
         ccache: Mutex::new(crate::relay::CompletionCache::new()),
         payg_balance: Mutex::new(HashMap::new()),
         session_quarantine: Mutex::new(HashMap::new()),
+        token_ratio_backfill,
         modelsdev_refresh_due,
         excluded_models: Mutex::new(HashMap::new()),
     })
@@ -557,6 +562,55 @@ fn seed_default_providers(
         ),
         Err(e) => tracing::warn!(error = %e, path = %path.display(), "failed to persist default providers"),
     }
+}
+
+/// 从历史事件尾部回填 token 估算修正比（model → `prompt_tokens/est_tokens` 中位数）。
+/// 新进程的 telemetry 样本还没有 `est_tok`，先用历史数据把容量判定校准好；
+/// 仅取 2xx 且两侧都 >0 的样本（失败请求的 usage 不可靠）。
+fn backfill_token_ratios(dir: &str) -> HashMap<String, f32> {
+    let mut out: HashMap<String, f32> = HashMap::new();
+    let path = evolve_core::config::events_file(dir, false);
+    let Some(content) = crate::meta::read_tail(&path, 4 * 1024 * 1024) else {
+        return out;
+    };
+    let mut acc: HashMap<String, Vec<f32>> = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(e) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if e.get("kind").and_then(|v| v.as_str()) != Some("chat") {
+            continue;
+        }
+        let status = e.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+        if !(200..300).contains(&status) {
+            continue;
+        }
+        let est = e.get("est_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let real = e
+            .get("usage")
+            .and_then(|u| u.get("prompt_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let Some(model) = e.get("chosen").and_then(|v| v.as_str()) else { continue };
+        if est > 200 && real > 0 {
+            acc.entry(model.to_string()).or_default().push(real as f32 / est as f32);
+        }
+    }
+    for (model, mut v) in acc {
+        if v.is_empty() {
+            continue;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        let med = if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 };
+        out.insert(model, med.clamp(0.5, 2.5));
+    }
+    if !out.is_empty() {
+        tracing::info!(models = out.len(), "token ratio backfilled from recent events");
+    }
+    out
 }
 
 pub fn merge_config_providers(
@@ -1087,6 +1141,28 @@ mod provider_merge_tests {
         seed_default_providers(&mut cfg, &[], Some(&path));
         assert_eq!(cfg.providers.len(), 2);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+    }
+
+    /// token 估算回填：取 2xx 样本的比值中位数；失败样本（usage 不可靠）忽略
+    #[test]
+    fn token_ratio_backfill_uses_successful_samples_only() {
+        let dir = std::env::temp_dir().join(format!("er-tokratio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = evolve_core::config::events_file(&dir.to_string_lossy(), false);
+        evolve_core::config::ensure_parent(&path);
+        let lines = [
+            json!({"kind":"chat","status":200,"chosen":"m1","est_tokens":1000,"usage":{"prompt_tokens":1400}}).to_string(),
+            json!({"kind":"chat","status":200,"chosen":"m1","est_tokens":1000,"usage":{"prompt_tokens":1600}}).to_string(),
+            // 失败请求：usage 可能是 0 或异常 → 不参与
+            json!({"kind":"chat","status":500,"chosen":"m1","est_tokens":1000,"usage":{"prompt_tokens":9000}}).to_string(),
+            json!({"kind":"semantic","model":"m1"}).to_string(),
+            json!({"kind":"chat","status":200,"chosen":"m2","est_tokens":100,"usage":{"prompt_tokens":120}}).to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let r = backfill_token_ratios(&dir.to_string_lossy());
+        assert!((r.get("m1").copied().unwrap_or(0.0) - 1.5).abs() < 1e-3, "median of 1.4/1.6: {r:?}");
+        assert!(!r.contains_key("m2"), "too few tokens must be ignored: {r:?}");
     }
 
     /// 回归（2026-10 审查）：已播种的条目**用户填过 key** → 再次启动必须原样保留，

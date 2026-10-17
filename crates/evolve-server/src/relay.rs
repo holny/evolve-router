@@ -185,6 +185,7 @@ pub async fn chat_completions(
                 redact: st.config.decision.redact,
                 price_tier_of: &price_tiers,
                 degraded_providers: &degraded,
+                token_ratio_backfill: &st.token_ratio_backfill,
                 active: &active_ids,
             };
             let d = st.engine.decide(input);

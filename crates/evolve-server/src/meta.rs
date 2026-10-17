@@ -974,7 +974,7 @@ pub async fn api_providers_scan_progress(State(st): State<AppState>) -> Response
 /// 事件文件**尾部**读取：只读最后 `max_bytes`，丢掉首个残行（UTF-8 边界安全）。
 /// events.jsonl 会涨到几十 MB，全量 `read_to_string` 在面板 3s 轮询 + 每请求打标下
 /// 都是白白的 memcpy（用户裁决 2026-10：B8）。
-fn read_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
+pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut f = std::fs::File::open(path).ok()?;
     let len = f.metadata().ok()?.len();
