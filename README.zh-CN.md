@@ -14,6 +14,10 @@
 
 EvolveRouter 是给 Agent 用的**本地 LLM 路由网关**。每个请求先被判定（8 维信号）、按其方案自有货币计价、按五因子评分，再路由到最合适的模型；请求结束后结果回流，下次决策更准。交付形态是一个 Rust 二进制 + 原生 macOS 菜单栏面板 + 零构建网页面板。**你的提示词、会话与遥测不出本机。**
 
+<p align="center">
+  <img src="docs/assets/panel.png" width="320" alt="EvolveRouter macOS 菜单栏面板（浅色）">
+</p>
+
 ```
 opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
                     │  model = "auto"
@@ -231,9 +235,10 @@ $$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{配额余量}_i +
 ## macOS 菜单栏面板
 
 <p align="center">
-  <img src="docs/assets/panel.png" width="300" alt="Providers 与 Recent requests（浅色）">
   <img src="docs/assets/panel-models.png" width="300" alt="Models 视图：行内报错原因（浅色）">
 </p>
+
+*面板主图见文首；上图是 Models 维度——每行直接带自己的失败原因。*
 
 面板是原生 SwiftUI 应用，徽章本身就是状态灯（空闲 / 路由中 / 上次失败 / 已停止 / 启动中）。
 

@@ -14,6 +14,10 @@
 
 EvolveRouter is a **local LLM routing gateway** for agents. Every request is judged on eight signals, priced in its own plan's currency, scored on five factors, and routed to the model that fits — then the outcome feeds back so the next decision is better. It ships as one Rust binary with a native macOS menu-bar panel and a zero-build dashboard. Your prompts, sessions and telemetry never leave the machine.
 
+<p align="center">
+  <img src="docs/assets/panel.png" width="320" alt="EvolveRouter macOS menu-bar panel (light)">
+</p>
+
 ```
 opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
                     │  model = "auto"
@@ -231,9 +235,10 @@ Request-side tags live on the request rows; model-side tags live in the Model li
 ## macOS menu-bar panel
 
 <p align="center">
-  <img src="docs/assets/panel.png" width="300" alt="Providers and recent requests">
   <img src="docs/assets/panel-models.png" width="300" alt="Models view with inline failure reasons">
 </p>
+
+*The main panel shot is at the top of this page; the second view above is the Models dimension, where each row carries its own failure reason.*
 
 The panel is a native SwiftUI app; the badge itself is the status light (idle / routing / last request failed / stopped / starting).
 
