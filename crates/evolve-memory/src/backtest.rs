@@ -161,6 +161,7 @@ fn strategy_bias(
                 out_tok: 0,
                 ok: *ok,
                 tools_total: 0,
+                est_tok: None,
                 tools_ok: 0,
             })
             .collect();

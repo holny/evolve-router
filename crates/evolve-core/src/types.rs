@@ -507,6 +507,35 @@ pub struct ModelTelemetry {
     pub recent: Option<Vec<ReqSample>>,
 }
 
+impl ModelTelemetry {
+    /// 观测到的 `真实 prompt_tokens / 估算 tokens` 中位数（仅成功样本）。
+    /// 内容混合度不同，偏差方向也不同（纯中文估高、代码/JSON 估低）——用它把
+    /// 硬过滤的 `need` 校到真实量级（2026-10 实测：大会话低估 1.5×）。
+    pub fn token_ratio(&self) -> Option<f32> {
+        let recent = self.recent.as_ref()?;
+        let mut v: Vec<f32> = recent
+            .iter()
+            .filter(|s| s.ok && s.in_tok > 0)
+            .filter_map(|s| {
+                s.est_tok
+                    .filter(|e| *e > 200)
+                    .map(|e| s.in_tok as f32 / e as f32)
+            })
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let n = v.len();
+        let med = if n % 2 == 1 {
+            v[n / 2]
+        } else {
+            (v[n / 2 - 1] + v[n / 2]) / 2.0
+        };
+        Some(med.clamp(0.5, 2.5))
+    }
+}
+
 pub type TelemetrySnapshot = std::collections::HashMap<String, ModelTelemetry>;
 
 /// 单次请求样本（模型动态窗口聚合 + 趋势图数据源）
@@ -522,6 +551,9 @@ pub struct ReqSample {
     pub ok: bool,
     pub tools_total: u32,
     pub tools_ok: u32,
+    /// 该请求的 token 估算值（用于按模型校准 `prompt_tokens/est` 的偏差）
+    #[serde(default)]
+    pub est_tok: Option<u64>,
 }
 
 /// Learned quota remaining (tokens) per model, best key across pool.
@@ -659,5 +691,42 @@ mod fusion_tests {
             "model not used → must not claim model+rules"
         );
         assert_eq!(fuse_judgments(&mk("decision_model"), &heur).judge_source, "decision_model+rules");
+    }
+}
+
+#[cfg(test)]
+mod token_ratio_tests {
+    use super::*;
+
+    fn sample(in_tok: u64, est: u64, ok: bool) -> ReqSample {
+        ReqSample {
+            ts: 0, ttft_ms: 0, total_ms: 0,
+            in_tok, cached_tok: 0, out_tok: 0,
+            ok, tools_total: 0, tools_ok: 0, est_tok: Some(est),
+        }
+    }
+
+    /// 只取成功样本的中位数；失败样本（上游报错时 prompt_tokens 可能缺失/异常）不计
+    #[test]
+    fn token_ratio_uses_successful_samples_median() {
+        let t = ModelTelemetry {
+            recent: Some(vec![
+                sample(1500, 1000, true),
+                sample(1600, 1000, true),
+                sample(9000, 1000, false),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(t.token_ratio(), Some(1.55));
+    }
+
+    #[test]
+    fn token_ratio_is_none_without_samples() {
+        assert!(ModelTelemetry::default().token_ratio().is_none());
+        let t = ModelTelemetry {
+            recent: Some(vec![sample(1000, 0, true)]),
+            ..Default::default()
+        };
+        assert!(t.token_ratio().is_none(), "zero/absent estimate must not produce a ratio");
     }
 }

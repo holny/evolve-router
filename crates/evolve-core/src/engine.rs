@@ -357,7 +357,15 @@ impl Engine {
                 .and_then(|t| t.calibration)
                 .filter(|c| *c > 0.1)
                 .unwrap_or(1.0);
-            let m_est = ((est as f32 * calib) as u64).max(est / 2);
+            // 按模型观测的 token/估算比值修正（成功样本中位数）：纯中文偏高、
+            // 代码/JSON/工具输出偏低（实测大会话低估 1.5×）。这一步只影响**容量类**
+            // 判定（上下文窗口 / 配额），不改变展示的原始估算
+            let tok_ratio = input
+                .telemetry
+                .get(&m.id)
+                .and_then(|t| t.token_ratio())
+                .unwrap_or(1.0);
+            let m_est = ((est as f32 * calib * tok_ratio) as u64).max(est / 2);
             // 订阅方案预算硬保护：消耗超 95% 直接出局（留最后余量给硬任务）
             let p_key = crate::plans::plan_key_for(&m.base_url)
                 .and_then(|k| input.plan_pressure.get(k));
@@ -1667,7 +1675,8 @@ mod tests {
             ModelTelemetry {
                 recent: Some(vec![crate::types::ReqSample {
                     ts: 1, ttft_ms: 100, total_ms: 900, in_tok: 10_000, cached_tok: 9_000, out_tok: 500,
-                    ok: true, tools_total: 0, tools_ok: 0,
+                    ok: true, tools_total: 0, est_tok: None,
+                tools_ok: 0,
                 }]),
                 ..Default::default()
             },

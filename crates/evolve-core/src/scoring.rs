@@ -494,7 +494,8 @@ mod difficulty_cost_tests {
                 recent: Some(vec![ReqSample {
                     ts: now, ttft_ms: 100, total_ms: 400,
                     in_tok: 10, cached_tok: 0, out_tok: 5,
-                    ok: true, tools_total: 0, tools_ok: 0,
+                    ok: true, tools_total: 0, est_tok: None,
+                tools_ok: 0,
                 }]),
                 ..Default::default()
             },

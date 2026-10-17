@@ -307,6 +307,7 @@ impl Flywheel {
                     && !q.and_then(|qq| qq.get("empty_response")).and_then(|v| v.as_bool()).unwrap_or(false),
                 tools_total: q.and_then(|qq| qq.get("tool_calls_total")).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
                 tools_ok: q.and_then(|qq| qq.get("tool_calls_valid_json")).and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+                est_tok: event.get("est_tokens").and_then(|v| v.as_u64()),
             };
             s.recent.push(sample);
             if s.recent.len() > 300 {
@@ -614,7 +615,8 @@ mod tests {
             out_tok: 0,
             ok,
             tools_total: 0,
-            tools_ok: 0,
+            est_tok: None,
+                tools_ok: 0,
         }
     }
 

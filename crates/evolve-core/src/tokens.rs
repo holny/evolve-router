@@ -1,3 +1,8 @@
+/// 中文字符的 token 系数（基础值）。实测两类偏差相反：
+/// - 纯中文日常文本：真实约 **0.58 tokens/char**（旧 0.75 反而估高 ~1.3×）
+/// - 大会话（大量代码/JSON/工具输出）：真实比估算**高 1.4–1.5×**
+/// 所以单一常数无法同时校准；**按模型观测**修正（`ModelTelemetry::token_ratio`，
+/// 由成功请求的 `prompt_tokens / est_tokens` 中位数得到）在引擎的硬过滤里生效。
 pub const CJK_TOKENS_PER_CHAR: f32 = 0.75;
 pub const LATIN_CHARS_PER_TOKEN: f32 = 4.0;
 pub const CODE_CHARS_PER_TOKEN: f32 = 3.4;
@@ -84,4 +89,19 @@ pub fn tokens_band(tokens: u64) -> i32 {
         return 0;
     }
     (64 - (tokens as f64).ln() as i32).max(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 基础系数（0.75/char）保持不变：纯中文实测约 0.58，基础值略偏保守；
+    /// 代码/JSON 类内容的低估由**按模型观测**的 `token_ratio` 在校验时修正。
+    #[test]
+    fn cjk_base_ratio_stays_conservative() {
+        let est = estimate_text(&"中".repeat(1000));
+        assert!((700..=900).contains(&est), "cjk base est = {est}/1000");
+        let en = estimate_text(&"a".repeat(4000));
+        assert!((900..=1100).contains(&en), "latin est = {en}");
+    }
 }
