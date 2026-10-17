@@ -12,6 +12,11 @@ pub const DIFF_MEDIUM: f32 = 0.8;
 pub const DIFF_HARD: f32 = 2.0;
 
 /// 请求特征阈值（与路由闸门同值）
+/// 大上下文阈值：超过它，路由池必须能"装下"请求——组合（per-provider 名额）
+/// 未必包含足够的大窗口模型（实测 282k 请求在 714 个模型里只剩 11 个候选），
+/// 因此大请求允许**突破组合**，从全目录里取窗口满足者（健康/价位闸仍生效）
+pub const BIG_CTX_TOKENS: u64 = 128_000;
+
 pub const VISION: f32 = 0.5;
 pub const STAKES_HIGH: f32 = 0.6;
 

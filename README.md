@@ -129,7 +129,7 @@ The card above is the overview of the scoring core (steps 2–5). The pool rules
 
 ### Step 1 — Hard filters *(binary gates, no formula)*
 
-Context window too small for the estimate → out. Task needs vision, the model has none → out. **Provider degraded** (network/auth), **quota exhausted** or **cooling** → out of the main pool (it stays in the fallback sweep and is probed). Per-model quota already empty → out. Not in the **routing portfolio** → out. Pareto-dominated on every factor → out. What survives is the eligible set.
+Context window too small for the estimate → out (**above 128k tokens the portfolio is bypassed**, so every model whose window actually fits is eligible). Task needs vision, the model has none → out. **Provider degraded** (network/auth), **quota exhausted** or **cooling** → out of the main pool (it stays in the fallback sweep and is probed). Per-model quota already empty → out. Not in the **routing portfolio** → out (same 128k exception). Pareto-dominated on every factor → out. What survives is the eligible set.
 
 ### Step 2 — Dynamic weights *(difficulty-linked × quota-aware — [BaRP](https://arxiv.org/abs/2510.07429) Eq.1)*
 

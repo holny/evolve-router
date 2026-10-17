@@ -385,8 +385,13 @@ impl Engine {
                 });
                 continue;
             }
-            // 活跃集过滤（用户裁决）：非活跃模型只在 Web 展示、不参与路由
-            if !input.active.is_empty() && !input.active.contains(&m.id) {
+            // 活跃集（组合）过滤（用户裁决）：非活跃模型只在 Web 展示、不参与路由。
+            // **例外：大上下文请求**——组合（几十个名额）未必含足够的大窗口模型，
+            // 实测 282k 请求在 714 个模型里只剩 11 个候选（30 个因窗口被剔除，
+            // 其余多数是"不在组合"）。这类请求允许突破组合，从全目录取窗口满足者
+            // （provider 健康、价位闸、配额闸仍然生效，不是无差别放开）
+            let big_ctx = est > crate::thresholds::BIG_CTX_TOKENS;
+            if !input.active.is_empty() && !input.active.contains(&m.id) && !big_ctx {
                 filtered.push(FilteredOut {
                     model: m.id.clone(),
                     cause: "inactive (enable it in Dashboard → 模型标签卡；启用会顶掉最低分)".into(),
@@ -455,7 +460,14 @@ impl Engine {
                 }
             }
             if let Err(cause) = scoring::context_fits(m, m_est, max_output) {
-                filtered.push(FilteredOut { model: m.id.clone(), cause: cause.into() });
+                let need = (m_est as f64 * 1.1) as u64 + max_output;
+                filtered.push(FilteredOut {
+                    model: m.id.clone(),
+                    cause: format!(
+                        "{cause} (need {need} tok, window {})",
+                        m.context_window.map(|w| w.to_string()).unwrap_or_else(|| "unknown".into())
+                    ),
+                });
                 continue;
             }
             let mut rec = m.clone();
@@ -1112,6 +1124,36 @@ mod explore_tests {
             if dec.chosen != "mini" { explored_count += 1; }
         }
         assert!(explored_count > 0, "explore_ratio=1.0 should produce exploration in 60 tries, got {explored_count}");
+    }
+
+    /// 大上下文请求必须能突破组合（2026-10 实测：282k 请求在 714 个模型里只剩
+    /// 11 个候选，因为大窗口模型多半不在组合里）；小请求仍严格按组合走
+    #[test]
+    fn big_context_breaks_out_of_the_portfolio() {
+        use crate::thresholds::BIG_CTX_TOKENS;
+        use std::collections::HashSet;
+        let e = Engine::new(catalog3(), PolicyCfg::default(), Box::new(crate::heuristic::HeuristicJudge));
+        let d = digest("你好");
+        let h = HealthMap::new();
+        // 组合里只放 mini（32k 窗口）——大请求若被组合限制，就只能选到它
+        let active: HashSet<String> = ["mini".to_string()].into_iter().collect();
+
+        let mut big = input("你好", BIG_CTX_TOKENS + 1, &d, None, &h);
+        big.active = &active;
+        let dec = e.decide(big);
+        assert!(
+            !dec.filtered.iter().any(|f| f.model == "frontier" && f.cause.starts_with("inactive")),
+            "big requests must not be confined to the portfolio: {:?}",
+            dec.filtered.iter().map(|f| (&f.model, &f.cause)).collect::<Vec<_>>()
+        );
+
+        let mut small = input("你好", 500, &d, None, &h);
+        small.active = &active;
+        let dec2 = e.decide(small);
+        assert!(
+            dec2.filtered.iter().any(|f| f.model == "frontier" && f.cause.starts_with("inactive")),
+            "small requests must still respect the portfolio"
+        );
     }
 
     #[test]
