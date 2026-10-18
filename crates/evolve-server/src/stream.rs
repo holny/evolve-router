@@ -174,6 +174,7 @@ where
             request,
             acc: StreamAcc::new(anthropic_mode),
             upstream_eof: false,
+            tail_done: false,
             model_id: health_model.clone(),
             health: health.clone(),
             // 流的整个生命期都算"在飞"（流结束/被丢弃时释放），并登记模型/会话
@@ -419,6 +420,8 @@ struct Finalizer {
     acc: StreamAcc,
     /// 是否看到了上游的正常结束（poll_next → None）：用于区分"上游截断"与"客户端放弃"
     upstream_eof: bool,
+    /// 上游异常收尾时已注入底层现象的 error 帧（截断/transport 错误各一拍）
+    tail_done: bool,
     /// 判定用的模型 id（截断时给健康注册表记账 → 该模型冷却，路由避开）
     model_id: String,
     health: Option<evolve_memory::health::HealthRegistry>,
@@ -432,6 +435,25 @@ impl Finalizer {
         if self.acc.byte_buf.len() > TAIL_CAP {
             self.acc.byte_buf.clear();
         }
+    }
+
+    /// 给客户端一个"最底层现象"的 error 帧 + [DONE]——上游截断/断流时客户端
+    /// 以前只见无声断连，容易误判成网关自身的故障。入站为 anthropic 协议时
+    /// 用 anthropic 的 error 形状（event: error + type/error 字段）
+    fn error_tail(&mut self, message: &str) -> bytes::Bytes {
+        let body = if self.acc.anthropic_mode {
+            let payload = serde_json::json!({
+                "type": "error",
+                "error": {"type": "api_error", "message": message}
+            });
+            format!("event: error\ndata: {}\n\n", payload)
+        } else {
+            let payload = serde_json::json!({
+                "error": {"message": message, "type": "upstream_error", "code": "upstream_error"}
+            });
+            format!("data: {}\n\ndata: [DONE]\n\n", payload)
+        };
+        bytes::Bytes::from(body)
     }
 }
 
@@ -562,18 +584,42 @@ impl Stream for TelemetryStream {
                 Poll::Ready(Some(Ok(chunk)))
             }
             Poll::Ready(Some(Err(e))) => {
-                if let Some(f) = this.1.as_mut()
-                    && let Ok(mut t) = f.telem.lock() {
+                // 中途 transport 错误：向客户端透传**原样**给了个无声断连，用户只能看到
+                // 连接崩却不知道是谁的错 → 改为注入底层现象的 error 帧后干净收束，
+                // 报错口径 = "连的是上游，断的是上游"（错误原文照贴，不再包装）
+                if let Some(f) = this.1.as_mut() {
+                    if f.tail_done {
+                        // 已注入过 error 帧：彻底收尾（重复的 Err 不再透出）
+                        this.1 = None; // triggers Finalizer::drop
+                        return Poll::Ready(None);
+                    }
+                    let msg = format!("upstream connection broke mid-stream: {e}");
+                    let bytes = f.error_tail(&msg);
+                    f.tail_done = true;
+                    if let Ok(mut t) = f.telem.lock() {
                         t.status = 599;
                     }
+                    return Poll::Ready(Some(Ok(bytes)));
+                }
                 Poll::Ready(Some(Err(axum::Error::new(e))))
             }
             Poll::Ready(None) => {
                 // 先标记"上游正常结束"，Drop 里据此区分截断 vs 客户端放弃
                 if let Some(f) = this.1.as_mut() {
                     f.upstream_eof = true;
+                    // 截断：追加底层现象 error 帧（客户端收到的是"上游没发完"，而不是
+                    // 一个看似干净的响应终点）
+                    if !f.tail_done && classify_stream_end(f.acc.finish_reason.as_deref(), f.upstream_eof)
+                        == StreamEnd::IncompleteUpstream
+                    {
+                        f.tail_done = true;
+                        let msg = "upstream stream truncated (ended without a finish_reason; the \
+                                   provider did not complete the response)"
+                            .to_string();
+                        return Poll::Ready(Some(Ok(f.error_tail(&msg))));
+                    }
+                    this.1 = None; // triggers Finalizer::drop
                 }
-                this.1 = None; // triggers Finalizer::drop
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
