@@ -64,8 +64,15 @@ pub fn features(extracted: &Extracted, est_input_tokens: u64) -> RequestFeatures
             cjk += 1.0;
         }
     }
+    // 视觉要求只看**最后一条 user 消息**（2026-10-18 用户裁决）：历史里的图
+    // 不需要"识别"，只要求模型能处理文本上下文；对 text-only 模型转发时由
+    // relay 把历史图片替换成占位文本（否则上游 400 content.type 非法）。
     let mut has_images = false;
     for m in &extracted.messages {
+        if m.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        has_images = false;
         if let Some(Value::Array(parts)) = m.get("content") {
             for p in parts {
                 if p.get("type").and_then(|t| t.as_str()) == Some("image_url")
@@ -122,6 +129,32 @@ pub fn continues_tool_flow(messages: &[Value]) -> bool {
 mod tool_flow_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn vision_requirement_looks_only_at_last_user_turn() {
+        // 历史图不要求识别（2026-10-18）：最后一条 user 纯文本 → has_images=false
+        let body = serde_json::json!({"messages":[
+            {"role":"user","content":[
+                {"type":"text","text":"看图说明"},
+                {"type":"image_url","image_url":{"url":"data:x"}}
+            ]},
+            {"role":"assistant","content":"ok"},
+            {"role":"user","content":"接着处理，别管那张图"}
+        ]});
+        let ex = extract(&body);
+        assert!(!features(&ex, 100).has_images);
+
+        // 最后一条 user 带图 → true
+        let body2 = serde_json::json!({"messages":[
+            {"role":"user","content":"先看这个"},
+            {"role":"assistant","content":"ok"},
+            {"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"data:x"}}
+            ]}
+        ]});
+        let ex2 = extract(&body2);
+        assert!(features(&ex2, 100).has_images);
+    }
 
     #[test]
     fn detects_openai_tool_continuation() {

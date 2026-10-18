@@ -764,6 +764,9 @@ fn anthropic_text(parsed: &Value) -> (String, String, bool) {
                 continue;
             }
             if let Some(c) = m.get("content") {
+                // 视觉要求只看**最后一条 user 消息**（2026-10-18 用户裁决）：
+                // 历史图片不要求模型识别，转发给 text-only 上游前由 relay 剥除
+                has_images = false;
                 if let Value::Array(parts) = c
                     && parts.iter().any(|b| {
                         b.get("type").and_then(|t| t.as_str()) == Some("image")

@@ -413,11 +413,20 @@ pub async fn chat_completions(
             }
             skipped.push(format!("{cand}[{key_idx}](last-resort, {} cooling)", h.kind.label()));
         }
+        // text-only 上游 + 本轮不需要识图（历史图片不要求识别）→ 转发前把
+        // 历史消息里的图片替换成占位文本，否则上游按非法 content.type 拒收
+        // （zhipu `messages.content.type 参数非法，取值范围 ['text']` 实证）
+        let strip_historical_images = record.tiers.vision < evolve_core::thresholds::VISION
+            && decision.judgment.needs_vision <= evolve_core::thresholds::VISION;
         let (fwd_body, url) = if to_anthropic {
             let mut openai_value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             if let Some(obj) = openai_value.as_object_mut() {
                 obj.insert("model".into(), json!(record.upstream_model));
                 obj.entry("max_tokens").or_insert(json!(4096));
+            }
+            // text-only 上游 + 本轮不需要识图 → 历史图片对上游非法（zhipu 400 实证）
+            if strip_historical_images {
+                strip_image_parts(&mut openai_value);
             }
             let translated = crate::translate::Translator::global()
                 .request_openai_to_anthropic(&openai_value);
@@ -431,7 +440,11 @@ pub async fn chat_completions(
                 }
             }
         } else {
-            let rewritten = rewrite_model_field(&body, &record.upstream_model);
+            let rewritten = if strip_historical_images {
+                rewrite_model_field_images_stripped(&body, &record.upstream_model)
+            } else {
+                rewrite_model_field(&body, &record.upstream_model)
+            };
             (rewritten, format!("{}/chat/completions", record.base_url))
         };
         let cross = to_anthropic;
@@ -1353,8 +1366,44 @@ pub(crate) fn price_gated_retries(
     out
 }
 
-fn insert_header(h: &mut axum::http::HeaderMap, k: &'static str, v: &str) {
-    if let Ok(val) = axum::http::HeaderValue::from_str(&v.chars().map(|c| if c.is_ascii() { c } else { ' ' }).collect::<String>()) {
+/// 把历史消息里的图片 part 替换成占位文本（**最后一条 user 消息保留**）：
+/// text-only 上游收到图片会按非法 content.type 拒收；本轮不需要识图时，历史
+/// 图对模型只是"看不见的上下文"，占位文本即可（2026-10-18 用户裁决）。
+fn strip_image_parts(v: &mut Value) {
+    let Some(msgs) = v.get_mut("messages").and_then(|m| m.as_array_mut()) else { return };
+    let last_user = msgs
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
+    for (i, m) in msgs.iter_mut().enumerate() {
+        if Some(i) == last_user {
+            continue;
+        }
+        let Some(parts) = m.get_mut("content").and_then(|c| c.as_array_mut()) else { continue };
+        for p in parts.iter_mut() {
+            let t = p.get("type").and_then(|x| x.as_str());
+            if matches!(t, Some("image_url") | Some("image") | Some("input_image")) {
+                *p = json!({
+                    "type": "text",
+                    "text": "[image omitted: routed model does not accept image input]"
+                });
+            }
+        }
+    }
+}
+
+/// model 重写 + 历史图片剥离（text-only 上游的转发整形；放弃逐字节 passthrough）
+fn rewrite_model_field_images_stripped(body: &[u8], new_model: &str) -> Vec<u8> {
+    let Ok(mut v) = serde_json::from_slice::<Value>(body) else {
+        return body.to_vec();
+    };
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("model".into(), json!(new_model));
+    }
+    strip_image_parts(&mut v);
+    v.to_string().into_bytes()
+}
+
+fn insert_header(h: &mut axum::http::HeaderMap, k: &'static str, v: &str) {    if let Ok(val) = axum::http::HeaderValue::from_str(&v.chars().map(|c| if c.is_ascii() { c } else { ' ' }).collect::<String>()) {
         h.insert(k, val);
     }
 }
@@ -1569,7 +1618,7 @@ fn cache_fingerprint(parsed: &Value) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod winner_queue_tests {
-    use super::{price_gated_retries, winner_queue};
+    use super::{price_gated_retries, strip_image_parts, winner_queue};
     use evolve_core::types::FilteredOut;
     use std::collections::BTreeMap;
 
@@ -1627,6 +1676,29 @@ mod winner_queue_tests {
         let s = scores(&[("premium/a", 0.5), ("premium/b", 0.9)]);
         let retry = price_gated_retries(&f, &s, &["seed/model".to_string()], 6);
         assert_eq!(retry, vec!["premium/b", "premium/a"]);
+    }
+
+    #[test]
+    fn strips_images_from_history_but_keeps_the_last_user_turn() {
+        let mut v = serde_json::json!({"model":"m","messages":[
+            {"role":"user","content":[
+                {"type":"text","text":"看图"},
+                {"type":"image_url","image_url":{"url":"data:1"}}
+            ]},
+            {"role":"assistant","content":"ok"},
+            {"role":"user","content":[
+                {"type":"image_url","image_url":{"url":"data:2"}}
+            ]}
+        ]});
+        strip_image_parts(&mut v);
+        let msgs = v["messages"].as_array().unwrap();
+        let old = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(old[0]["type"], "text");
+        assert_eq!(old[1]["type"], "text", "histor. image must become text");
+        assert!(old[1]["text"].as_str().unwrap().contains("image omitted"));
+        // 最后一条 user 的图保留（本轮意图不被静默丢弃）
+        let last = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(last[0]["type"], "image_url");
     }
 
     #[test]
