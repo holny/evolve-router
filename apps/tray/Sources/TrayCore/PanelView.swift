@@ -1076,6 +1076,16 @@ public struct PanelView: View {
             // owned=false 且无子进程 → 直接返回，不会误杀外部实例）
             await GatewayProcess.shared.stop()
             GatewayProcess.shared.stopGatewayWithSigterm()
+            // 监督循环（tray-supervisor.sh）看的 marker：Quit = 用户主动退出，
+            // 循环收工；没有 marker 的死亡一律视为意外 → 自动拉起
+            try? FileManager.default.createFile(
+                atPath: NSHomeDirectory() + "/.evo-router/tray-quit-marker", contents: nil)
+            // 实测（2026-10-18）launchd 连监督循环 exit 0 都会重拉（KeepAlive 语义
+            // 不可信）→ 主动 bootout 收掉监督作业，此后无任何 resurrection
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            p.arguments = ["-c", "launchctl bootout gui/\(getuid())/ai.evolve-router.tray 2>/dev/null || true"]
+            try? p.run()
             // launchd KeepAlive(Crashed)：SIGKILL 会被当成"崩溃"而自动拉起——
             // 正常退出必须走 NSApp.terminate 自身，不能用 kill
             NSApp.terminate(nil)

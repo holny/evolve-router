@@ -75,7 +75,27 @@ if [[ "${1:-}" == "--install" ]]; then
     rm -rf "/Applications/${APP_NAME}.app"
     cp -R "build/${APP_NAME}.app" /Applications/
     TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve-router.tray.plist"
-    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.evo-router"
+    # 监督循环（launchd 的 KeepAlive 在 macOS 26 实测不可靠：SIGKILL/SIGABRT 都不复活）
+    # 规则：app 意外死亡（崩溃/被杀）→ 2s 后拉起；.Quit 按钮退出前落 marker → 循环结束
+    # 用户主动退出语义。外部已运行实例（bootout 孤儿等）→ 陪跑不重复 spawn
+    SUP="$HOME/.evo-router/tray-supervisor.sh"
+    cat > "$SUP" <<'SUP'
+#!/bin/zsh
+APP=/Applications/EvolveRouter.app/Contents/MacOS/EvolveRouter
+MARKER="$HOME/.evo-router/tray-quit-marker"
+rm -f "$MARKER"
+while true; do
+  if pgrep -x EvolveRouter >/dev/null 2>&1; then sleep 3; continue; fi
+  "$APP" &
+  CHILD=$!
+  wait $CHILD
+  RC=$?
+  [[ -f "$MARKER" ]] && { rm -f "$MARKER"; exit 0; }
+  sleep 2
+done
+SUP
+    chmod +x "$SUP"
     cat > "$TRAY_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -84,10 +104,12 @@ if [[ "${1:-}" == "--install" ]]; then
     <key>Label</key><string>ai.evolve-router.tray</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Applications/${APP_NAME}.app/Contents/MacOS/${APP_NAME}</string>
+        <string>/bin/zsh</string>
+        <string>${SUP}</string>
     </array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><dict><key>Crashed</key><true/></dict>
+    <!-- SuccessfulExit：非 0/信号退出重启监督循环；exit 0（Quit 落 marker 后的正常收工）保持死亡 -->
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>
 </dict>
 </plist>
 PLIST

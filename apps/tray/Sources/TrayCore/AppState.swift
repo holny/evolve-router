@@ -1,7 +1,7 @@
 import Foundation
 import SwiftUI
 
-public struct RecentDecision: Identifiable {
+public struct RecentDecision: Identifiable, Equatable {
     public init(model: String, status: Int, totalMs: Int, ttftMs: Int?, tokS: Double?, agent: String, time: String, preprocessMs: Int = 0, decisionMs: Int = 0, totalTokens: Int = 0, cachePct: Int? = nil, failReason: String? = nil, capability: String? = nil, tags: DecisionTags? = nil) {
         self.model = model; self.status = status; self.totalMs = totalMs
         self.ttftMs = ttftMs; self.tokS = tokS; self.agent = agent; self.time = time
@@ -72,7 +72,7 @@ public struct ChatResult: Equatable {
     }
 }
 
-public struct ProviderRow: Identifiable {
+public struct ProviderRow: Identifiable, Equatable {
     public init(key: String, enabled: Bool, available: Bool, cooldownUntil: Date?, cooldownCause: String?, pct: Int?, planKind: String, tokensWin: Int = 0, avgTtftMs: Int? = nil, avgRate: Double? = nil, cachePctWin: Int? = nil, paygBalance: PaygBalance? = nil, quotaUsed: Int? = nil, quotaScope: String? = nil, quotaExhausted: Bool = false, quotaReset: Date? = nil, cooldownModel: String? = nil, quotaSource: String = "", blockedModels: [String] = [], mergedFrom: [String] = [], tier: String = "", modelCount: Int = 0, freeModels: Int = 0, needsKey: Bool = false, keyURL: String = "", issueLabel: String = "", nextProbeMs: Int = 0,
                 tierEffective: String = "") {
         self.key = key; self.enabled = enabled; self.available = available
@@ -144,7 +144,7 @@ public enum IconState { case idle, busy, success, fail, stopped, starting }
 /// 模型维度行（Providers 卡切到 Model 标签）：同一窗口的逐模型指标，
 /// 与 Provider 行同布局（dot + 名称 + tokens/hit/速率/TTFT）
 /// 模型级健康冷却（/api/health）：剩余时长 + 原因 + 是否属于 provider/账户级
-public struct ModelCoolState {
+public struct ModelCoolState: Equatable {
     public let ms: Int
     public let message: String
     /// quota / payment（账户或方案级）→ 属于 provider 行，不在 model 行重复
@@ -152,14 +152,14 @@ public struct ModelCoolState {
 }
 
 /// 模型实时打标 + 可用性（服务端 /api/model-tags；单一事实源）
-public struct ModelTagInfo {
+public struct ModelTagInfo: Equatable {
     public let capability: String
     public let priceTier: String
     /// nil = 可用；否则是服务端给的原因（no-key / deleted）
     public let unusableReason: String?
 }
 
-public struct ModelRow: Identifiable {
+public struct ModelRow: Identifiable, Equatable {
     public let id: String
     public let tok: Int
     public let hit: Int?
@@ -268,32 +268,39 @@ public final class AppState: ObservableObject {
         lastResult = ChatResult(decisionId: decisionId, status: status, ts: Date())
     }
 
+    /// 仅值变化时写入 @Published——每秒轮询若无条件写新值，unchanged 数据也会
+    /// 让整棵 body 重建；长跑 6h+ 后触发 SwiftUI AttributeGraph 表爆炸
+    /// （SIGABRT / AG grow_region，2026-10-18 05:08 实证）
+    private func upd<T: Equatable>(_ kp: ReferenceWritableKeyPath<AppState, T>, _ value: T) {
+        if self[keyPath: kp] != value { self[keyPath: kp] = value }
+    }
+
     /// 高频轻量轮询（1s）：in-flight 计数 + 健康，驱动图标与"进行中"
     public func pollLive() async {
         let gw = GatewayProcess.shared
         if case (200, let data)? = try? await get("/api/live"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            inflight = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
+            upd(\.inflight, (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0))
             inflightDetail = (obj["inflight_detail"] as? [[String: Any]]) ?? []
-            decisionStatus = ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok"
-            version = (obj["version"] as? String) ?? version
+            upd(\.decisionStatus, ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok")
+            upd(\.version, (obj["version"] as? String) ?? version)
             let cfgObj = obj["config"] as? [String: Any]
-            configRestartRequired = (cfgObj?["restart_required"] as? Bool) ?? false
-            configRestartReason = cfgObj?["restart_reason"] as? String
-            configReloadedAt = (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) }
-            activeSlots = (cfgObj?["active_slots"] as? [String]) ?? []
+            upd(\.configRestartRequired, (cfgObj?["restart_required"] as? Bool) ?? false)
+            upd(\.configRestartReason, cfgObj?["restart_reason"] as? String)
+            upd(\.configReloadedAt, (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) })
+            upd(\.activeSlots, (cfgObj?["active_slots"] as? [String]) ?? [])
             let decObj = obj["decision"] as? [String: Any]
-            decisionBackend = (decObj?["backend"] as? String) ?? decisionBackend
-            decisionFailReason = ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? ""
-            decisionRetryInMs = Int((decObj?["retry_in_ms"] as? Double) ?? 0)
-            decisionFails = Int((decObj?["consecutive_fails"] as? Double) ?? 0)
+            upd(\.decisionBackend, (decObj?["backend"] as? String) ?? decisionBackend)
+            upd(\.decisionFailReason, ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? "")
+            upd(\.decisionRetryInMs, Int((decObj?["retry_in_ms"] as? Double) ?? 0))
+            upd(\.decisionFails, Int((decObj?["consecutive_fails"] as? Double) ?? 0))
         } else {
-            inflight = 0
+            upd(\.inflight, 0)
         }
         let net = await gw.networkHealthy()
-        healthy = net
-        starting = gw.starting || (!net && gw.isChildAlive)
-        external = !gw.owned && net
+        upd(\.healthy, net)
+        upd(\.starting, gw.starting || (!net && gw.isChildAlive))
+        upd(\.external, !gw.owned && net)
         // 自愈：网关不在且非外部实例 → 周期性尝试拉起（ensureRunning 内部 10s 节流）
         if !net && !external { await gw.ensureRunning() }
     }
@@ -336,7 +343,7 @@ public final class AppState: ObservableObject {
                     || msg.lowercased().contains("quota")
                 cool[mid] = ModelCoolState(ms: max(ms, 0), message: msg, accountLevel: accountLevel)
             }
-            modelCooling = cool
+            upd(\.modelCooling, cool)
         }
         if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -354,7 +361,7 @@ public final class AppState: ObservableObject {
                         unusableReason: ((m["usable"] as? Bool) == false)
                             ? ((m["unusable_reason"] as? String) ?? "unusable") : nil)
                 }
-                modelTagMap = tm
+                upd(\.modelTagMap, tm)
             }
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
@@ -364,9 +371,9 @@ public final class AppState: ObservableObject {
                 toks += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
                 toks += (s["completion_tokens"] as? Int) ?? Int((s["completion_tokens"] as? Double) ?? 0)
             }
-            requests = reqs
-            successRate = reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0
-            tokensK = Self.fmtTok(toks)
+            upd(\.requests, reqs)
+            upd(\.successRate, reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0)
+            upd(\.tokensK, Self.fmtTok(toks))
         }
         // Model 维度行（Providers 卡 Model 标签）：同一窗口的逐模型指标，
         // 与 Provider 行同布局，按 tokens 降序前 6 行
@@ -392,7 +399,7 @@ public final class AppState: ObservableObject {
         mrows.sort { if $0.tok != $1.tok { return $0.tok > $1.tok } ; return $0.id < $1.id }
         // 模型打标（实时口径）：仅 today 视图挂到行上（yesterday 的标签是当前态，无意义）
         // 上限 50（可在面板内滚动查看）：仍只含用过的模型
-        modelRows = mrows.prefix(50).map { m in
+        let mappedRows: [ModelRow] = mrows.prefix(50).map { m in
             let tag = statWindowToday ? modelTagMap[m.id] : nil
             return ModelRow(id: m.id, tok: m.tok, hit: m.hit, rate: m.rate, ttft: m.ttft,
                             requests: m.requests, capability: tag?.capability, priceTier: tag?.priceTier,
@@ -405,6 +412,7 @@ public final class AppState: ObservableObject {
                             coolingMs: modelCooling[m.id]?.ms ?? 0,
                             coolMsg: modelCooling[m.id].flatMap { $0.accountLevel ? nil : $0.message })
         }
+        upd(\.modelRows, mappedRows)
 
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
@@ -416,7 +424,7 @@ public final class AppState: ObservableObject {
             // 顶层没有该字段（旧代码在此读 wrapper["soft_pct"]，永不命中，已删）
             for p in arr {
                 if let sp = (p["soft_pct"] as? Double) ?? (p["soft_pct"] as? Int).map(Double.init) {
-                    softPct = Int(sp)
+                    upd(\.softPct, Int(sp))
                 }
                 let key = (p["key"] as? String) ?? "-"
                 let kind = (p["plan_kind"] as? String) ?? "-"
@@ -535,7 +543,7 @@ public final class AppState: ObservableObject {
             return $0.key < $1.key
         }
         // 上限 12（面板内滚动；此前 6 条是为了不撑高面板）
-        providers = Array(rows.prefix(12))
+        upd(\.providers, Array(rows.prefix(12)))
         // 最近 10 天（用户裁决 2026-10-17）：窗口过滤交给服务端（kind=chat + since_ms），
         // 否则 limit 会被非 chat 事件吃掉、只回几小时的数据；面板拿到的就是"10 天内
         // 最近 60 条请求"，由 PanelView 放在固定高度的 ScrollView 里滚动查看
@@ -596,7 +604,7 @@ public final class AppState: ObservableObject {
                 if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 60 { break }
             }
-            recent = decRows
+            upd(\.recent, decRows)
             // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
         }
         lastSync = Date()
