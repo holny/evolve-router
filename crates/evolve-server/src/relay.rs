@@ -292,6 +292,14 @@ pub async fn chat_completions(
             tracing::info!(models = ?retry, "quota-filtered models appended as last-resort");
             attempts.extend(retry);
         }
+        // 价位闸放宽（用户裁决 2026-10-18）：价格层闸只约束"首选"不约束"救命"——
+        // 允许档候选全灭（额度耗尽/限流/断网）时，被价格闸挡掉的模型按评分从高到低
+        // 补到队尾再试一轮；否则明明有可用模型也会因为"贵档不许用"直接报全灭。
+        let price_retry = price_gated_retries(&decision.filtered, &decision.scores, &attempts, 6);
+        if !price_retry.is_empty() {
+            tracing::info!(models = ?price_retry, "price-gated models appended as last-resort");
+            attempts.extend(price_retry);
+        }
     }
 
     let mut skipped: Vec<String> = Vec::new();
@@ -1313,6 +1321,38 @@ pub(crate) fn winner_queue(
     list
 }
 
+/// 价位闸放宽的救命候选（用户裁决 2026-10-18）：从决策 `filtered` 里挑被
+/// **价格层闸**挡掉的模型，按评分降序返回（去重、去已在 attempts 里的），
+/// 供主链+清扫全灭后补到队尾再试一轮——价格闸只约束首选、不约束救命。
+pub(crate) fn price_gated_retries(
+    filtered: &[evolve_core::types::FilteredOut],
+    scores: &std::collections::BTreeMap<String, f32>,
+    attempts: &[String],
+    max: usize,
+) -> Vec<String> {
+    let mut gated: Vec<&str> = filtered
+        .iter()
+        .filter(|f| f.cause.starts_with("price tier "))
+        .map(|f| f.model.as_str())
+        .collect();
+    gated.sort_by(|a, b| {
+        let sa = scores.get(*a).copied().unwrap_or(0.0);
+        let sb = scores.get(*b).copied().unwrap_or(0.0);
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut out: Vec<String> = Vec::new();
+    for m in gated {
+        if out.len() >= max {
+            break;
+        }
+        if attempts.iter().any(|a| a == m) || out.iter().any(|a| a == m) {
+            continue;
+        }
+        out.push(m.to_string());
+    }
+    out
+}
+
 fn insert_header(h: &mut axum::http::HeaderMap, k: &'static str, v: &str) {
     if let Ok(val) = axum::http::HeaderValue::from_str(&v.chars().map(|c| if c.is_ascii() { c } else { ' ' }).collect::<String>()) {
         h.insert(k, val);
@@ -1529,7 +1569,8 @@ fn cache_fingerprint(parsed: &Value) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod winner_queue_tests {
-    use super::winner_queue;
+    use super::{price_gated_retries, winner_queue};
+    use evolve_core::types::FilteredOut;
     use std::collections::BTreeMap;
 
     fn scores(pairs: &[(&str, f32)]) -> BTreeMap<String, f32> {
@@ -1566,6 +1607,41 @@ mod winner_queue_tests {
     fn empty_chain_falls_back_to_scores() {
         let q = winner_queue(&[], &scores(&[("x", 0.2), ("y", 0.8)]), 5);
         assert_eq!(q, vec!["y", "x"]);
+    }
+
+    fn filtered(pairs: &[(&str, &str)]) -> Vec<FilteredOut> {
+        pairs
+            .iter()
+            .map(|(m, c)| FilteredOut { model: m.to_string(), cause: c.to_string() })
+            .collect()
+    }
+
+    #[test]
+    fn price_gated_models_become_last_resort_by_score() {
+        // 价格闸只约束首选：全灭兜底时按评分降序补位（贵的先用高评分）
+        let f = filtered(&[
+            ("cheap-tier/ok", "quota remaining low"),
+            ("premium/a", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("premium/b", "price tier 2 above allowed 1 (difficulty 0.6)"),
+        ]);
+        let s = scores(&[("premium/a", 0.5), ("premium/b", 0.9)]);
+        let retry = price_gated_retries(&f, &s, &["seed/model".to_string()], 6);
+        assert_eq!(retry, vec!["premium/b", "premium/a"]);
+    }
+
+    #[test]
+    fn price_gated_retries_skip_already_tried_and_cap() {
+        let mut pairs: Vec<(String, String)> = (0..8)
+            .map(|i| (format!("p{i}"), "price tier 3 above allowed 0 (difficulty 0.1)".into()))
+            .collect();
+        pairs[0].1 = "context window too small".into(); // 非价格闸原因不入选
+        let owned: Vec<(&str, &str)> = pairs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        let f = filtered(&owned);
+        let tried = vec!["p1".to_string()];
+        let retry = price_gated_retries(&f, &scores(&[]), &tried, 3);
+        assert_eq!(retry.len(), 3);
+        assert!(!retry.contains(&"p1".to_string()));
+        assert!(!retry.contains(&"p0".to_string()));
     }
 }
 
