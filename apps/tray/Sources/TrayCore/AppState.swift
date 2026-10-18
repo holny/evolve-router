@@ -9,7 +9,10 @@ public struct RecentDecision: Identifiable, Equatable {
         self.totalTokens = totalTokens; self.cachePct = cachePct; self.failReason = failReason
         self.capability = capability; self.tags = tags
     }
-    public let id = UUID()
+    /// RecentDecision 的稳定身份：内容即可识别（model+时刻+总量）；此前每次
+    /// 轮询生成 UUID → ForEach 视 60 行为"全新行"整组拆建，AG 属性累积的
+    /// anti-pattern，等同 AG 崩溃的主要膨胀面
+    public var id: String { "\(model)|\(time)|\(totalMs)|\(status)" }
     public let model: String
     public let status: Int
     public let totalMs: Int
@@ -607,7 +610,10 @@ public final class AppState: ObservableObject {
             upd(\.recent, decRows)
             // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
         }
-        lastSync = Date()
+        // 时钟行=分钟走秒（秒级更新会让 body 每 3s 全量重建，AG 崩溃面）
+        let minute = Date(timeIntervalSince1970:
+            (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
+        upd(\.lastSync, minute)
     }
 
     /// 冷却模型 id → 短名（去 provider 前缀；provider/ 路径形如 opencode-go-github/kimi-k3）

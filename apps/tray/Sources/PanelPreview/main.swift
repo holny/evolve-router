@@ -128,6 +128,43 @@ enum PanelPreview {
         // AppDelegate 里，harness 只跑一次会错过就绪窗口）。
         // EV_PREVIEW_SEED=1 = 只渲染种子（README 截图用，保证图稳定可复现）
         if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil { return }
+        // 崩溃复现 harness（EV_STRESS=1）：0.5s 高频 churn（inflight 抖动 /
+        // recent 60 行整组重建 / 时钟走秒），模拟 AttributeGraph 表爆炸的最坏
+        // 触发面——目的是离线复现 AG grow_region SIGABRT 并定罪具体视图
+        if ProcessInfo.processInfo.environment["EV_STRESS"] == "1" {
+            let churnRow = { (i: Int, round: Int) -> RecentDecision in
+                let hh = String(format: "%02d", (i * 7 + round / 2) % 24)
+                let mm = String(format: "%02d", (i * 3) % 60)
+                let ss = String(format: "%02d", round % 60)
+                let flags: [String] = i % 3 == 0 ? ["tools"] : []
+                let fit = i % 5 == 0 ? "under" : "match"
+                let status = 200 + (i % 4 == 0 ? 399 : 0)
+                let tags = DecisionTags(
+                    difficulty: "medium", domain: "code",
+                    flags: flags, mode: "model+rules", fit: fit)
+                return RecentDecision(
+                    model: "opencode-go-github/mimo-v2.6-flash",
+                    status: status, totalMs: 10_000 + i, ttftMs: 4_000,
+                    tokS: 90.0, agent: "opencode",
+                    time: hh + ":" + mm + ":" + ss,
+                    preprocessMs: 20, decisionMs: 10 + round,
+                    totalTokens: 48_000 + i, cachePct: 60,
+                    capability: "basic", tags: tags)
+            }
+            var round = 0
+            Task { @MainActor [weak state] in
+                guard let state else { return }
+                while !Task.isCancelled {
+                    round += 1
+                    state.inflight = 1 + (round % 6)
+                    state.requests += round
+                    state.lastSync = Date()
+                    state.recent = (0..<60).map { churnRow($0, round) }
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                }
+            }
+            return
+        }
         Task { [weak state] in
             guard let state else { return }
             while !Task.isCancelled {

@@ -116,7 +116,6 @@ public struct PanelView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(.secondary)
-            .help(t("copy_cfg"))
         }
     }
 
@@ -217,7 +216,6 @@ public struct PanelView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.orange)
-            .help(stale ? "Decision model configured — restart the gateway to apply" : "Decision model not configured — set DECISION_JEV_* / LAYA_* / OPENAI_* env (see Dashboard banner)")
         }
     }
 
@@ -261,7 +259,6 @@ public struct PanelView: View {
                     .background(Capsule().fill(Color.primary.opacity(0.07)))
             }
             .buttonStyle(.plain)
-            .help("Metrics window — click to switch between today and yesterday")
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,9 +298,7 @@ public struct PanelView: View {
                             .font(.system(size: 9))
                     }
                     .foregroundStyle(.orange)
-                    .help(state.inflightDetail.isEmpty ? t("inflight_hint")
-                          : inflightSummary)
-                }
+                        }
             }
             // 最近 10 天（用户裁决）：固定高度滚动窗口——条数多了也不占面板高度
             let rows = state.recent
@@ -323,19 +318,15 @@ public struct PanelView: View {
                             HStack(spacing: 5) {
                                 let routing = r.preprocessMs + r.decisionMs
                                 Text("ER \(Self.fmtMs(routing))")
-                                    .help("EvolveRouter routing decision time")
-                                if let tt = r.ttftMs {
+                                                        if let tt = r.ttftMs {
                                     Text("TTFT \(Self.fmtMs(tt))")
-                                        .help("upstream time-to-first-token")
-                                }
+                                                            }
                                 if let s = r.tokS, s > 0 {
                                     Text(AppState.fmtRate(s) + " t/s")
-                                        .help("generation speed")
-                                }
+                                                            }
                                 if r.totalTokens > 0 {
                                     Text("\(AppState.fmtTok(r.totalTokens))(\(r.cachePct ?? 0)%)")
-                                        .help("total tokens (cache hit rate in parens)")
-                                }
+                                                            }
                             }
                             .font(.system(size: 9.5))
                             .foregroundStyle(.tertiary)
@@ -377,8 +368,7 @@ public struct PanelView: View {
                                     .font(.system(size: 9.5))
                                     .foregroundStyle(.red)
                                     .lineLimit(1)
-                                    .help(reason)
-                            }
+                                                    }
                         }
                     }
                     Spacer(minLength: 0)
@@ -612,8 +602,7 @@ public struct PanelView: View {
                 Text(quotaStyle ? Self.quotaFullLabel(p.cooldownCause ?? "") : t("cooldown"))
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.red)
-                    .help(Self.cooldownHelp(p))
-                Text(Self.fmtCountdown(cd))
+                        Text(Self.fmtCountdown(cd))
                     .font(.system(size: 9, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(Color.red.opacity(0.8))
@@ -621,8 +610,7 @@ public struct PanelView: View {
                 Text("removed \(p.blockedModels.count)")
                     .font(.system(size: 9.5, weight: .semibold))
                     .foregroundStyle(.red)
-                    .help("\(p.blockedModels.joined(separator: ", ")) — removed by upstream (not in the provider model list). Manual restore via Dashboard → Providers → Restore")
-            } else if let used = p.quotaUsed, let scope = p.quotaScope {
+                    } else if let used = p.quotaUsed, let scope = p.quotaScope {
                 if p.quotaExhausted {
                     Text("\(scope) full")
                         .font(.system(size: 9.5, weight: .semibold))
@@ -639,15 +627,13 @@ public struct PanelView: View {
                         .font(.system(size: 10, design: .rounded))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .help("\(scope) quota usage · \(Self.srcTip(p.quotaSource))")
-                }
+                            }
             } else if let bal = p.paygBalance {
                 Text("\(bal.currency) \(String(format: "%.2f", bal.total))")
                     .font(.system(size: 10, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(bal.available ? Color.secondary : Color.red)
-                    .help(bal.available ? "Account balance" : "Balance exhausted — top up required")
-            } else {
+                    } else {
                 Text(t("payg"))
                     .font(.system(size: 9.5))
                     .foregroundStyle(.tertiary)
@@ -772,7 +758,6 @@ public struct PanelView: View {
                         .lineLimit(1)
                     Spacer(minLength: 0)
                 }
-                .help(state.configRestartReason ?? t("restart_help"))
             }
             HStack(spacing: 5) {
                 gatewayChip
@@ -814,7 +799,6 @@ public struct PanelView: View {
                 .foregroundStyle(tint)
         }
         .buttonStyle(.plain)
-        .help(help)
     }
 
     private func chip(icon: String, label: String, tint: Color, help: String,
@@ -831,7 +815,6 @@ public struct PanelView: View {
             .foregroundStyle(tint)
         }
         .buttonStyle(.plain)
-        .help(help)
     }
 
     /// 停止/启动 胶囊：healthy → 红调（停止），否则 accent（启动）
@@ -859,7 +842,6 @@ public struct PanelView: View {
         }
         .buttonStyle(.plain)
         .disabled(state.starting)
-        .help(state.healthy ? t("stop_gw") : t("start_gw"))
     }
 
     private var gatewayChipLabel: String {
@@ -903,7 +885,8 @@ public struct PanelView: View {
             .padding(.horizontal, 4).padding(.vertical, 1)
             .background(Capsule().fill(bg ?? Color.primary.opacity(0.08)))
             .foregroundStyle(tint)
-        return help.isEmpty ? AnyView(t) : AnyView(t.help(help))
+        // 面板内 tooltip 不触发（MenuBarExtra）→ 不挂 .help（每帧多建属性喂 AG 表）
+        return t
     }
 
     // 标签语义（色卡 + 悬停详解）：颜色 = 类别，胶囊里的字 = 该类别的具体取值
@@ -958,7 +941,7 @@ public struct PanelView: View {
             Circle().fill(c.opacity(0.6)).frame(width: 6, height: 6)
             Text(label).foregroundStyle(.tertiary)
         }
-        .help(Self.tagHelp(label))
+
     }
 
     /// 悬停详解（部分宿主不触发，仅作补充）
@@ -1012,7 +995,6 @@ public struct PanelView: View {
                     .font(.system(size: 8.5))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                    .help(inflightSummary)
             }
             Spacer(minLength: 0)
             Button {
