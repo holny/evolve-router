@@ -11,3 +11,4 @@ pub mod service;
 pub mod state;
 pub mod translate;
 pub mod stream;
+pub mod usage_index;

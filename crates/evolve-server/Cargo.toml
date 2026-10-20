@@ -39,3 +39,4 @@ switchyard-protocol = "0.3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 bytes = "1"
+tempfile = "3"

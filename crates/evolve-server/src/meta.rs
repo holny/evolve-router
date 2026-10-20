@@ -310,6 +310,15 @@ fn decision_status(
 }
 
 pub async fn api_live(State(st): State<AppState>) -> Response {
+    // 用量增量索引随本端点 1s tick 保新鲜（面板不开也在推进；量级 = 新增字节）。
+    // last_chat 下发给托盘图标失败态——取代托盘自行轮询 /api/events 的重路径
+    let last_chat = {
+        let events = st.events.clone();
+        tokio::task::spawn_blocking(move || crate::usage_index::refresh(&events))
+            .await
+            .ok()
+            .and_then(|_| crate::usage_index::last_chat())
+    };
     // 状态以**实际生效**的判定配置为准（配置热加载后 st.config 还是启动快照）
     let watch_cfg = st.config_watch.lock().map(|w| w.clone()).unwrap_or_default();
     let cfg = if watch_cfg.active_backend.is_empty() {
@@ -351,6 +360,11 @@ pub async fn api_live(State(st): State<AppState>) -> Response {
         "inflight": crate::live::LIVE_INFLIGHT.load(std::sync::atomic::Ordering::Relaxed),
         // 在飞明细（含正在生成的流）：重启前提示"谁在飞、飞了多久"
         "inflight_detail": crate::live::inflight_detail(),
+        // 最近一次 chat 结果（决策 id + HTTP 状态）——托盘图标失败态的唯一数据源，
+        // 免去托盘每秒拉 /api/events 的 60 条重 JSON
+        "last_chat": last_chat.map(|c| serde_json::json!({
+            "decision_id": c.decision_id, "status": c.status, "ts_ms": c.ts,
+        })),
         "ts": evolve_memory::health::now(),
         // 配置热加载状态：reloaded_at_ms = 上次热加载时刻；restart_required = 有非判定配置改动待重启
         "config": {
@@ -996,149 +1010,6 @@ pub(crate) fn read_tail(path: &std::path::Path, max_bytes: u64) -> Option<String
     Some(text)
 }
 
-/// 事件文件尾部窗口：从 `initial` 起按需翻倍，直到覆盖 `cutoff_ms` 之前的行
-/// 或到达文件头（`cap` 硬上限兜底）。返回可安全按行切分的尾部文本。
-fn read_tail_until(path: &std::path::Path, cutoff_ms: i64, initial: u64, cap: u64) -> Option<String> {
-    let mut size = initial.min(cap).max(64 * 1024);
-    loop {
-        let text = read_tail(path, size)?;
-        let file_len = std::fs::metadata(path).ok().map(|m| m.len()).unwrap_or(0);
-        let whole_file = size >= file_len;
-        let oldest_ts = text
-            .lines()
-            .next()
-            .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .and_then(|v| v.get("ts").and_then(|x| x.as_i64()))
-            .unwrap_or(0);
-        if whole_file || old_ts_before(oldest_ts, cutoff_ms) || size >= cap {
-            return Some(text);
-        }
-        size = (size * 2).min(cap);
-    }
-}
-
-/// 老于 cutoff 判定：解析不到 ts（0）视为"未达界"，继续扩大窗口
-fn old_ts_before(ts: i64, cutoff_ms: i64) -> bool {
-    ts > 0 && ts < cutoff_ms
-}
-
-/// Provider 实时状态（每 5s 轮询）：health、最后成功时间、当前使用率
-/// 近 5h 每 Provider 积分用量：事件回扫（plan_credits_used 折算，与配额执行
-/// 同口径）。plan_usage_sums 为内存账本、重启即清零——展示口径改走事件回扫，
-/// 重启不丢、与 tokens_24h 同源。美元制套餐（如 OpenCode Go）折算仍为 0（v2 TODO）。
-fn usage_5h_by_provider(
-    snap: &[evolve_core::types::ModelRecord],
-    events: &evolve_memory::events::EventLog,
-    now_ms: u64,
-) -> std::collections::HashMap<String, f64> {
-    let mut out = std::collections::HashMap::new();
-    let prov_of_model: std::collections::HashMap<&str, &str> =
-        snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
-    let Some(path) = events.path() else { return out };
-    let cutoff = (now_ms as i64) - 5 * 3600 * 1000;
-    let Some(content) = read_tail_until(&path, cutoff, 2 * 1024 * 1024, 64 * 1024 * 1024) else {
-        return out;
-    };
-    for line in content.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
-            break;
-        }
-        if v.get("kind").and_then(|x| x.as_str()) != Some("chat") {
-            continue;
-        }
-        let Some(chosen) = v.get("chosen").and_then(|x| x.as_str()) else { continue };
-        let Some(prov) = prov_of_model.get(chosen) else { continue };
-        let Some(mm) = snap.iter().find(|m| m.id == chosen) else { continue };
-        let pt = v.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let ct = v.get("completion_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let cached = v.get("cached_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        *out.entry(prov.to_string()).or_insert(0.0) +=
-            evolve_core::plans::plan_credits_used(&mm.base_url, chosen, pt, cached, ct);
-    }
-    out
-}
-
-/// 近 24h 每 Provider token 用量：事件回扫（单文件倒序，越过 24h 界即停；
-/// events.jsonl.1 轮转历史不计——本地量级下单文件通常远超 24h 覆盖）。
-/// 只读文件尾部（read_tail_until 按需扩大窗口），/api/providers 专用。
-/// 返回 (各 Provider 近 24h tokens, 各 Provider 最近一次使用 ts_ms)
-fn tokens_24h_by_provider(
-    snap: &[evolve_core::types::ModelRecord],
-    events: &evolve_memory::events::EventLog,
-    now_ms: u64,
-) -> (std::collections::HashMap<String, u64>, std::collections::HashMap<String, i64>) {
-    let mut out = std::collections::HashMap::new();
-    let mut last_used: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-    let prov_of_model: std::collections::HashMap<&str, &str> =
-        snap.iter().map(|m| (m.id.as_str(), m.provider.as_str())).collect();
-    let Some(path) = events.path() else { return (out, last_used) };
-    let cutoff = (now_ms as i64) - 24 * 3600 * 1000;
-    let Some(content) = read_tail_until(&path, cutoff, 2 * 1024 * 1024, 64 * 1024 * 1024) else {
-        return (out, last_used);
-    };
-    for line in content.lines().rev() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        if (v.get("ts").and_then(|x| x.as_i64()).unwrap_or(0)) < cutoff {
-            break;
-        }
-        if v.get("kind").and_then(|x| x.as_str()) != Some("chat") {
-            continue;
-        }
-        let Some(chosen) = v.get("chosen").and_then(|x| x.as_str()) else { continue };
-        let Some(prov) = prov_of_model.get(chosen) else { continue };
-        let pt = v.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        let ct = v.get("completion_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
-        *out.entry(prov.to_string()).or_insert(0) += (pt + ct) as u64;
-        let ts = v.get("ts")
-                .and_then(|x| x.as_i64().or_else(|| x.as_f64().map(|f| f as i64)))
-                .unwrap_or(0);
-        let e = last_used.entry(prov.to_string()).or_insert(0);
-        if ts > *e {
-            *e = ts;
-        }
-    }
-    (out, last_used)
-}
-
-/// provider 用量聚合缓存（5s TTL）：/api/providers 被面板 3s 轮询，
-/// 24h 窗口在繁忙文件上要读到 ~16MB 尾部——同一次轮询里把两个聚合都算一遍即可，
-/// 展示口径对 5s 滞后不敏感（用户裁决 2026-10：B8）
-#[allow(clippy::type_complexity)]
-static PROVIDER_USAGE_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<
-        Option<(
-            std::time::Instant,
-            std::collections::HashMap<String, u64>,
-            std::collections::HashMap<String, i64>,
-            std::collections::HashMap<String, f64>,
-        )>,
-    >,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
-
-fn provider_usage(
-    snap: &[evolve_core::types::ModelRecord],
-    events: &evolve_memory::events::EventLog,
-    now_ms: u64,
-) -> (
-    std::collections::HashMap<String, u64>,
-    std::collections::HashMap<String, i64>,
-    std::collections::HashMap<String, f64>,
-) {
-    if let Ok(g) = PROVIDER_USAGE_CACHE.lock()
-        && let Some((at, tok24, last_used, credits5h)) = g.as_ref()
-        && at.elapsed().as_secs() < 5
-    {
-        return (tok24.clone(), last_used.clone(), credits5h.clone());
-    }
-    let (tok24, last_used) = tokens_24h_by_provider(snap, events, now_ms);
-    let credits5h = usage_5h_by_provider(snap, events, now_ms);
-    if let Ok(mut g) = PROVIDER_USAGE_CACHE.lock() {
-        *g = Some((std::time::Instant::now(), tok24.clone(), last_used.clone(), credits5h.clone()));
-    }
-    (tok24, last_used, credits5h)
-}
-
 /// 账号（provider）级健康聚合：返回 (最紧冷却项, 永久黑名单模型名列表)。
 /// 冷却项 = (剩余ms, model_id, kind, message)。单一事实源，/api/providers 专用。
 #[allow(clippy::type_complexity)]
@@ -1330,7 +1201,17 @@ pub async fn api_providers(State(st): State<AppState>) -> Response {
     };
     // 1. 手动定义的（最优先——用户自己加的）
     let snap_all = st.engine.catalog_snapshot();
-    let (tok24, last_used, credits5h) = provider_usage(&snap_all, &st.events, now_ms);
+    // 增量索引（usage_index）：首扫回补 24h，此后只读新增字节；IO 放阻塞池
+    let (tok24, last_used, credits5h) = {
+        let events = st.events.clone();
+        let snap = snap_all.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::usage_index::refresh(&events);
+            crate::usage_index::provider_usage(&snap, now_ms)
+        })
+        .await
+        .unwrap_or_default()
+    };
     for (key, pd) in &ov.providers {
         // 自指条目（配置里指向本机网关自身）不是上游 → 不出现在 Provider 管理
         let self_ep = format!("127.0.0.1:{}", st.config.server.port);
