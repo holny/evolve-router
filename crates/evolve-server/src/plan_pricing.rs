@@ -17,8 +17,15 @@ use std::sync::LazyLock;
 
 use axum::response::IntoResponse;
 
-const SOURCE_URL: &str = "https://raw.githubusercontent.com/wmpeng/codingplan/main/plans.json";
+const SOURCE_URLS: [&str; 3] = [
+    "https://raw.githubusercontent.com/wmpeng/codingplan/main/plans.json",
+    // 国内网络下 raw.githubusercontent 时通时断（2026-10-20 实测 000）→
+    // jsDelivr CDN（国内可达，缓存 ~12h，数据源本身按日更新，可接受）
+    "https://cdn.jsdelivr.net/gh/wmpeng/codingplan@main/plans.json",
+    "https://gh-proxy.com/https://raw.githubusercontent.com/wmpeng/codingplan/main/plans.json",
+];
 const REFRESH_INTERVAL_MS: u64 = 6 * 3600 * 1000;
+const RETRY_FAIL_MS: u64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PlanModelPrice {
@@ -42,6 +49,7 @@ pub struct PlanModelPrice {
 struct Snapshot {
     generated_at: String,
     fetched_at_ms: u64,
+    source: String,
     rows: Vec<PlanModelPrice>,
 }
 
@@ -122,36 +130,64 @@ fn parse_file(text: &str) -> Option<(String, Vec<PlanModelPrice>)> {
     Some((file.generated_at, rows))
 }
 
-async fn fetch_once() -> anyhow::Result<(String, Vec<PlanModelPrice>)> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build()?;
-    let text = client.get(SOURCE_URL).send().await?.error_for_status()?.text().await?;
-    parse_file(&text).ok_or_else(|| anyhow::anyhow!("plans.json schema parse failed"))
+async fn fetch_once() -> anyhow::Result<(String, Vec<PlanModelPrice>, String)> {
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30)).build()?;
+    let mut last = None;
+    for url in SOURCE_URLS {
+        match client.get(url).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => match resp.text().await {
+                    Ok(text) => {
+                        if let Some((generated_at, rows)) = parse_file(&text) {
+                            return Ok((generated_at, rows, url.to_string()));
+                        }
+                        last = Some(anyhow::anyhow!("schema parse failed: {url}"));
+                    }
+                    Err(e) => last = Some(anyhow::anyhow!("text: {e}")),
+                },
+                Err(e) => last = Some(anyhow::anyhow!("status: {e}")),
+            },
+            Err(e) => last = Some(anyhow::anyhow!("transport: {e}")),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("all sources failed")))
 }
 
 /// 拉取并落快照；失败仅记日志（保留上次快照）
 pub async fn refresh() {
-    let r = fetch_once().await;
-    match r {
-        Ok((generated_at, rows)) => {
+    match fetch_once().await {
+        Ok((generated_at, rows, source)) => {
             let n = rows.len();
             let now = evolve_memory::health::now();
+            tracing::info!(rows = n, source = %source, "coding plan prices refreshed");
             if let Ok(mut g) = SNAPSHOT.write() {
-                *g = Some(Snapshot { generated_at, fetched_at_ms: now, rows });
+                *g = Some(Snapshot { generated_at, fetched_at_ms: now, source, rows });
             }
-            tracing::info!(rows = n, "coding plan prices refreshed");
         }
         Err(e) => tracing::warn!(error = %e, "coding plan price refresh failed; keeping last snapshot"),
     }
 }
 
-/// 启动即拉，之后每 6h 刷新
+/// 启动即拉，之后每 6h 刷新；失败 5 分钟后重试（源时通时断）
 pub fn spawn_refresh_task() {
     tokio::spawn(async move {
         loop {
             refresh().await;
-            tokio::time::sleep(std::time::Duration::from_millis(REFRESH_INTERVAL_MS)).await;
+            let ok = snapshot_rows_len() > 0;
+            tokio::time::sleep(std::time::Duration::from_millis(
+                if ok { REFRESH_INTERVAL_MS } else { RETRY_FAIL_MS },
+            ))
+            .await;
         }
     });
+}
+
+fn snapshot_source() -> String {
+    SNAPSHOT.read().ok().and_then(|g| g.as_ref().map(|s| s.source.clone())).unwrap_or_default()
+}
+
+fn snapshot_rows_len() -> usize {
+    SNAPSHOT.read().ok().and_then(|g| g.as_ref().map(|s| s.rows.len())).unwrap_or(0)
 }
 
 fn snapshot_rows() -> Vec<PlanModelPrice> {
@@ -209,7 +245,7 @@ pub async fn api_plan_prices() -> axum::response::Response {
         })
         .collect();
     (axum::Json(json!({
-        "source": SOURCE_URL,
+        "source": snapshot_source(),
         "generated_at": generated_at,
         "models": models,
     })))
