@@ -363,7 +363,10 @@ pub fn context_fits(m: &ModelRecord, est_input: u64, max_output: u64) -> Result<
     // is the single gate — reaching here means the model is proven, so no
     // declared-window check applies.
     let Some(window) = m.context_window else { return Ok(()) };
-    let need = (est_input as f64 * 1.1) as u64 + max_output;
+    // est_input 已含 calib×tok_ratio 校准（观测比值中位即安全余量）——
+    // 不再叠 ×1.1（双重余量把"窗口真实够用"的模型挤出局的实证 2026-10-19：
+    // 683K 真实上下文被算成 1.01M，1M 窗口差 0.8% 被滤 → 会话全灭）
+    let need = est_input.saturating_add(max_output);
     if need <= window {
         Ok(())
     } else {

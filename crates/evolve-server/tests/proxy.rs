@@ -133,7 +133,7 @@ async fn trivial_message_routes_to_cheapest() {
 async fn oversized_context_routes_to_only_fitting_model() {
     let port = spawn_mock_upstream().await;
     let app = build_router(build_state(test_config(port)));
-    let big = "a".repeat(500_000); // ~125k tokens latin
+    let big = "a".repeat(600_000); // ~150k tokens latin——余量单层化后 125k 会被 128k 窗口诚实接住
     let (status, headers, raw) = send(app, chat_request("auto", json!(big), json!({}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["x-ev-model"], "frontier");

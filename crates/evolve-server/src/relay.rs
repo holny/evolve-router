@@ -300,6 +300,16 @@ pub async fn chat_completions(
             tracing::info!(models = ?price_retry, "price-gated models appended as last-resort");
             attempts.extend(price_retry);
         }
+        // 上下文闸放宽（2026-10-19）：need 的余量 stacking（校准×比值中位×1.1+output）
+        // 会把"窗口真实够用"的模型挤出局——实证：683K 真实上下文被算成 1.01M need，
+        // 1M 窗口的 glm-5.3-flash 差 0.8% 被滤、1.048M 的 kimi-k3 差 14% 被滤，
+        // 唯二幸存候选又恰好月配额耗尽 → 会话全灭。救命轮按 **bound×1.1 ≥ need**
+        // 重判（对已带足余量的 need 再给 10% 宽限），按窗口上界降序补队尾。
+        let ctx_retry = context_gated_retries(&decision.filtered, &attempts, 4);
+        if !ctx_retry.is_empty() {
+            tracing::info!(models = ?ctx_retry, "context-gated models appended as last-resort");
+            attempts.extend(ctx_retry);
+        }
     }
 
     let mut skipped: Vec<String> = Vec::new();
@@ -1366,6 +1376,55 @@ pub(crate) fn price_gated_retries(
     out
 }
 
+/// 上下文闸 cause → (need_strict, 窗口上界)。两种形态：
+///   "context window too small (need 1137090 tok, window 1000000)"
+///   "unknown context window (proven max accepted 1012384 tok, need 1007973 tok)"
+fn context_gate_numbers(cause: &str) -> Option<(u64, u64)> {
+    let need: u64 = cause.split("need ").nth(1)?.split(" tok").next()?.trim().parse().ok()?;
+    // ⚠ 锚点必须带前缀：cause 里 "context window"/"unknown context window" 自身
+    // 都含 "window "，裸锚会劈中标题
+    let bound: u64 = if cause.starts_with("unknown context window") {
+        cause.split("proven max accepted ").nth(1)?.split(" tok").next()?.trim().parse().ok()?
+    } else {
+        cause.split(", window ").nth(1)?.split(" tok").next()?.trim_end_matches(')').trim().parse().ok()?
+    };
+    Some((need, bound))
+}
+
+/// 上下文闸放宽的救命轮（2026-10-19）：`bound × 1.1 ≥ need_strict` 的被滤模型
+/// 按窗口上界降序补队尾——need 的余量 stacking（校准×比值×1.1+output）偶尔把
+/// 窗口真实够用的模型挤出局，全军覆没边缘给 10% 宽限再试，错过成本只是一次
+/// 上游 400，收益是把"明明装得下"的会话救活。
+fn context_gated_retries(
+    filtered: &[evolve_core::types::FilteredOut],
+    attempts: &[String],
+    max: usize,
+) -> Vec<String> {
+    let mut gated: Vec<(&str, u64)> = filtered
+        .iter()
+        .filter(|f| f.cause.starts_with("context window too small")
+            || f.cause.starts_with("unknown context window"))
+        .filter_map(|f| {
+            context_gate_numbers(&f.cause)
+                .map(|(need, bound)| (f.model.as_str(), need, bound))
+                .filter(|(_, need, bound)| (*bound as f64) * 1.1 >= *need as f64)
+                .map(|(m, _, bound)| (m, bound))
+        })
+        .collect();
+    gated.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let mut out: Vec<String> = Vec::new();
+    for (m, _) in gated {
+        if out.len() >= max {
+            break;
+        }
+        if attempts.iter().any(|a| a == m) || out.iter().any(|a| a == m) {
+            continue;
+        }
+        out.push(m.to_string());
+    }
+    out
+}
+
 /// 把历史消息里的图片 part 替换成占位文本（**最后一条 user 消息保留**）：
 /// text-only 上游收到图片会按非法 content.type 拒收；本轮不需要识图时，历史
 /// 图对模型只是"看不见的上下文"，占位文本即可（2026-10-18 用户裁决）。
@@ -1618,7 +1677,7 @@ fn cache_fingerprint(parsed: &Value) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod winner_queue_tests {
-    use super::{price_gated_retries, strip_image_parts, winner_queue};
+    use super::{context_gated_retries, price_gated_retries, strip_image_parts, winner_queue};
     use evolve_core::types::FilteredOut;
     use std::collections::BTreeMap;
 
@@ -1676,6 +1735,28 @@ mod winner_queue_tests {
         let s = scores(&[("premium/a", 0.5), ("premium/b", 0.9)]);
         let retry = price_gated_retries(&f, &s, &["seed/model".to_string()], 6);
         assert_eq!(retry, vec!["premium/b", "premium/a"]);
+    }
+
+    #[test]
+    fn context_gated_models_become_last_resort_by_window() {
+        // 上下文闸救命轮：bound×1.1 ≥ need 才放行，按窗口上界降序
+        let f = filtered(&[
+            // need 超窗 0.8%（≤10% 宽限）→ 放行，窗口大者先试
+            ("big/flash", "context window too small (need 1007973 tok, window 1000000)"),
+            // unknown-window 形态：proven 1012384 × 1.1 ≥ need 1007973 → 放行
+            ("big/proven", "unknown context window (proven max accepted 1012384 tok, need 1007973 tok)"),
+            // 超窗 14%（>10% 宽限）→ 不放行
+            ("mid/k3", "context window too small (need 1195593 tok, window 1048576)"),
+            // 窗口远小于 need → 不放行
+            ("small/na", "context window too small (need 527287 tok, window 200000)"),
+            // 非上下文闸原因不入选
+            ("price/x", "price tier 2 above allowed 1 (difficulty 0.6)"),
+        ]);
+        let retry = context_gated_retries(&f, &["seed/model".to_string()], 4);
+        assert_eq!(retry, vec!["big/proven", "big/flash"]);
+        // 已试过的不重复入队
+        let retry2 = context_gated_retries(&f, &["big/proven".to_string()], 4);
+        assert_eq!(retry2, vec!["big/flash"]);
     }
 
     #[test]

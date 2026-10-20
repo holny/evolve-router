@@ -448,11 +448,14 @@ impl Engine {
                     .get(&m.id)
                     .and_then(|t| t.max_accepted)
                     .unwrap_or(0);
-                if (m_est as f64 * 1.1) as u64 + max_output > proven {
+                // 与 context_fits 同步：m_est 已含校准×比值余量，不再叠 ×1.1
+                if m_est.saturating_add(max_output) > proven {
+                    // need 一并写入（救命轮按现实需求重判用，2026-10-19）
+                    let need = m_est.saturating_add(max_output);
                     filtered.push(FilteredOut {
                         model: m.id.clone(),
                         cause: format!(
-                            "unknown context window (proven max accepted {proven} tok)"
+                            "unknown context window (proven max accepted {proven} tok, need {need} tok)"
                         ),
                     });
                     continue;
@@ -1434,8 +1437,10 @@ mod tests {
         let text = "帮我把这个模块的错误处理重构成统一错误类型，包含所有分支和测试";
         let d = DigestSignals { last_user_text: text.into(), ..Default::default() };
         let h = HealthMap::new();
-        let dec = e.decide(input(text, 120_000, &d, None, &h));
-        assert_eq!(dec.chosen, "frontier", "only frontier fits 120k; reason: {}", dec.reason);
+        // est 150k：standard(128k) 真装不下（151k > 128k）、frontier(200k) 才接——
+        // 余量单层化（去掉 ×1.1 叠加）后 120k 会被 128k 窗口诚实接住，故抬到这里
+        let dec = e.decide(input(text, 150_000, &d, None, &h));
+        assert_eq!(dec.chosen, "frontier", "only frontier fits 150k; reason: {}", dec.reason);
         assert!(dec.filtered.iter().any(|f| f.model == "mini" && f.cause.contains("context")));
         assert!(dec.filtered.iter().any(|f| f.model == "standard" && f.cause.contains("context")));
     }
