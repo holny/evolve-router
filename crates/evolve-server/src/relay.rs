@@ -278,6 +278,15 @@ pub async fn chat_completions(
         Target::Direct(_) => (vec![decision.chosen.clone()], usize::MAX),
     };
 
+    // 价位闸临近模型预放行（用户裁决 2026-10-20）：价位闸从"掐死"降级为
+    // "压排序"——每 provider 一个最临近的代表补到链尾，任何请求的候选集
+    // 都覆盖全部 provider；精确档全灭时直接落到位，不用先空转一轮等救援
+    let price_near = price_gated_retries(&decision.filtered, &decision.scores, &attempts, 6);
+    if !price_near.is_empty() {
+        tracing::info!(models = ?price_near, "price-gated near models appended to chain tail");
+        attempts.extend(price_near);
+    }
+
     // 全灭兜底（用户裁决 2026-10）：配额被硬滤（剩余不足/耗尽）的模型排
     // 最后——主链+清扫全灭后再试一轮（学习到的配额可能过期/已重置，
     // 死马当活马医，延迟换成功率）。去重、上限 6。
@@ -295,14 +304,6 @@ pub async fn chat_completions(
         if !retry.is_empty() {
             tracing::info!(models = ?retry, "quota-filtered models appended as last-resort");
             attempts.extend(retry);
-        }
-        // 价位闸放宽（用户裁决 2026-10-18）：价格层闸只约束"首选"不约束"救命"——
-        // 允许档候选全灭（额度耗尽/限流/断网）时，被价格闸挡掉的模型按评分从高到低
-        // 补到队尾再试一轮；否则明明有可用模型也会因为"贵档不许用"直接报全灭。
-        let price_retry = price_gated_retries(&decision.filtered, &decision.scores, &attempts, 6);
-        if !price_retry.is_empty() {
-            tracing::info!(models = ?price_retry, "price-gated models appended as last-resort");
-            attempts.extend(price_retry);
         }
         // 上下文闸放宽（2026-10-19）：need 的余量 stacking（校准×比值中位×1.1+output）
         // 会把"窗口真实够用"的模型挤出局——实证：683K 真实上下文被算成 1.01M need，
@@ -1385,9 +1386,11 @@ pub(crate) fn winner_queue(
     list
 }
 
-/// 价位闸放宽的救命候选（用户裁决 2026-10-18）：从决策 `filtered` 里挑被
-/// **价格层闸**挡掉的模型，按评分降序返回（去重、去已在 attempts 里的），
-/// 供主链+清扫全灭后补到队尾再试一轮——价格闸只约束首选、不约束救命。
+/// 价位闸临近模型（用户裁决 2026-10-20）：从决策 `filtered` 里挑被**价格层闸**
+/// 挡掉的模型，**每 provider 至多 1 个**（该家离允许档最近的代表，按评分降序），
+/// 排除自指别名（evo-router/auto 绕回本网关必 400）与已在 attempts 里的——
+/// 直接补到链尾，让"没命中格子的 provider 也以临近模型进候选集"，精确档
+/// 全灭时不必先空转一轮再等救援。价位闸语义从"掐死"降级为"压排序"。
 pub(crate) fn price_gated_retries(
     filtered: &[evolve_core::types::FilteredOut],
     scores: &std::collections::BTreeMap<String, f32>,
@@ -1405,11 +1408,20 @@ pub(crate) fn price_gated_retries(
         sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut out: Vec<String> = Vec::new();
+    let mut per_provider: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for m in gated {
         if out.len() >= max {
             break;
         }
+        if m == "evo-router/auto" {
+            continue; // 自指别名：路由回本网关必 400，占位无意义
+        }
         if attempts.iter().any(|a| a == m) || out.iter().any(|a| a == m) {
+            continue;
+        }
+        // 每 provider 至多 1 个临近代表（候选集要的是 provider 覆盖面）
+        let prov = m.split('/').next().unwrap_or(m);
+        if !per_provider.insert(prov) {
             continue;
         }
         out.push(m.to_string());
@@ -1761,6 +1773,14 @@ fn record_session_tokens(session: &str, body_est: u64, real_prompt: u64) {
     if body_est == 0 || real_prompt == 0 {
         return;
     }
+    // 锚点可信度护栏（2026-10-20 实证）：实测与估算差出 20 倍 = 假数据
+    // （mock 固定 usage=123 vs est≈4，30 倍）→ 不入账——一条毒锚点会把
+    // 后续轮次的 est 顶出粘性护栏（est ≤ 首轮×8），无端断掉工具续跑
+    if (real_prompt as f64) > (body_est as f64) * 20.0
+        || (real_prompt as f64) * 8.0 < (body_est as f64)
+    {
+        return;
+    }
     let now = evolve_memory::health::now();
     let Ok(mut map) = SESSION_TOKENS.lock() else { return };
     if map.len() >= CAP && !map.contains_key(session) {
@@ -1840,15 +1860,29 @@ mod winner_queue_tests {
 
     #[test]
     fn price_gated_models_become_last_resort_by_score() {
-        // 价格闸只约束首选：全灭兜底时按评分降序补位（贵的先用高评分）
+        // 价位闸只压排序：被闸模型按评分降序补到链尾
         let f = filtered(&[
             ("cheap-tier/ok", "quota remaining low"),
-            ("premium/a", "price tier 2 above allowed 1 (difficulty 0.6)"),
-            ("premium/b", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("premA/a", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("premB/b", "price tier 2 above allowed 1 (difficulty 0.6)"),
         ]);
-        let s = scores(&[("premium/a", 0.5), ("premium/b", 0.9)]);
+        let s = scores(&[("premA/a", 0.5), ("premB/b", 0.9)]);
         let retry = price_gated_retries(&f, &s, &["seed/model".to_string()], 6);
-        assert_eq!(retry, vec!["premium/b", "premium/a"]);
+        assert_eq!(retry, vec!["premB/b", "premA/a"]);
+    }
+
+    #[test]
+    fn price_gated_near_models_take_one_per_provider_and_skip_self() {
+        // 每 provider 至多 1 个临近代表；自指别名（evo-router/auto）剔除
+        let f = filtered(&[
+            ("premA/a", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("premA/b", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("evo-router/auto", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("premB/c", "price tier 2 above allowed 1 (difficulty 0.6)"),
+        ]);
+        let s = scores(&[("premA/a", 0.9), ("premA/b", 0.8), ("evo-router/auto", 0.7), ("premB/c", 0.6)]);
+        let retry = price_gated_retries(&f, &s, &[], 6);
+        assert_eq!(retry, vec!["premA/a", "premB/c"], "premA 只留最高分的 a；auto 剔除");
     }
 
     #[test]
