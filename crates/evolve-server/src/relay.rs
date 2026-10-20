@@ -308,9 +308,9 @@ pub async fn chat_completions(
         // 上下文闸放宽（2026-10-19）：need 的余量 stacking（校准×比值中位×1.1+output）
         // 会把"窗口真实够用"的模型挤出局——实证：683K 真实上下文被算成 1.01M need，
         // 1M 窗口的 glm-5.3-flash 差 0.8% 被滤、1.048M 的 kimi-k3 差 14% 被滤，
-        // 唯二幸存候选又恰好月配额耗尽 → 会话全灭。救命轮按 **bound×1.1 ≥ need**
-        // 重判（对已带足余量的 need 再给 10% 宽限），按窗口上界降序补队尾。
-        let ctx_retry = context_gated_retries(&decision.filtered, &attempts, 4);
+        // 唯二幸存候选又恰好月配额耗尽 → 会话全灭。救命轮按 **窗口 ≥ 裸 est** 重判
+        // （裸 est 是不被校准污染的诚实下界），按窗口上界降序补队尾。
+        let ctx_retry = context_gated_retries(&decision.filtered, &attempts, est, 4);
         if !ctx_retry.is_empty() {
             tracing::info!(models = ?ctx_retry, "context-gated models appended as last-resort");
             attempts.extend(ctx_retry);
@@ -1476,9 +1476,19 @@ fn context_gate_numbers(cause: &str) -> Option<(u64, u64)> {
 /// 按窗口上界降序补队尾——need 的余量 stacking（校准×比值×1.1+output）偶尔把
 /// 窗口真实够用的模型挤出局，全军覆没边缘给 10% 宽限再试，错过成本只是一次
 /// 上游 400，收益是把"明明装得下"的会话救活。
+/// 上下文闸救命轮（2026-10-20 重构）：被上下文闸挡掉的模型里，**窗口 ≥ 裸 est**
+/// 的按窗口降序补队尾。
+/// 为什么不用 per-model need（= est×校准×比值×1.1+output）：冷启动会话没有
+/// 真值锚点时，比值堆叠会把 need 顶到 1.2-1.5M（实证：裸 est 552K 被算成
+/// 1.4M），连同窗口真实够用的模型一起滤光 → 唯一候选是欠费户 → 失败 → 依旧
+/// 无锚点 → 死循环。裸 est 是不被校准污染的诚实下界；窗口 ≥ 它的模型值得一
+/// 次尝试（最坏一次上游 400，最好直接救活会话并锚定账本）。窗口降序 = 最大的
+/// 先上，成功概率最高。真正超限的会话（裸 est 都超预算）由 context_overflow
+/// 返回压缩信号——两条路径互补，没有中间死区。
 fn context_gated_retries(
     filtered: &[evolve_core::types::FilteredOut],
     attempts: &[String],
+    raw_est: u64,
     max: usize,
 ) -> Vec<String> {
     let mut gated: Vec<(&str, u64)> = filtered
@@ -1487,9 +1497,8 @@ fn context_gated_retries(
             || f.cause.starts_with("unknown context window"))
         .filter_map(|f| {
             context_gate_numbers(&f.cause)
-                .map(|(need, bound)| (f.model.as_str(), need, bound))
-                .filter(|(_, need, bound)| (*bound as f64) * 1.1 >= *need as f64)
-                .map(|(m, _, bound)| (m, bound))
+                .map(|(_, bound)| (f.model.as_str(), bound))
+                .filter(|(_, bound)| *bound >= raw_est)
         })
         .collect();
     gated.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
@@ -1904,23 +1913,28 @@ mod winner_queue_tests {
 
     #[test]
     fn context_gated_models_become_last_resort_by_window() {
-        // 上下文闸救命轮：bound×1.1 ≥ need 才放行，按窗口上界降序
+        // 上下文闸救命轮：窗口 ≥ 裸 est 即放行（不被校准污染的诚实下界），窗口降序
         let f = filtered(&[
-            // need 超窗 0.8%（≤10% 宽限）→ 放行，窗口大者先试
+            // 窗口 1M，膨胀 need 1.007M——照样放行（冷启动会话的真值可能只有 810K）
             ("big/flash", "context window too small (need 1007973 tok, window 1000000)"),
-            // unknown-window 形态：proven 1012384 × 1.1 ≥ need 1007973 → 放行
+            // unknown-window 形态：proven 1012384 ≥ est → 放行
             ("big/proven", "unknown context window (proven max accepted 1012384 tok, need 1007973 tok)"),
-            // 超窗 14%（>10% 宽限）→ 不放行
+            // 窗口 1.048M ≥ est → 放行，且窗口最大排最前
             ("mid/k3", "context window too small (need 1195593 tok, window 1048576)"),
-            // 窗口远小于 need → 不放行
+            // 窗口 < 裸 est → 不放行（真装不下）
             ("small/na", "context window too small (need 527287 tok, window 200000)"),
             // 非上下文闸原因不入选
-            ("price/x", "price tier 2 above allowed 1 (difficulty 0.6)"),
+            ("price/x", "price tier 2 above allowed 0 (difficulty 0.6)"),
         ]);
-        let retry = context_gated_retries(&f, &["seed/model".to_string()], 4);
-        assert_eq!(retry, vec!["big/proven", "big/flash"]);
+        let retry = context_gated_retries(&f, &["seed/model".to_string()], 552_746, 4);
+        assert_eq!(retry, vec!["mid/k3", "big/proven", "big/flash"]);
         // 已试过的不重复入队
-        let retry2 = context_gated_retries(&f, &["big/proven".to_string()], 4);
+        let retry2 = context_gated_retries(
+            &f,
+            &["mid/k3".to_string(), "big/proven".to_string()],
+            552_746,
+            4,
+        );
         assert_eq!(retry2, vec!["big/flash"]);
     }
 
