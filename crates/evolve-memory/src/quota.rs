@@ -98,6 +98,19 @@ impl ProviderGateState {
         60 * 60 * 1000,
     ];
 
+    /// Network 类故障的探活退避封顶 2 分钟：瞬时抖动为主（睡眠唤醒/连接级），
+    /// 端点恢复以秒计——30-60 分钟的流放曾把双订阅之一在兄弟账号全程 200 时
+    /// 挡在池外（2026-10-20 实证）。鉴权/配额类保持原表。
+    pub fn issue_backoff_for(issue: ProviderIssue, probe_failures: u32) -> u64 {
+        let idx = (probe_failures as usize).min(Self::ISSUE_BACKOFF_MS.len() - 1);
+        let ms = Self::ISSUE_BACKOFF_MS[idx];
+        if issue == ProviderIssue::Network {
+            ms.min(120 * 1000)
+        } else {
+            ms
+        }
+    }
+
     pub fn backoff_ms(&self, now: u64) -> u64 {
         if self.api_backed {
             Self::API_RETRY_MS
@@ -220,8 +233,8 @@ impl QuotaLedger {
         let newly = e.issue != Some(issue) && e.issue_fails >= ProviderGateState::ISSUE_MIN_FAILS;
         if e.issue_fails >= ProviderGateState::ISSUE_MIN_FAILS {
             e.issue = Some(issue);
-            let idx = (e.issue_probe_failures as usize).min(ProviderGateState::ISSUE_BACKOFF_MS.len() - 1);
-            e.issue_probe_at_ms = now + ProviderGateState::ISSUE_BACKOFF_MS[idx];
+            e.issue_probe_at_ms =
+                now + ProviderGateState::issue_backoff_for(issue, e.issue_probe_failures);
             if newly {
                 tracing::warn!(
                     provider = %provider, issue = issue.label(), fails = e.issue_fails,
@@ -307,8 +320,11 @@ impl QuotaLedger {
             }
         } else {
             e.issue_probe_failures = e.issue_probe_failures.saturating_add(1);
-            let idx = (e.issue_probe_failures as usize).min(ProviderGateState::ISSUE_BACKOFF_MS.len() - 1);
-            e.issue_probe_at_ms = now + ProviderGateState::ISSUE_BACKOFF_MS[idx];
+            e.issue_probe_at_ms = now
+                + ProviderGateState::issue_backoff_for(
+                    e.issue.unwrap_or(ProviderIssue::Network),
+                    e.issue_probe_failures,
+                );
         }
     }
 

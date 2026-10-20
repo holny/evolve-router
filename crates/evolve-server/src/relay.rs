@@ -490,7 +490,7 @@ pub async fn chat_completions(
                     Failure { kind: HealthKind::Transient, message: "transport error".into(), until_epoch_ms: None },
                 );
                 // provider 级（连续 3 次才降级；降级后定时探活，不永久沉默）
-                note_provider_issue(&st, &record.provider, evolve_memory::quota::ProviderIssue::Network);
+                note_provider_issue(&st, &record.provider, &record.base_url, evolve_memory::quota::ProviderIssue::Network);
                 dead_routes.insert(record.base_url.clone());
                 skipped.push(format!("{cand}(transport)"));
                 if primary.as_ref().map(|(p, _, _)| 2 > *p).unwrap_or(true) {
@@ -502,6 +502,13 @@ pub async fn chat_completions(
         };
 
         let status = resp.status();
+
+        // 端点级存活记录（2026-10-20）：同 baseURL 的多账号（同 plan 双订阅）
+        // 共享端点命运——任一账号 200 即证明端点可达，兄弟账号的传输失败
+        // 不应升级成 provider 降级（见 note_provider_issue 的豁免检查）
+        if status.is_success() && !record.base_url.is_empty() {
+            record_endpoint_ok(&record.base_url);
+        }
 
         if fallback_eligible(status.as_u16()) {
             // 失败路径也捕获 provider 配额头（用户裁决：429/402 的 reset/remaining
@@ -597,7 +604,7 @@ pub async fn chat_completions(
             // provider 级故障：鉴权/区域被拒（与配额、模型级问题分开记账）
             match failure.kind {
                 HealthKind::AuthFailed => note_provider_issue(
-                    &st, &record.provider, evolve_memory::quota::ProviderIssue::Auth,
+                    &st, &record.provider, &record.base_url, evolve_memory::quota::ProviderIssue::Auth,
                 ),
                 _ => {}
             }
@@ -1245,11 +1252,42 @@ fn fallback_eligible(status: u16) -> bool {
     matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
 }
 
+/// 端点级最近成功记录（baseURL → 最后一次 200 的时刻）：同 baseURL 多账号
+/// （同 plan 双订阅，如 opencode-go / opencode-go-github）共享端点命运——
+/// 兄弟账号刚 200 过 = 端点明确可达，另一账号的传输失败属于瞬时/连接级抖动，
+/// 不应升级成 provider 降级（否则一次网络抖动会把双订阅之一流放 30-60 分钟，
+/// 而兄弟账号全程 200 的实证 2026-10-20）。
+static ENDPOINT_LAST_OK: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, u64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+const ENDPOINT_OK_FRESH_MS: u64 = 120 * 1000;
+
+fn record_endpoint_ok(base_url: &str) {
+    let now = evolve_memory::health::now();
+    if let Ok(mut m) = ENDPOINT_LAST_OK.lock() {
+        m.insert(base_url.to_string(), now);
+    }
+}
+
+/// 同 baseURL 的兄弟账号近期有成功响应 → 端点明确可达
+fn endpoint_recently_ok(base_url: &str) -> bool {
+    let now = evolve_memory::health::now();
+    let Ok(m) = ENDPOINT_LAST_OK.lock() else { return false };
+    m.get(base_url)
+        .map(|ts| now.saturating_sub(*ts) < ENDPOINT_OK_FRESH_MS)
+        .unwrap_or(false)
+}
+
 /// provider 级故障记账（网络/鉴权）：达阈值才降级并发出事件（面板据此显示
 /// `degraded · next probe`）；降级只影响"是否进主池"，兜底段与探活都会再给它机会。
+/// Network 类失败有**兄弟豁免**：同 baseURL 的另一账号 2 分钟内有 200 → 端点
+/// 明确可达 → 传输失败不计入降级（2026-10-20 实证：睡眠唤醒抖动把双订阅之一
+/// 流放 30+ 分钟，兄弟账号全程 200）。
 fn note_provider_issue(
     st: &AppState,
     provider: &str,
+    base_url: &str,
     issue: evolve_memory::quota::ProviderIssue,
 ) {
     // 无凭据（还没填 key）不是"provider 故障"——不降级、不探活，交给 needs_key 提示
@@ -1259,6 +1297,13 @@ fn note_provider_issue(
         .iter()
         .any(|m| m.provider == provider && m.has_credential());
     if !has_credential {
+        return;
+    }
+    if issue == evolve_memory::quota::ProviderIssue::Network && endpoint_recently_ok(base_url) {
+        tracing::info!(
+            provider = %provider,
+            "transport failure but sibling account on the same endpoint is serving — skipping network degradation"
+        );
         return;
     }
     let now = evolve_memory::health::now();
