@@ -364,6 +364,8 @@ fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Re
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async move {
         state.start_background();
+        // Coding Plan 价格/额度定时拉取（启动即拉 + 6h 刷新）
+        evolve_server::plan_pricing::spawn_refresh_task();
         // w2 配额看门狗：官方端点定时刷新（90s），面板不开也维持 gate 状态新鲜
         evolve_server::meta::spawn_quota_watchdog(state.clone());
         // 配置热加载 watcher：[[decision.slots]] 改动即时生效（其余段落提示重启）
