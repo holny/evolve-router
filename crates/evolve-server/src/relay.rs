@@ -1124,10 +1124,41 @@ pub async fn chat_completions(
     }
     let direct_raw = matches!(target, Target::Direct(_)) && last_error.is_some();
     let (status, err_body) = last_error.unwrap_or((StatusCode::BAD_GATEWAY, Bytes::new()));
+    // 上下文真超限（2026-10-20）：目录里没有任何窗口装得下 est+output 预留时，
+    // 返回业界标准的 context_length_exceeded（客户端 opencode/qwen-code/pi 解析
+    // 后**自动压缩**），取代语焉不详的"全灭"——盲目重试永远不可能成功
+    let ctx_overflow = {
+        let out_reserve = parsed.get("max_tokens").and_then(|v| v.as_u64());
+        let max_catalog_window = st
+            .engine
+            .catalog_snapshot()
+            .iter()
+            .filter_map(|m| m.context_window)
+            .max()
+            .unwrap_or(0);
+        context_overflow(est, out_reserve, &decision.filtered, max_catalog_window)
+    };
     // 全灭时：状态码取**主因**（配额/上下文 > 兜底段个别 400）；原因写进 message，
     // 让调用方一眼看到"真正为什么不通"，而不是最后一个被试模型的状态码
     let (status, err_body) = if direct_raw {
         (status, err_body)
+    } else if let Some((budget, ctx_est)) = ctx_overflow {
+        // OpenAI 形态：opencode / qwen-code / 通用 SDK 靠 code/message 触发压缩
+        let body = json!({
+            "error": {
+                "message": format!(
+                    "This model's maximum context length is {budget} tokens. However, your messages resulted in {ctx_est} tokens. Please reduce the length of the messages."
+                ),
+                "type": "invalid_request_error",
+                "param": "messages",
+                "code": "context_length_exceeded",
+                "evolve_max_input_tokens": budget,
+                "evolve_est_tokens": ctx_est,
+            }
+        })
+        .to_string()
+        .into_bytes();
+        (StatusCode::BAD_REQUEST, Bytes::from(body))
     } else if let Some((_, pstatus, plabel)) = primary.clone() {
         // 配额/上下文类主因的语义状态码优先于兜底段的 4xx
         let status = if pstatus.as_u16() == 502 { status } else { pstatus };
@@ -1384,6 +1415,31 @@ pub(crate) fn price_gated_retries(
         out.push(m.to_string());
     }
     out
+}
+
+/// 上下文真超限判定（2026-10-20）：目录里没有任何窗口能容纳 `est + output 预留`
+/// 时返回 `(预算, est)`，调用方构造**业界标准形态**的上下文超限错误——
+/// opencode / qwen-code / pi 等客户端解析后触发自动压缩，而不是对着
+/// "全灭"盲目重试。预算 = 可用最大窗口 − output 预留（Agent 侧同样不等
+/// 真满才压缩，window−output 才是有效输入容量）。
+pub(crate) fn context_overflow(
+    est: u64,
+    max_output_req: Option<u64>,
+    filtered: &[evolve_core::types::FilteredOut],
+    max_catalog_window: u64,
+) -> Option<(u64, u64)> {
+    let out_reserve = max_output_req.unwrap_or(16_384).clamp(1024, 65_536);
+    let mut max_window = max_catalog_window;
+    for f in filtered {
+        if let Some((_, bound)) = context_gate_numbers(&f.cause) {
+            max_window = max_window.max(bound);
+        }
+    }
+    if max_window == 0 {
+        return None;
+    }
+    let budget = max_window.saturating_sub(out_reserve).max(1024);
+    (est > budget).then_some((budget, est))
 }
 
 /// 上下文闸 cause → (need_strict, 窗口上界)。两种形态：
@@ -1729,7 +1785,10 @@ fn cache_fingerprint(parsed: &Value) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod winner_queue_tests {
-    use super::{context_gated_retries, price_gated_retries, strip_image_parts, winner_queue};
+    use super::{
+        context_gate_numbers, context_gated_retries, context_overflow, price_gated_retries,
+        strip_image_parts, winner_queue,
+    };
     use evolve_core::types::FilteredOut;
     use std::collections::BTreeMap;
 
@@ -1787,6 +1846,23 @@ mod winner_queue_tests {
         let s = scores(&[("premium/a", 0.5), ("premium/b", 0.9)]);
         let retry = price_gated_retries(&f, &s, &["seed/model".to_string()], 6);
         assert_eq!(retry, vec!["premium/b", "premium/a"]);
+    }
+
+    #[test]
+    fn context_overflow_reports_when_no_window_fits() {
+        let f = filtered(&[
+            ("big/flash", "context window too small (need 1007973 tok, window 1000000)"),
+        ]);
+        // 预算 = 最大窗口 − output 预留；est 超预算 → Some((预算, est))
+        assert_eq!(
+            context_overflow(1_007_973, Some(65_536), &f, 1_000_000),
+            Some((934_464, 1_007_973))
+        );
+        // est 在预算内 → None（正常路由，不报上下文超限）
+        assert_eq!(context_overflow(500_000, Some(65_536), &f, 1_000_000), None);
+        // 目录与实证都没有任何窗口 → None（无从构造有意义的预算）
+        let f0 = filtered(&[("x/y", "unknown context window (proven max accepted 0 tok, need 557827 tok)")]);
+        assert_eq!(context_overflow(557_827, None, &f0, 0), None);
     }
 
     #[test]

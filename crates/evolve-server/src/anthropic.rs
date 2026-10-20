@@ -568,6 +568,19 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
 
     let direct_raw = matches!(target, Target::Direct(_)) && last_error.is_some();
     let (status, err_body) = last_error.unwrap_or((StatusCode::BAD_GATEWAY, Bytes::new()));
+    // 上下文真超限（2026-10-20）：目录无任何窗口装得下 est+output 预留 →
+    // Anthropic 标准形态的 "prompt is too long"（客户端解析后自动压缩）
+    let ctx_overflow = {
+        let out_reserve = parsed.get("max_tokens").and_then(|v| v.as_u64());
+        let max_catalog_window = st
+            .engine
+            .catalog_snapshot()
+            .iter()
+            .filter_map(|m| m.context_window)
+            .max()
+            .unwrap_or(0);
+        crate::relay::context_overflow(est, out_reserve, &decision.filtered, max_catalog_window)
+    };
     let mut resp = if direct_raw {
         let mut r = Response::builder()
             .status(status)
@@ -577,6 +590,12 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         insert_header(r.headers_mut(), "x-ev-model", &original_choice);
         insert_header(r.headers_mut(), "x-evolve-decision-id", &decision.id);
         r
+    } else if let Some((budget, ctx_est)) = ctx_overflow {
+        // Anthropic 形态：pi / Claude 协议客户端靠 "prompt is too long" 触发压缩
+        mr_error(
+            StatusCode::BAD_REQUEST,
+            &format!("prompt is too long: {ctx_est} tokens > {budget} maximum"),
+        )
     } else {
         {
             let mut resp = mr_error(map_status(status), "all routed upstreams failed; see x-ev-skipped for per-model reasons");
