@@ -227,7 +227,7 @@ async fn tool_continuation_in_same_session_is_sticky() {
 }
 
 #[tokio::test]
-async fn models_endpoint_lists_auto_and_catalog_with_source() {
+async fn models_endpoint_lists_only_router_aliases_by_default() {
     let port = spawn_mock_upstream().await;
     let app = build_router(build_state(test_config(port)));
     let req = Request::builder().method("GET").uri("/v1/models").body(Body::empty()).unwrap();
@@ -236,7 +236,25 @@ async fn models_endpoint_lists_auto_and_catalog_with_source() {
     let body = json_body(&raw);
     let ids: Vec<&str> = body["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"auto"));
-    assert!(ids.contains(&"mini"));
+    assert!(ids.contains(&"auto:cost") && ids.contains(&"auto:quality"));
+    // 默认不暴露上游模型——点名会绕过路由（2026-10-20 用户裁决）
+    assert!(!ids.contains(&"mini"), "default list must not expose upstream models: {:?}", ids);
+}
+
+#[tokio::test]
+async fn models_endpoint_catalog_opt_in_lists_upstream_models() {
+    let port = spawn_mock_upstream().await;
+    let app = build_router(build_state(test_config(port)));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/models?catalog=1")
+        .body(Body::empty())
+        .unwrap();
+    let (status, _, raw) = send(app, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = json_body(&raw);
+    let ids: Vec<&str> = body["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"auto") && ids.contains(&"mini"));
     let mini = body["data"].as_array().unwrap().iter().find(|m| m["id"] == "mini").unwrap();
     assert_eq!(mini["source"], "user");
 }

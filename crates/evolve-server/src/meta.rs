@@ -19,7 +19,10 @@ pub async fn dashboard() -> impl IntoResponse {
     )
 }
 
-pub async fn list_models(State(st): State<AppState>) -> Response {
+pub async fn list_models(
+    State(st): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
     // advertised window for auto = largest context in the eligible pool;
     // dynamic-catalog agents (hermes/openrouter-style) read this directly
     let max_window = st
@@ -40,18 +43,25 @@ pub async fn list_models(State(st): State<AppState>) -> Response {
                "description": "intelligent routing, quality-optimized policy",
                "context_length": max_window}),
     ];
-    for m in &st.engine.catalog_snapshot() {
-        data.push(json!({
-            "id": m.id,
-            "object": "model",
-            "owned_by": m.provider,
-            "source": m.source.label(),
-            "context_window": m.context_window,
-            "cost_per_mtok": m.cost.as_ref().map(|c| json!({"input": c.input, "output": c.output})),
-            "tiers": m.tiers,
-            "weight": m.weight,
-            "note": m.source_note,
-        }));
+    // 默认**只暴露路由别名**（2026-10-20 用户裁决）：有些 agent 通过 baseURL
+    // 拉取"这个 provider 提供哪些模型"，把 700+ 上游模型列出去会让人误以为
+    // 可以随便点名——而点名会绕过路由（直连上游），既不参与活跃集/配额闸，
+    // 也拿不到跨账号学习。全目录改为显式 ?catalog=1 / ?full=1（面板与工具用）。
+    let want_catalog = params.contains_key("catalog") || params.contains_key("full");
+    if want_catalog {
+        for m in &st.engine.catalog_snapshot() {
+            data.push(json!({
+                "id": m.id,
+                "object": "model",
+                "owned_by": m.provider,
+                "source": m.source.label(),
+                "context_window": m.context_window,
+                "cost_per_mtok": m.cost.as_ref().map(|c| json!({"input": c.input, "output": c.output})),
+                "tiers": m.tiers,
+                "weight": m.weight,
+                "note": m.source_note,
+            }));
+        }
     }
     (axum::Json(json!({"object": "list", "data": data}))).into_response()
 }
