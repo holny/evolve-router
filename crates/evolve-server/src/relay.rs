@@ -1420,15 +1420,18 @@ pub(crate) fn price_gated_retries(
 /// 上下文真超限判定（2026-10-20）：目录里没有任何窗口能容纳 `est + output 预留`
 /// 时返回 `(预算, est)`，调用方构造**业界标准形态**的上下文超限错误——
 /// opencode / qwen-code / pi 等客户端解析后触发自动压缩，而不是对着
-/// "全灭"盲目重试。预算 = 可用最大窗口 − output 预留（Agent 侧同样不等
-/// 真满才压缩，window−output 才是有效输入容量）。
+/// "全灭"盲目重试。
+/// 预算 = 可用最大窗口 − output 预留。预留取 **20K**（claude-code 实测值
+/// SUMMARY_RESERVE = COMPACT_MAX_OUTPUT_TOKENS，qwen-code 设计文档全文沿用：
+/// "模型受 maxOutputTokens 硬限制约束，输出不可能超出 20K，reserve 不需要
+/// 额外 safety margin"）；请求显式要了更大 max_tokens 时预留随之放大。
 pub(crate) fn context_overflow(
     est: u64,
     max_output_req: Option<u64>,
     filtered: &[evolve_core::types::FilteredOut],
     max_catalog_window: u64,
 ) -> Option<(u64, u64)> {
-    let out_reserve = max_output_req.unwrap_or(16_384).clamp(1024, 65_536);
+    let out_reserve = max_output_req.unwrap_or(20_000).clamp(20_000, 65_536);
     let mut max_window = max_catalog_window;
     for f in filtered {
         if let Some((_, bound)) = context_gate_numbers(&f.cause) {
