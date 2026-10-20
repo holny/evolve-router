@@ -34,6 +34,9 @@ pub struct Telemetry {
     pub decision_ms: Option<u64>,
     /// 其中任务判定阶段耗时
     pub judge_ms: Option<u64>,
+    /// 本轮请求的**裸** token 估算（未会话校准）——流式收尾时与实测
+    /// prompt_tokens 一起入会话账本（非流式路径在 relay 内自记）
+    pub est_raw: Option<u64>,
 }
 
 impl Telemetry {
@@ -472,6 +475,14 @@ impl Drop for Finalizer {
             }
         };
         t.usage = self.acc.usage.clone();
+        // 会话真实上下文入账（2026-10-20）：流式请求的 usage 在这里才落定——
+        // 此前只有非流式路径入账本，流式会话永远无锚点 → 校准堆叠永远生效
+        if let Some(u) = &t.usage
+            && let Some(raw) = t.est_raw
+        {
+            let pt = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            crate::relay::record_session_tokens(&t.session.clone(), raw, pt);
+        }
         if self.acc.finish_reason.is_some() || !self.acc.content.is_empty() || !self.acc.tool_calls.is_empty() {
             let pseudo = self.acc.build_response();
             let mut q: ResponseQuality = crate::quality::analyze_response(&self.request, &pseudo);

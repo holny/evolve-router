@@ -813,6 +813,7 @@ pub async fn chat_completions(
             preprocess_ms: Some(preprocess_ms),
             decision_ms: Some(decision_ms),
             judge_ms: Some(decision.judge_ms),
+            est_raw: Some(est_raw),
             extra: {
                 let mut ex = json!({
                     "reason": decision.reason,
@@ -1120,6 +1121,7 @@ pub async fn chat_completions(
             preprocess_ms: None,
             decision_ms: None,
             judge_ms: None,
+            est_raw: None,
         };
         crate::stream::finalize_event(&st.events, &st.flywheel.clone(), &st.quota, &st.bus, &telem);
     }
@@ -1777,7 +1779,7 @@ fn session_calibrated_est(session: &str, body_est: u64) -> (u64, bool) {
     (grown.clamp(body_est, body_est.saturating_mul(3)), true)
 }
 
-fn record_session_tokens(session: &str, body_est: u64, real_prompt: u64) {
+pub(crate) fn record_session_tokens(session: &str, body_est: u64, real_prompt: u64) {
     const CAP: usize = 1024;
     if body_est == 0 || real_prompt == 0 {
         return;

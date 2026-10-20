@@ -417,6 +417,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             preprocess_ms: Some(preprocess_ms),
             decision_ms: Some(decision_ms),
             judge_ms: Some(decision.judge_ms),
+            est_raw: Some(est),
             extra: Some(json!({
                 "reason": decision.reason,
                 "scores": decision.scores,
