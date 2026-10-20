@@ -385,8 +385,15 @@ pub async fn chat_completions(
             skipped.push(format!("{cand}(provider {} account-level failure)", record.provider));
             continue;
         }
-        if dead_routes.contains(&record.base_url) {
-            skipped.push(format!("{cand}(route {} network failure)", record.base_url));
+        // 路由粒度 = (base_url, 账号)：同 baseURL 的双订阅（不同 apiKey）是
+        // 独立账号——一个账号的传输失败不该连坐另一个（2026-10-20 实证：一次
+        // 传输失败把两个订阅的免费模型全拉黑 → 只剩欠费户 → 全灭）
+        let route_key = format!("{}|{}", record.base_url, record.provider);
+        if dead_routes.contains(&route_key) {
+            skipped.push(format!(
+                "{cand}(route {} network failure, account {})",
+                record.base_url, record.provider
+            ));
             continue;
         }
         if let Some(need) = min_context_needed
@@ -491,7 +498,11 @@ pub async fn chat_completions(
                 );
                 // provider 级（连续 3 次才降级；降级后定时探活，不永久沉默）
                 note_provider_issue(&st, &record.provider, &record.base_url, evolve_memory::quota::ProviderIssue::Network);
-                dead_routes.insert(record.base_url.clone());
+                // 端点被兄弟账号证明仍可达（近 2 分钟内有 200）→ 这次传输失败是
+                // 账号/模型级抖动，不拉黑整条路由（否则同账号其他模型也被连坐）
+                if !endpoint_recently_ok(&record.base_url) {
+                    dead_routes.insert(format!("{}|{}", record.base_url, record.provider));
+                }
                 skipped.push(format!("{cand}(transport)"));
                 if primary.as_ref().map(|(p, _, _)| 2 > *p).unwrap_or(true) {
                     primary = Some((2, StatusCode::BAD_GATEWAY, format!("network unreachable ({cand})")));

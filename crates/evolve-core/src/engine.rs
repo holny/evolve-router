@@ -1285,7 +1285,7 @@ mod unknown_window_tests {
     fn sibling_accounts_share_proven_bound() {
         // 同 baseURL + 同 upstream_model 的双订阅：热账号的实证上界 = 冷账号的
         // 实证上界（模型行为是端点×模型的属性，与 apiKey 无关）
-        let cat = unknown_window_catalog();
+        let mut cat = unknown_window_catalog();
         // standard 与 mini 同 base_url + 同 upstream_model → standard 是 mini 的兄弟
         cat.models[1].upstream_model = cat.models[0].upstream_model.clone();
         let e = Engine::new(cat, det_policy(), Box::new(crate::heuristic::HeuristicJudge));
