@@ -56,7 +56,10 @@ pub async fn chat_completions(
         .and_then(PolicyProfile::parse);
 
     let extracted = feat::extract(&parsed);
-    let est = tok::estimate_messages(&extracted.messages, extracted.tools_json.as_deref());
+    let est_raw = tok::estimate_messages(&extracted.messages, extracted.tools_json.as_deref());
+    // 会话真实上下文：上一轮 usage 实测 × 本轮估算增幅（同一估算器 → 偏差抵消），
+    // 见 SESSION_TOKENS。命中账本的会话 est 即真值，引擎侧跳过校准堆叠
+    let (est, est_observed) = session_calibrated_est(&session_key, est_raw);
     let features = feat::features(&extracted, est);
     let tools_sig = tools_signature(&parsed);
     let digest = build_digest(&extracted, features.turn_count);
@@ -186,6 +189,7 @@ pub async fn chat_completions(
                 price_tier_of: &price_tiers,
                 degraded_providers: &degraded,
                 token_ratio_backfill: &st.token_ratio_backfill,
+                est_observed,
                 active: &active_ids,
             };
             let d = st.engine.decide(input);
@@ -946,6 +950,12 @@ pub async fn chat_completions(
             if let Some(v) = &response_value {
                 if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
                     t.usage = Some(u.clone());
+                    // 会话真实上下文入账：下一轮估算的精确基准（2026-10-20）
+                    record_session_tokens(
+                        &session_key,
+                        est_raw,
+                        u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                    );
                 }
                 if let (Some(cost), Some(u)) = (record.cost, t.usage.as_ref()) {
                     let pt = u.get("prompt_tokens").and_then(|x| x.as_f64()).unwrap_or(0.0);
@@ -1660,6 +1670,48 @@ impl CompletionCache {
             }
         }
     }
+}
+
+/// 会话级真实上下文账本：value = (本轮 body_est, 上游实测 prompt_tokens, 更新时刻)。
+/// 上一轮 usage.prompt_tokens 是历史上下文的**精确值**（客户端每轮传全量历史）；
+/// 下一轮 est = 实测 × 本轮估算增幅——估算偏差在同一估算器下完全抵消，无需
+/// 校准系数（用户裁决 2026-10-20）。容量 1024 / TTL 6h，超限淘汰最旧。
+static SESSION_TOKENS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (u64, u64, u64)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// 命中账本 → (实测基准 × 增幅, true)；未命中 → (裸估算, false)。
+/// 下限 = 裸估算（压缩/清史后真实值骤降交给裸估算托底），上限 ×3 防异常。
+fn session_calibrated_est(session: &str, body_est: u64) -> (u64, bool) {
+    const TTL_MS: u64 = 6 * 3600 * 1000;
+    let now = evolve_memory::health::now();
+    let Ok(mut map) = SESSION_TOKENS.lock() else { return (body_est, false) };
+    map.retain(|_, (_, _, ts)| now.saturating_sub(*ts) < TTL_MS);
+    let Some((est_last, real_last, _)) = map.get(session).copied() else {
+        return (body_est, false);
+    };
+    if est_last == 0 || real_last == 0 {
+        return (body_est, false);
+    }
+    let grown = (real_last as f64 * (body_est as f64 / est_last as f64)) as u64;
+    (grown.clamp(body_est, body_est.saturating_mul(3)), true)
+}
+
+fn record_session_tokens(session: &str, body_est: u64, real_prompt: u64) {
+    const CAP: usize = 1024;
+    if body_est == 0 || real_prompt == 0 {
+        return;
+    }
+    let now = evolve_memory::health::now();
+    let Ok(mut map) = SESSION_TOKENS.lock() else { return };
+    if map.len() >= CAP && !map.contains_key(session) {
+        if let Some(oldest) =
+            map.iter().min_by_key(|(_, (_, _, ts))| *ts).map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(session.to_string(), (body_est, real_prompt, now));
 }
 
 /// 逻辑请求指纹：去掉 model（路由可换）与 stream 后的整体 JSON 哈希。

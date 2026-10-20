@@ -88,6 +88,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 price_tier_of: &crate::meta::price_tier_map(&st),
                 degraded_providers: &degraded,
                 token_ratio_backfill: &st.token_ratio_backfill,
+                est_observed: false,
                 active: &crate::meta::active_id_set(&st),
             };
             let d = st.engine.decide(input);

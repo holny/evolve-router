@@ -32,6 +32,10 @@ pub struct RoutingInput<'a> {
     /// 新进程里 telemetry 还没有带 est_tok 的样本，先靠它让容量判定立刻校准；
     /// 一旦该模型积累出新样本，telemetry 的实时比值优先。
     pub token_ratio_backfill: &'a HashMap<String, f32>,
+    /// true = est 已是**会话真实上下文**（上一轮 usage 实测 × 估算增幅，偏差在
+    /// 同一估算器下抵消）——不再叠加 calib×tok_ratio 校准（双重余量曾把 683K
+    /// 真实上下文算成 1.1M need，把 1M 窗口模型挤出局，2026-10-20 实证）
+    pub est_observed: bool,
     /// 活跃集（用户裁决：最近发布/最近使用的前 50；空集 = 不启用过滤）——
     /// 非活跃模型不参与路由（Web 可手动开启，开启自动顶掉最低分者）
     pub active: &'a std::collections::HashSet<String>,
@@ -355,23 +359,29 @@ impl Engine {
         let mut candidates: Vec<ModelRecord> = Vec::new();
         let now = now_epoch_ms();
         for m in &catalog_models {
-            let calib = input
-                .telemetry
-                .get(&m.id)
-                .and_then(|t| t.calibration)
-                .filter(|c| *c > 0.1)
-                .unwrap_or(1.0);
             // 按模型观测的 token/估算比值修正（成功样本中位数）：纯中文偏高、
             // 代码/JSON/工具输出偏低（实测大会话低估 1.5×）。这一步只影响**容量类**
-            // 判定（上下文窗口 / 配额），不改变展示的原始估算
-            let tok_ratio = input
-                .telemetry
-                .get(&m.id)
-                .and_then(|t| t.token_ratio())
-                .or_else(|| input.token_ratio_backfill.get(&m.id).copied())
-                .unwrap_or(1.0)
-                .clamp(0.5, 2.5);
-            let m_est = ((est as f32 * calib * tok_ratio) as u64).max(est / 2);
+            // 判定（上下文窗口 / 配额），不改变展示的原始估算。
+            // est_observed=true 时 est 已是会话实测上下文 × 增幅——校准全部跳过，
+            // 否则双重余量（2026-10-20 实证：把大会话的全部候选挤出局）
+            let m_est = if input.est_observed {
+                est
+            } else {
+                let calib = input
+                    .telemetry
+                    .get(&m.id)
+                    .and_then(|t| t.calibration)
+                    .filter(|c| *c > 0.1)
+                    .unwrap_or(1.0);
+                let tok_ratio = input
+                    .telemetry
+                    .get(&m.id)
+                    .and_then(|t| t.token_ratio())
+                    .or_else(|| input.token_ratio_backfill.get(&m.id).copied())
+                    .unwrap_or(1.0)
+                    .clamp(0.5, 2.5);
+                ((est as f32 * calib * tok_ratio) as u64).max(est / 2)
+            };
             // 订阅方案预算硬保护：消耗超 95% 直接出局（留最后余量给硬任务）
             let p_key = crate::plans::plan_key_for(&m.base_url)
                 .and_then(|k| input.plan_pressure.get(k));
@@ -1325,6 +1335,7 @@ mod tests {
             // 测试默认按"工具延续"构造（粘性用例）；专门验证新用户消息的用例
             // 用 input_with(...) 覆盖
             continues_tools: true,
+            est_observed: false,
             health,
             telemetry: &EMPTY_TELEM,
             quota: &EMPTY_QUOTA,
