@@ -1182,11 +1182,26 @@ pub async fn chat_completions(
         (StatusCode::BAD_REQUEST, Bytes::from(body))
     } else if let Some((_, pstatus, plabel)) = primary.clone() {
         // 配额/上下文类主因的语义状态码优先于兜底段的 4xx
-        let status = if pstatus.as_u16() == 502 { status } else { pstatus };
+        // 容量类主因（欠费 no credit / 配额枯竭 quota exhausted）→ 统一用 **429**
+        // 表达"此刻全池无容量，请退避后重试"：上游的 402 是**不可重试**的硬错误，
+        // Agent 框架会直接判死整轮（2026-10-20 实证：OCR 评审因 402 no credit
+        // 四连败 → 整轮失败）；429 是各家都会指数退避重试的信号，额度恢复后自愈。
+        // 显式点名路径不走这里（direct_raw 分支保留上游原状态码，语义才诚实）。
+        let capacity_exhausted = plabel == "no credit" || plabel == "quota exhausted";
+        let status = if capacity_exhausted {
+            StatusCode::TOO_MANY_REQUESTS
+        } else if pstatus.as_u16() == 502 {
+            status
+        } else {
+            pstatus
+        };
         let body = json!({
             "error": {
-                "message": format!("all {} candidate route(s) failed — primary cause: {}", decision.chain.len().max(1), plabel),
-                "type": "evolve_all_failed",
+                "message": format!(
+                    "all {} candidate route(s) failed — primary cause: {} (no upstream capacity right now; retry with backoff)",
+                    decision.chain.len().max(1), plabel
+                ),
+                "type": if capacity_exhausted { "rate_limit_error" } else { "evolve_all_failed" },
                 "primary_cause": plabel,
                 "tried": skipped,
             }
@@ -1224,6 +1239,7 @@ pub async fn chat_completions(
             if let Some(sec) = skipped.iter()
                 .filter_map(|s| s.split('(').last().and_then(|t| t.split('s').next()).and_then(|n| n.parse::<u64>().ok()))
                 .max()
+                .map(|s| s.min(300)) // 封顶 5 分钟：退避超过单轮预算只会让整轮被掐
             {
                 if let Ok(hv) = axum::http::HeaderValue::from_str(&sec.to_string()) {
                     resp.headers_mut().insert("retry-after", hv);

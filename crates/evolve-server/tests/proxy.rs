@@ -449,6 +449,37 @@ async fn chain_exhausted_sweeps_out_of_chain_models() {
 }
 
 #[tokio::test]
+async fn capacity_exhaustion_answers_429_not_hard_402() {
+    // 容量枯竭（欠费 402 / 配额 429）对 Agent 应表达为"暂时无容量，退避重试"：
+    // 上游 402 是不可重试的硬错误，Agent 框架会直接判死整轮（2026-10-20 实证：
+    // OCR 评审 402 no credit 四连败 → 整轮失败）。→ 统一 429 + rate_limit_error
+    // 上游对所有模型一律 402（无余额）→ 路由全灭
+    let app_up = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|_body: axum::body::Bytes| async move {
+            axum::http::Response::builder()
+                .status(402)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"error":{"message":"Insufficient Balance"}}"#))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app_up).await.unwrap(); });
+
+    let mut cfg = test_config(port);
+    cfg.data.dir = std::env::temp_dir().join(format!("mr-test-cap-{}", std::process::id())).to_string_lossy().into_owned();
+    let st: AppState = build_state(cfg);
+    let app = build_router(st);
+    let (status, headers, raw) = send(app, chat_request("auto", json!("你好"), json!({}))).await;
+    let body = String::from_utf8_lossy(&raw);
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body: {body}");
+    assert!(body.contains("rate_limit_error"), "body: {body}");
+    assert!(headers.get("retry-after").is_some(), "retry-after must guide the backoff");
+}
+
+#[tokio::test]
 async fn sweep_is_constraint_aware_and_rotates_across_providers() {
     // 2026-10 事故复刻：主链全灭后，兜底段旧实现盲取"目录前 6 个"——
     // ① 会把窗口放不下的模型拖进来白试（27 万 token 请求撞 200k 窗口的模型）
