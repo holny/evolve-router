@@ -358,28 +358,54 @@ impl Engine {
         let mut quota_tight: Vec<(String, u64, u64)> = Vec::new();
         let mut candidates: Vec<ModelRecord> = Vec::new();
         let now = now_epoch_ms();
+        // 兄弟账号索引（2026-10-20）：同 baseURL + 同 upstream_model 的模型是
+        // "同 plan 双订阅"（不同 apiKey）——模型行为是端点×模型的属性，与 key
+        // 无关 → 遥测经验（校准/比值/实证上界）**共享**；配额与欠费冷却仍按
+        // apiKey 独立。冷账号即刻继承热账号的学习，消除冷启动误判
+        let mut sib_map: std::collections::HashMap<(String, String), Vec<String>> =
+            std::collections::HashMap::new();
+        for x in &catalog_models {
+            sib_map
+                .entry((x.base_url.clone(), x.upstream_model.clone()))
+                .or_default()
+                .push(x.id.clone());
+        }
         for m in &catalog_models {
             // 按模型观测的 token/估算比值修正（成功样本中位数）：纯中文偏高、
             // 代码/JSON/工具输出偏低（实测大会话低估 1.5×）。这一步只影响**容量类**
             // 判定（上下文窗口 / 配额），不改变展示的原始估算。
             // est_observed=true 时 est 已是会话实测上下文 × 增幅——校准全部跳过，
             // 否则双重余量（2026-10-20 实证：把大会话的全部候选挤出局）
+            let sib_ids = sib_map
+                .get(&(m.base_url.clone(), m.upstream_model.clone()))
+                .cloned()
+                .unwrap_or_default();
             let m_est = if input.est_observed {
                 est
             } else {
-                let calib = input
-                    .telemetry
-                    .get(&m.id)
-                    .and_then(|t| t.calibration)
+                // 校准/比值取兄弟（含自身）最大值：任一账号的实测即全体可用
+                let calib = sib_ids
+                    .iter()
+                    .filter_map(|id| input.telemetry.get(id).and_then(|t| t.calibration))
                     .filter(|c| *c > 0.1)
-                    .unwrap_or(1.0);
-                let tok_ratio = input
-                    .telemetry
-                    .get(&m.id)
-                    .and_then(|t| t.token_ratio())
-                    .or_else(|| input.token_ratio_backfill.get(&m.id).copied())
-                    .unwrap_or(1.0)
-                    .clamp(0.5, 2.5);
+                    .fold(f32::MIN, f32::max);
+                let calib = if calib > 0.1 { calib } else { 1.0 };
+                let mut ratios: Vec<f32> = sib_ids
+                    .iter()
+                    .filter_map(|id| input.telemetry.get(id).and_then(|t| t.token_ratio()))
+                    .collect();
+                if ratios.is_empty() {
+                    ratios = sib_ids
+                        .iter()
+                        .filter_map(|id| input.token_ratio_backfill.get(id).copied())
+                        .collect();
+                }
+                let tok_ratio = if ratios.is_empty() {
+                    1.0
+                } else {
+                    ratios.iter().copied().fold(f32::MIN, f32::max)
+                }
+                .clamp(0.5, 2.5);
                 ((est as f32 * calib * tok_ratio) as u64).max(est / 2)
             };
             // 订阅方案预算硬保护：消耗超 95% 直接出局（留最后余量给硬任务）
@@ -453,10 +479,11 @@ impl Engine {
                 // a successful request at P tokens proves window >= P, so the
                 // model may take any request with est <= proven bound. Below
                 // the proven bound (or no proof yet) -> stay out (宁可错过).
-                let proven = input
-                    .telemetry
-                    .get(&m.id)
-                    .and_then(|t| t.max_accepted)
+                // 实证上界同享兄弟：任一账号成功接受过 P tokens = 模型本身能接 P
+                let proven = sib_ids
+                    .iter()
+                    .filter_map(|id| input.telemetry.get(id).and_then(|t| t.max_accepted))
+                    .max()
                     .unwrap_or(0);
                 // 与 context_fits 同步：m_est 已含校准×比值余量，不再叠 ×1.1
                 if m_est.saturating_add(max_output) > proven {
@@ -1252,6 +1279,29 @@ mod unknown_window_tests {
         let _d = digest("你好");
         let dec = decide_tel("你好", 500, &tel);
         assert_eq!(dec.chosen, "mini", "proven bound admits small request; reason: {}", dec.reason);
+    }
+
+    #[test]
+    fn sibling_accounts_share_proven_bound() {
+        // 同 baseURL + 同 upstream_model 的双订阅：热账号的实证上界 = 冷账号的
+        // 实证上界（模型行为是端点×模型的属性，与 apiKey 无关）
+        let cat = unknown_window_catalog();
+        // standard 与 mini 同 base_url + 同 upstream_model → standard 是 mini 的兄弟
+        cat.models[1].upstream_model = cat.models[0].upstream_model.clone();
+        let e = Engine::new(cat, det_policy(), Box::new(crate::heuristic::HeuristicJudge));
+        let d = digest("你好");
+        let mut tel = TelemetrySnapshot::new();
+        // 实证只挂在 standard（热账号）上；mini（冷账号）自己没有
+        tel.insert("standard".into(), ModelTelemetry { max_accepted: Some(5_000), ..Default::default() });
+        let h = HealthMap::new();
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.telemetry = &tel;
+        let dec = e.decide(inp);
+        assert!(
+            !dec.filtered.iter().any(|f| f.model == "mini" && f.cause.contains("proven max accepted 0")),
+            "cold sibling must inherit the proven bound; reason: {}",
+            dec.reason
+        );
     }
 
     #[test]
