@@ -13,6 +13,10 @@ public struct PanelView: View {
     /// 2026-10-17，与 .help() 同族失效；Quit 曾因此永远退不出）→ 确认流程
     /// 用面板内嵌行实现，Apple 对话框一律不用
     @State private var pendingAction: (() -> Void)?
+    /// Quit 已受理（排空在走）：按钮变禁用态给反馈，防"点了没反应"再点
+    @State private var quitting = false
+    /// Restart 已受理（停+拉起 ~10s）：按钮禁用防重复点
+    @State private var restarting = false
 
     /// 预览/截图模式：不触发首帧实时轮询，保证种子数据稳定渲染（README 图可复现）
     public var previewSeed: Bool
@@ -27,25 +31,61 @@ public struct PanelView: View {
     }
 
     public var body: some View {
+        // ⚠ 固定高度（2026-10-19 实证）：面板此前只有 .frame(width:) 没有高度，
+        // MenuBarExtra 场景每次重测量（图标呼吸 2Hz、任何发布）都要遍历
+        // LazyVStack ForEach 全部行求内容高 → 每次 ~0.5s 主线程阻塞，面板关着
+        // 也卡死（/tmp/er_busy.txt：busy 时 flushTransactions 1636 vs idle 1）。
+        // 宽高都定死后 _FrameLayout.sizeThatFits 短路返回，测量 O(1)。
+        // 结构（2026-10-19 二改）：数据卡放滚动区，controls/在飞确认条**钉底**——
+        // 此前确认条排在滚动内容末尾，固定高度下被推出可视区 → 有在飞时点
+        // Restart/Quit "点了没反应"（确认条根本看不见）。
         VStack(spacing: 10) {
-            header
-            decisionBanner
-            metricsCard
-            if !state.providers.isEmpty { providersCard }
-            if !state.recent.isEmpty { decisionsCard }
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 10) {
+                    header
+                    decisionBanner
+                    metricsCard
+                    if !state.providers.isEmpty {
+                        // Providers 行的 tokens/速率/TTFT 也是窗口口径 → 切换中同样置灰
+                        providersCard
+                            .opacity(state.windowLoading ? 0.5 : 1)
+                    }
+                    if !state.recent.isEmpty { decisionsCard }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 14)
+                .padding(.bottom, 4)
+            }
             controls
-            if pendingAction != nil { inflightConfirmBar }
+                .padding(.horizontal, 14)
+            if pendingAction != nil {
+                inflightConfirmBar
+                    .padding(.horizontal, 14)
+            }
         }
-        // 页脚（控制区）与页头留白对齐：菜单栏窗口底部无系统内边距，
-        // 与页头同值时按钮会贴住下边框（实测页头 15pt / 页脚 8pt）→ 页脚加宽
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 26)
-        .frame(width: 336)
-        .task {
-            if previewSeed { return }
-            await state.pollLive()
-            await state.pollData()
+        .padding(.bottom, 14)
+        // 高度对齐内容自然高度（686 ≈ 头部40+指标55+providers215+recent242+
+        // controls62+间距边距64）：定高了测量才 O(1)，但高度必须贴着内容——
+        // 多了在钉底按钮上方露缝（723 实测多 ~37pt），少了滚动。decisionBanner
+        // 出现的少见态由外层滚动兜底。
+        .frame(width: 336, height: 686)
+        // 面板开合门控（2026-10-19）：关闭期间 AppState 只养快照（零发布），
+        // 打开瞬间 flush + 立即拉一轮最新——菜单栏图标不再被隐藏面板的
+        // 每秒全量重测量拖死；预览/截图模式（previewSeed）不打扰种子数据
+        .onAppear {
+            guard !previewSeed else { return }
+            state.setPanelVisible(true)
+            // 延迟刷新：首帧先用 snapshot 呈现并落定布局，800ms 后再拉一轮最新
+            // （250ms 会撞上首帧渲染——每次打开都变成“布局+渲染×2”，抓包实证）；
+            // 随后 dataTask 每 3s 持续刷新
+            Task {
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                await state.pollData()
+            }
+        }
+        .onDisappear {
+            guard !previewSeed else { return }
+            state.setPanelVisible(false)
         }
     }
 
@@ -134,10 +174,8 @@ public struct PanelView: View {
 
     /// 在飞请求摘要（谁在飞、飞了多久）——重启提示与悬停都用它
     private var inflightSummary: String {
-        state.inflightDetail.prefix(3).compactMap { d -> String? in
-            let model = (d["model"] as? String) ?? "?"
-            let age = Int(((d["age_ms"] as? Double) ?? 0) / 1000)
-            return "\(model) · \(age)s"
+        state.inflightDetail.prefix(3).map { r in
+            "\(r.model) · \(r.ageSec)s"
         }.joined(separator: "\n")
     }
 
@@ -240,14 +278,19 @@ public struct PanelView: View {
 
     private var metricsCard: some View {
         HStack(spacing: 14) {
-            metric("gauge.with.needle", label: t("reqs"), value: "\(state.requests)")
-            metric("arrow.up.right", label: t("success_rate"), value: "\(state.successRate)%")
-            metric("number", label: t("tokens"), value: state.tokensK)
+            // 切换窗口时三个数字置灰过渡（避免“标签已换、数字还是旧的”被当成错数据）
+            Group {
+                metric("gauge.with.needle", label: t("reqs"), value: "\(state.requests)")
+                metric("arrow.up.right", label: t("success_rate"), value: "\(state.successRate)%")
+                metric("number", label: t("tokens"), value: state.tokensK)
+            }
+            // ⚠ 不挂 .animation——插值属性每帧重建样式化文本 display list；
+            // 置灰用瞬时切换即可
+            .opacity(state.windowLoading ? 0.35 : 1)
             Spacer(minLength: 0)
             // 窗口标签即切换钮（用户裁决）：今天 ⇄ 昨天——同时作用于顶部指标与 Providers 行
             Button {
-                state.statWindowToday.toggle()
-                Task { await state.pollData() }
+                state.setStatWindow(!state.statWindowToday)
             } label: {
                 Text(state.statWindowToday ? "today" : "yesterday")
                     .font(.system(size: 9, weight: .medium))
@@ -278,7 +321,9 @@ public struct PanelView: View {
             Text(value)
                 .font(.system(size: 16, weight: .semibold, design: .rounded))
                 .monospacedDigit()
-                .contentTransition(.numericText())
+                // ⚠ 不加 contentTransition(.numericText())——数值动画每帧重建
+                // 文本 display list（ShapeStyledDisplayList/renderKeyedText 全链
+                // 分配，2026-10-19 采样实证），3s 一轮轮询下持续白耗主线程
         }
     }
 
@@ -761,12 +806,22 @@ public struct PanelView: View {
             }
             HStack(spacing: 5) {
                 gatewayChip
-                textChip(label: t("restart"), tint: .accentColor, help: t("restart_help")) {
-                    confirmIfInflight { Task { await restartGateway() } }
+                textChip(label: restarting ? t("restarting") : t("restart"),
+                         tint: restarting ? .secondary : .accentColor, help: t("restart_help"),
+                         disabled: restarting) {
+                    confirmIfInflight {
+                        restarting = true
+                        Task {
+                            await restartGateway()
+                            restarting = false
+                        }
+                    }
                 }
-                textChip(label: t("quit"), tint: .red, help: t("quit"), danger: true) {
-                    // 不走 Apple 对话框（MenuBarExtra 内不可点）→ 直接退出；
-                    // 网关 SIGTERM 会等排空，不必前置在飞确认
+                textChip(label: quitting ? t("quitting") : t("quit"),
+                         tint: quitting ? .secondary : .red, help: t("quit"),
+                         danger: !quitting, disabled: quitting) {
+                    // 网关 SIGTERM 会等排空（≤3s），quitting 态给反馈防重复点
+                    quitting = true
                     quitAll()
                 }
                 // Autostart 与上面三个按钮**同一行**：为此收紧内距/字号
@@ -787,7 +842,8 @@ public struct PanelView: View {
 
     /// 无图标文字胶囊（控制行用：336pt 宽度下图标会挤掉 Autostart 文字）
     private func textChip(label: String, tint: Color, help: String,
-                          danger: Bool = false, action: @escaping () -> Void) -> some View {
+                          danger: Bool = false, disabled: Bool = false,
+                          action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
@@ -795,10 +851,11 @@ public struct PanelView: View {
                 .padding(.horizontal, 9)
                 .padding(.vertical, 6)
                 .frame(maxWidth: .infinity)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.055)))
-                .foregroundStyle(tint)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(disabled ? 0.03 : 0.055)))
+                .foregroundStyle(tint.opacity(disabled ? 0.55 : 1))
         }
         .buttonStyle(.plain)
+        .disabled(disabled)
     }
 
     private func chip(icon: String, label: String, tint: Color, help: String,
@@ -972,9 +1029,15 @@ public struct PanelView: View {
     // MARK: - 操作
 
     /// 有在飞请求时的确认（重启会**排空**它们，但用户应当知情；60s 上限后强退）
+    /// 确认条已亮时再点同一按钮 = 直接执行（第二击即确认，不用挪手去找橙色按钮）
     private func confirmIfInflight(_ action: @escaping () -> Void) {
         if state.inflight > 0 {
-            pendingAction = action
+            if let armed = pendingAction {
+                pendingAction = nil
+                armed()
+            } else {
+                pendingAction = action
+            }
         } else {
             action()
         }
@@ -1020,8 +1083,11 @@ public struct PanelView: View {
     /// 面板"Restart"：停掉网关子进程再拉起（非 [decision] 配置改动靠它生效）
     /// ⚠ stop() 会置 userStopped=true（Stop 修复），重启是"停了马上再要"的
     /// 显式意图 → 拉起前必须清除，否则 ensureRunning 直接 return（实测回归）
+    /// ⚠ stop() 只管 owned 子进程（owned=false 时 no-op）→ 再叠加 pgrep 兜底，
+    /// 否则"外部实例"误判态下 Restart 永远无效（2026-10-19 实证）
     private func restartGateway() async {
         await gateway.stop()
+        await gateway.stopGatewayWithSigterm()
         try? await Task.sleep(nanoseconds: 600_000_000)
         gateway.clearUserStopped()
         await gateway.ensureRunning()
@@ -1057,7 +1123,7 @@ public struct PanelView: View {
             // 无论本 app 是否 spawn 过网关，退出前都停掉它（守卫在 stop 内部：
             // owned=false 且无子进程 → 直接返回，不会误杀外部实例）
             await GatewayProcess.shared.stop()
-            GatewayProcess.shared.stopGatewayWithSigterm()
+            await GatewayProcess.shared.stopGatewayWithSigterm()
             // launchd KeepAlive：SIGKILL 会被当成"崩溃"而自动拉起——
             // 正常退出必须走 NSApp.terminate 自身，不能用 kill
             NSApp.terminate(nil)

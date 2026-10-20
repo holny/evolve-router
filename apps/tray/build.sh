@@ -76,9 +76,12 @@ if [[ "${1:-}" == "--install" ]]; then
     cp -R "build/${APP_NAME}.app" /Applications/
     TRAY_PLIST="$HOME/Library/LaunchAgents/ai.evolve-router.tray.plist"
     mkdir -p "$HOME/Library/LaunchAgents"
-    # 用户裁决 2026-10-18：不用 zsh 监督循环（外部进程依赖）。
-    # launchd KeepAlive 在 macOS 26 实测复活不可靠（SIGKILL/SIGABRT 均未复活），
-    # 但 app 死亡时网关子进程活不受影响、下次登录 RunAtLoad 自愈——可接受的损失
+    # launchd KeepAlive（2026-10-19 修正语义）：SuccessfulExit=**false** = 仅在
+    # 非零退出（崩溃）时拉起、干净退出（Quit/exit 0）不复活。此前写成 true，
+    # 语义完全颠倒——点 Quit 正常退出反被 launchd 立刻拉起（实证 last exit 0
+    # 且 runs 1→2），用户看到"退出了又自己打开"。
+    # 不用 zsh 监督循环（外部进程依赖）。app 死亡时网关子进程活不受影响、
+    # 下次登录 RunAtLoad 自愈——可接受的损失
     cat > "$TRAY_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -90,7 +93,7 @@ if [[ "${1:-}" == "--install" ]]; then
         <string>/Applications/${APP_NAME}.app/Contents/MacOS/${APP_NAME}</string>
     </array>
     <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><dict><key>SuccessfulExit</key><true/></dict>
+    <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 </dict>
 </plist>
 PLIST

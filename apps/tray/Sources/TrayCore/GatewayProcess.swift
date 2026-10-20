@@ -31,10 +31,15 @@ public final class GatewayProcess: ObservableObject {
     /// 幂等启动：外部健康实例（1s×3 连续健康）→ 30s 内判为外部只读；
     /// 一旦出现非健康 → spawnInFlight 抢占式接管 spawn。pollLive 每秒驱动、
     /// 无节流死锁（旧 lastAttempt 被每秒调用刷新，spawn 永不触发——实证修复）。
+    /// ⚠ spawnInFlight 必须在健康探测**之前**置位（2026-10-19 实证：两个并发
+    /// ensureRunning 都穿过旧检查 → 双 spawn → 绑定失败的那个把 child 覆盖成
+    /// 死进程 → 自愈误判"外部实例" → Restart/Stop 从此静默失效）。
     public func ensureRunning() async {
         if userStopped { return }
         if owned, child?.isRunning == true { return }
         if spawnInFlight { return }
+        spawnInFlight = true
+        defer { spawnInFlight = false }
         if let eu = externalUntil, Date() < eu { return }
         var healthyStreak = 0
         for _ in 0..<3 {
@@ -46,8 +51,6 @@ public final class GatewayProcess: ObservableObject {
             externalUntil = Date().addingTimeInterval(30)
             return
         }
-        spawnInFlight = true
-        defer { spawnInFlight = false }
         await spawn()
     }
 
@@ -78,6 +81,12 @@ public final class GatewayProcess: ObservableObject {
         } catch {
             tracingFallback("spawn failed: \(error)")
             return false
+        }
+        // 防双开兜底：已有存活子进程时立刻终止新 spawn 的副本（并发窗口残留）
+        if let old = child, old.isRunning {
+            tracingFallback("duplicate spawn suppressed (existing child alive)")
+            p.terminate()
+            return true
         }
         child = p
         owned = true
@@ -120,9 +129,11 @@ public final class GatewayProcess: ObservableObject {
 
     /// Quit 时的兜底：本 app 实例可能不是网关的父进程（launchd RunAtLoad 直启
     /// 面板、外部脚本起网关），`owned=false` 时 stop() 是 no-op。按进程名找到
-    /// `evo-router serve` 发 SIGTERM（等 8s 排空，与网关自身的 drain 一致），
+    /// `evo-router serve` 发 SIGTERM（等 2s 排空，与网关自身的 drain 一致），
     /// 仍存活才 SIGKILL。找不到/已退出都是 no-op。
-    public func stopGatewayWithSigterm() {
+    /// ⚠ 必须 async：此前是同步 usleep 循环，@MainActor 下最多阻塞主线程 8s
+    /// （2026-10-19 实证：点 Quit 全程冻结）。
+    public func stopGatewayWithSigterm() async {
         userStopped = true
         let out = Process()
         out.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
@@ -137,19 +148,21 @@ public final class GatewayProcess: ObservableObject {
             let pids = String(decoding: data, as: UTF8.self)
                 .split(separator: "\n")
                 .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
-            for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+            let targets = pids.filter { $0 != ProcessInfo.processInfo.processIdentifier }
+            for pid in targets {
                 kill(pid, SIGTERM)
             }
-            // 给排空留时间（60s 上限之内先等 8s，拖太久反而像"退不出"）
-            for _ in 0..<80 {
-                usleep(100_000)
+            guard !targets.isEmpty else { return }
+            // 给排空留时间（2s：拖太久反而像"退不出"；超时 SIGKILL 兜底）
+            for _ in 0..<20 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
                 var alive = false
-                for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+                for pid in targets {
                     if kill(pid, 0) == 0 { alive = true }
                 }
                 if !alive { return }
             }
-            for pid in pids where pid != ProcessInfo.processInfo.processIdentifier {
+            for pid in targets {
                 kill(pid, SIGKILL)
             }
         } catch {

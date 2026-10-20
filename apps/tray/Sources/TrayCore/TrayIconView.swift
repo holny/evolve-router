@@ -11,6 +11,9 @@ enum TrayIcon {
     static let fail: NSImage = load("tray-icon-color-yellow@2x")
     static let stopped: NSImage = load("tray-icon-color-white@2x")
     static let starting: NSImage = load("tray-icon-color-gray@2x")
+    // 预渲染呼吸态（alpha=0.45）避免每次 pulse 都 CoreGraphics 重绘
+    static let startingBreath: NSImage = breath(TrayIcon.starting, alpha: 0.45)
+    static let busyBreath: NSImage = breath(TrayIcon.success, alpha: 0.45)
 
     private static func load(_ name: String) -> NSImage {
         let url = Bundle.module.url(forResource: name, withExtension: "png")
@@ -20,7 +23,7 @@ enum TrayIcon {
         return img
     }
 
-    /// busy 呼吸：给任意 base 图打 alpha（0.45↔1.0 切换）
+    /// busy/starting 呼吸：给任意 base 图打 alpha（0.45↔1.0 切换）
     static func breath(_ img: NSImage, alpha a: CGFloat) -> NSImage {
         NSImage(size: NSSize(width: 22, height: 22), flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext,
@@ -34,14 +37,15 @@ enum TrayIcon {
 }
 
 public struct TrayIconView: View {
-    @ObservedObject public var state: AppState
+    /// 只观察 IconModel（轻）：面板数据再怎么动，呼吸/换色也只重绘这一张小图
+    @ObservedObject public var icon: IconModel
 
-    public init(state: AppState) {
-        _state = ObservedObject(wrappedValue: state)
+    public init(icon: IconModel) {
+        _icon = ObservedObject(wrappedValue: icon)
     }
 
     public var body: some View {
-        let ns: NSImage = Self.render(state: state.iconState, pulse: state.pulse)
+        let ns: NSImage = Self.render(state: icon.iconState, pulse: icon.pulse)
         Image(nsImage: ns)
             .accessibilityLabel(accessibilityText)
     }
@@ -56,10 +60,10 @@ public struct TrayIconView: View {
         case .stopped:
             return TrayIcon.stopped
         case .starting:
-            return pulse ? TrayIcon.breath(TrayIcon.starting, alpha: 0.45) : TrayIcon.starting
+            return pulse ? TrayIcon.startingBreath : TrayIcon.starting
         case .busy:
             // 路由中固定绿 ER（用户裁决：绿只在路由时显示，请求结束回白）
-            return pulse ? TrayIcon.breath(TrayIcon.success, alpha: 0.45) : TrayIcon.success
+            return pulse ? TrayIcon.busyBreath : TrayIcon.success
         case .fail:
             // idle+失败：黄色 ER（持续到下次请求开始）
             return TrayIcon.fail
@@ -69,7 +73,7 @@ public struct TrayIconView: View {
     }
 
     private var accessibilityText: String {
-        switch state.iconState {
+        switch icon.iconState {
         case .stopped: return "EvolveRouter — " + t("stopped")
         case .fail: return "EvolveRouter — " + t("gateway_err")
         case .success: return "EvolveRouter — " + t("healthy")

@@ -144,6 +144,16 @@ public struct ProviderRow: Identifiable, Equatable {
 
 public enum IconState { case idle, busy, success, fail, stopped, starting }
 
+/// 在飞请求明细（面板专用，Equatable）：age 取整到秒——忙时每秒都会变，
+/// **不直接由 pollLive 每秒发布**（否则面板每秒全量重测量），改由
+/// pollData（3s/30s）统一发布一次；pollLife 只维护非 Published 缓存
+public struct InflightRow: Equatable {
+    public let model: String
+    public let session: String
+    public let agent: String
+    public let ageSec: Int
+}
+
 /// 模型维度行（Providers 卡切到 Model 标签）：同一窗口的逐模型指标，
 /// 与 Provider 行同布局（dot + 名称 + tokens/hit/速率/TTFT）
 /// 模型级健康冷却（/api/health）：剩余时长 + 原因 + 是否属于 provider/账户级
@@ -194,61 +204,18 @@ public struct ModelRow: Identifiable, Equatable {
     }
 }
 
+/// 图标专用轻模型：与面板数据**分源**——pulse 呼吸（忙时 0.5s 一跳）和
+/// lastResult 失败色只打 TrayIconView，不把面板整棵视图图叫醒（2026-10-19
+/// 实证：共享 ObservableObject 下任一字段发布 → 隐藏面板 hosting view 全量
+/// 重测量，主线程被 ForEachChild 布局吃满 → 菜单栏图标假死）
 @MainActor
-public final class AppState: ObservableObject {
+public final class IconModel: ObservableObject {
     public init() {}
 
-    static func payg(from row: [String: Any]) -> PaygBalance? {
-        guard let b = row["payg_balance"] as? [String: Any],
-              let total = (b["total"] as? Double) ?? (b["total"] as? String).flatMap(Double.init) else { return nil }
-        let currency = (b["currency"] as? String) ?? ""
-        let avail = (b["is_available"] as? Bool) ?? true
-        return PaygBalance(currency: currency, total: total, available: avail)
-    }
     @Published public var healthy = true
-    @Published public var external = false
     @Published public var starting = false
     @Published public var inflight = 0
-    /// 决策模型可用性：ok / stale（已配置待重启）/ missing（未配置）——/api/live 每次 1s 轮询现读 env
-    @Published public var decisionStatus = "ok"
-    /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
-    @Published public var version = ""
-    /// 配置热加载状态（/api/live 下发）：非 [decision] 段落改动 → 面板提示重启
-    /// 在飞请求明细（/api/live 的 inflight_detail）：model / session / age_ms
-    @Published public var inflightDetail: [[String: Any]] = []
-    @Published public var configRestartRequired = false
-    @Published public var configRestartReason: String?
-    @Published public var configReloadedAt: Int64?
-    /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
-    @Published public var activeSlots: [String] = []
-    /// 最近一次槽位失败的人读原因（如 "timeout" / "auth failed (401/403)"；空 = 没失败过/已恢复）
-    @Published public var decisionFailReason: String = ""
-    /// 瞬态失败后的指数回退剩余（ms；0 = 不在冷却）/ 连续失败次数——面板显示"自动重试中"
-    @Published public var decisionRetryInMs: Int = 0
-    @Published public var decisionFails: Int = 0
-    /// 决策模型配置的**路径**（backend 字符串：auto / decision_model / heuristic …）
-    /// —— 头行显示"配置了什么"，而不是"最近一次发生了什么"（后者在每条 request 的行内标签）
-    @Published public var decisionBackend: String = "auto"
-    /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
-    @Published public var softPct = 60
-    /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
-    @Published public var statWindowToday = true
-    /// Providers 卡维度：false = Provider（默认），true = Model（逐模型统计）
-    @Published public var modelDim = false
-    /// Model 维度行（当前窗口、按 tokens 降序、前 6 行）
-    @Published public var modelRows: [ModelRow] = []
-    /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
-    @Published public var modelTagMap: [String: ModelTagInfo] = [:]
-    /// 模型级健康冷却（/api/health）：model → 冷却态（原因 + 是否账户级）
-    @Published public var modelCooling: [String: ModelCoolState] = [:]
-
     @Published public var pulse = false
-    @Published public var requests = 0
-    @Published public var successRate = 0
-    @Published public var tokensK = "-"
-    @Published public var recent: [RecentDecision] = []
-    @Published public var providers: [ProviderRow] = []
-    @Published public var lastSync: Date?
     @Published public var lastResult: ChatResult?
     private var seenDecisionIDs = Set<String>()
 
@@ -271,55 +238,258 @@ public final class AppState: ObservableObject {
         lastResult = ChatResult(decisionId: decisionId, status: status, ts: Date())
     }
 
-    /// 仅值变化时写入 @Published——每秒轮询若无条件写新值，unchanged 数据也会
+    /// 仅值变化时写入 @Published（图标路径同样遵守）
+    func upd<T: Equatable>(_ kp: ReferenceWritableKeyPath<IconModel, T>, _ value: T) {
+        if self[keyPath: kp] != value { self[keyPath: kp] = value }
+    }
+}
+
+@MainActor
+public final class AppState: ObservableObject {
+    public init() {}
+
+    static func payg(from row: [String: Any]) -> PaygBalance? {
+        guard let b = row["payg_balance"] as? [String: Any],
+              let total = (b["total"] as? Double) ?? (b["total"] as? String).flatMap(Double.init) else { return nil }
+        let currency = (b["currency"] as? String) ?? ""
+        let avail = (b["is_available"] as? Bool) ?? true
+        return PaygBalance(currency: currency, total: total, available: avail)
+    }
+    @Published public var healthy = true
+    @Published public var external = false
+    @Published public var starting = false
+    @Published public var inflight = 0
+    /// 决策模型可用性：ok / stale（已配置待重启）/ missing（未配置）——/api/live 每次 1s 轮询现读 env
+    @Published public var decisionStatus = "ok"
+    /// 网关版本号（/api/live 下发；展示用，空串 = 未取到）
+    @Published public var version = ""
+    /// 配置热加载状态（/api/live 下发）：非 [decision] 段落改动 → 面板提示重启
+    /// 在飞请求明细（/api/live 的 inflight_detail）：model / session / age
+    @Published public var inflightDetail: [InflightRow] = []
+    @Published public var configRestartRequired = false
+    @Published public var configRestartReason: String?
+    @Published public var configReloadedAt: Int64?
+    /// 当前实际生效的判定槽位（如 ["jev"]；空 = 纯启发式）
+    @Published public var activeSlots: [String] = []
+    /// 最近一次槽位失败的人读原因（如 "timeout" / "auth failed (401/403)"；空 = 没失败过/已恢复）
+    @Published public var decisionFailReason: String = ""
+    /// 瞬态失败后的指数回退剩余（ms；0 = 不在冷却）/ 连续失败次数——面板显示"自动重试中"
+    @Published public var decisionRetryInMs: Int = 0
+    @Published public var decisionFails: Int = 0
+    /// 决策模型配置的**路径**（backend 字符串：auto / decision_model / heuristic …）
+    /// —— 头行显示"配置了什么"，而不是"最近一次发生了什么"（后者在每条 request 的行内标签）
+    @Published public var decisionBackend: String = "auto"
+    /// 配额告警阈值（服务端 plan_soft_pct；与 Web 面板同源，默认 60）
+    @Published public var softPct = 60
+    /// 指标窗口：true = 今天（本地日历日），false = 昨天（用户裁决，面板内可切换）
+    @Published public var statWindowToday = true
+    /// 窗口切换中（旧数据仍显示但置灰）：切换后等新窗口数据落地的过渡态
+    @Published public var windowLoading = false
+    /// Providers 卡维度：false = Provider（默认），true = Model（逐模型统计）
+    @Published public var modelDim = false
+    /// Model 维度行（当前窗口、按 tokens 降序、前 6 行）
+    @Published public var modelRows: [ModelRow] = []
+    /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
+    @Published public var modelTagMap: [String: ModelTagInfo] = [:]
+    /// 模型级健康冷却（/api/health）：model → 冷却态（原因 + 是否账户级）
+    @Published public var modelCooling: [String: ModelCoolState] = [:]
+
+    @Published public var requests = 0
+    @Published public var successRate = 0
+    @Published public var tokensK = "-"
+    @Published public var recent: [RecentDecision] = []
+    @Published public var providers: [ProviderRow] = []
+    @Published public var lastSync: Date?
+
+    // MARK: 面板开合门控（快照模式）
+
+    /// 面板当前是否打开（PanelView onAppear/onDisappear 维护）
+    public private(set) var panelVisible = false
+    /// 关面板期间的数据快照：轮询照算、只写这里（零 objectWillChange）——
+    /// 打开瞬间 flush 一次（单轮 runloop 合并成一次布局）
+    private struct DataSnapshot {
+        var healthy = true
+        var external = false
+        var starting = false
+        var inflight = 0
+        var inflightDetail: [InflightRow] = []
+        var decisionStatus = "ok"
+        var version = ""
+        var configRestartRequired = false
+        var configRestartReason: String?
+        var configReloadedAt: Int64?
+        var activeSlots: [String] = []
+        var decisionFailReason = ""
+        var decisionRetryInMs = 0
+        var decisionFails = 0
+        var decisionBackend = "auto"
+        var softPct = 60
+        var modelCooling: [String: ModelCoolState] = [:]
+        var modelTagMap: [String: ModelTagInfo] = [:]
+        var modelRows: [ModelRow] = []
+        var requests = 0
+        var successRate = 0
+        var tokensK = "-"
+        var recent: [RecentDecision] = []
+        var providers: [ProviderRow] = []
+        var lastSync: Date?
+    }
+    private var pending = DataSnapshot()
+    /// /api/live 刚读到的在飞明细副本（非 Published，仅供 pollData 3s 一次发布）
+    private var latestInflightDetail: [InflightRow] = []
+    /// 网关健康的**实时镜像**（不经发布门控）：pollData 守卫 / 自愈判断用它，
+    /// 与 @Published healthy（面板展示用，可能落后一拍）分离
+    private var healthyNow = true
+    private var externalNow = false
+
+    /// 面板开合：打开瞬间把快照推入 @Published（SwiftUI 单轮合并 → 只一次布局）
+    public func setPanelVisible(_ visible: Bool) {
+        guard visible != panelVisible else { return }
+        panelVisible = visible
+        guard visible else { return }
+        upd(\.healthy, pending.healthy)
+        upd(\.external, pending.external)
+        upd(\.starting, pending.starting)
+        upd(\.inflight, pending.inflight)
+        upd(\.inflightDetail, pending.inflightDetail)
+        upd(\.decisionStatus, pending.decisionStatus)
+        upd(\.version, pending.version)
+        upd(\.configRestartRequired, pending.configRestartRequired)
+        upd(\.configRestartReason, pending.configRestartReason)
+        upd(\.configReloadedAt, pending.configReloadedAt)
+        upd(\.activeSlots, pending.activeSlots)
+        upd(\.decisionFailReason, pending.decisionFailReason)
+        upd(\.decisionRetryInMs, pending.decisionRetryInMs)
+        upd(\.decisionFails, pending.decisionFails)
+        upd(\.decisionBackend, pending.decisionBackend)
+        upd(\.softPct, pending.softPct)
+        upd(\.modelCooling, pending.modelCooling)
+        upd(\.modelTagMap, pending.modelTagMap)
+        upd(\.modelRows, pending.modelRows)
+        upd(\.requests, pending.requests)
+        upd(\.successRate, pending.successRate)
+        upd(\.tokensK, pending.tokensK)
+        upd(\.recent, pending.recent)
+        upd(\.providers, pending.providers)
+        upd(\.lastSync, pending.lastSync)
+    }
+
+    /// 数据落点：面板开着 → 直写 @Published（有变化才发）；关着 → 落快照（零发布）
+    private func put<T: Equatable>(_ kp: ReferenceWritableKeyPath<AppState, T>,
+                                   _ field: WritableKeyPath<DataSnapshot, T>, _ value: T) {
+        if bootstrapMode || panelVisible {
+            upd(kp, value)
+        } else {
+            pending[keyPath: field] = value
+        }
+    }
+
+/// 仅值变化时写入 @Published——每秒轮询若无条件写新值，unchanged 数据也会
     /// 让整棵 body 重建；长跑 6h+ 后触发 SwiftUI AttributeGraph 表爆炸
     /// （SIGABRT / AG grow_region，2026-10-18 05:08 实证）
     private func upd<T: Equatable>(_ kp: ReferenceWritableKeyPath<AppState, T>, _ value: T) {
         if self[keyPath: kp] != value { self[keyPath: kp] = value }
     }
 
-    /// 高频轻量轮询（1s）：in-flight 计数 + 健康，驱动图标与"进行中"
-    public func pollLive() async {
+    /// 启动预热：跑一次完整 pollData 并直接发布，让 published 提前养熟数据，
+    /// 避免首次点击面板时“空白首帧 → flush → 重排 + 窗口变高”的卡顿。
+    private var bootstrapMode = false
+    public func bootstrapPublishedOnce() async {
+        bootstrapMode = true
+        await pollData()
+        bootstrapMode = false
+    }
+
+    /// 切换指标窗口（今天⇄昨天）：置灰过渡 → 拉新窗口数据。
+    /// 并发安全由 pollData 内部的窗口捕获守卫保证（旧窗口的在飞请求
+    /// 返回后不再覆盖新窗口数据）。
+    public func setStatWindow(_ today: Bool) {
+        guard today != statWindowToday else { return }
+        statWindowToday = today
+        upd(\.windowLoading, true)
+        Task { await pollData() }
+    }
+
+    /// 高频轻量轮询（1s）：in-flight 计数 + 健康 + last_chat，驱动图标与"进行中"。
+    /// icon 传入时同步图标模型（healthy/inflight/失败色）——图标呼吸与面板数据
+    /// 分源后互不打扰
+    public func pollLive(icon: IconModel? = nil) async {
         let gw = GatewayProcess.shared
         if case (200, let data)? = try? await get("/api/live"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            upd(\.inflight, (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0))
-            inflightDetail = (obj["inflight_detail"] as? [[String: Any]]) ?? []
-            upd(\.decisionStatus, ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok")
-            upd(\.version, (obj["version"] as? String) ?? version)
+            let infl = (obj["inflight"] as? Int) ?? Int((obj["inflight"] as? Double) ?? 0)
+            icon?.upd(\.inflight, infl)
+            put(\.inflight, \.inflight, infl)
+            // 在飞明细只服务面板：age 每秒都变，**不立即 @Published**（否则面板每秒
+            // 全量重测量）。缓存下来，由 pollData（3s/30s）统一发布一次。
+            var rows: [InflightRow] = []
+            for d in (obj["inflight_detail"] as? [[String: Any]]) ?? [] {
+                let ageMs = (d["age_ms"] as? Double) ?? 0
+                rows.append(InflightRow(model: (d["model"] as? String) ?? "?",
+                                        session: (d["session"] as? String) ?? "",
+                                        agent: (d["agent"] as? String) ?? "",
+                                        ageSec: Int(ageMs / 1000)))
+            }
+            latestInflightDetail = rows
+            put(\.decisionStatus, \.decisionStatus,
+                ((obj["decision"] as? [String: Any])?["status"] as? String) ?? "ok")
+            put(\.version, \.version, (obj["version"] as? String) ?? version)
             let cfgObj = obj["config"] as? [String: Any]
-            upd(\.configRestartRequired, (cfgObj?["restart_required"] as? Bool) ?? false)
-            upd(\.configRestartReason, cfgObj?["restart_reason"] as? String)
-            upd(\.configReloadedAt, (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) })
-            upd(\.activeSlots, (cfgObj?["active_slots"] as? [String]) ?? [])
+            put(\.configRestartRequired, \.configRestartRequired,
+                (cfgObj?["restart_required"] as? Bool) ?? false)
+            put(\.configRestartReason, \.configRestartReason, cfgObj?["restart_reason"] as? String)
+            put(\.configReloadedAt, \.configReloadedAt,
+                (cfgObj?["reloaded_at_ms"] as? Double).map { Int64($0) })
+            put(\.activeSlots, \.activeSlots, (cfgObj?["active_slots"] as? [String]) ?? [])
             let decObj = obj["decision"] as? [String: Any]
-            upd(\.decisionBackend, (decObj?["backend"] as? String) ?? decisionBackend)
-            upd(\.decisionFailReason, ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? "")
-            upd(\.decisionRetryInMs, Int((decObj?["retry_in_ms"] as? Double) ?? 0))
-            upd(\.decisionFails, Int((decObj?["consecutive_fails"] as? Double) ?? 0))
+            put(\.decisionBackend, \.decisionBackend,
+                (decObj?["backend"] as? String) ?? decisionBackend)
+            put(\.decisionFailReason, \.decisionFailReason,
+                ((decObj?["last_fail"] as? [String: Any])?["label"] as? String) ?? "")
+            put(\.decisionRetryInMs, \.decisionRetryInMs,
+                Int((decObj?["retry_in_ms"] as? Double) ?? 0))
+            put(\.decisionFails, \.decisionFails, Int((decObj?["consecutive_fails"] as? Double) ?? 0))
+            // 图标失败态：服务端增量索引的 last_chat（取代托盘每 3s 拉 /api/events
+            // 60 条重 JSON 的老路径）
+            if let icon,
+               let lc = obj["last_chat"] as? [String: Any],
+               let did = lc["decision_id"] as? String, !did.isEmpty {
+                icon.noteChatEvent(decisionId: did,
+                                   status: (lc["status"] as? Int) ?? Int((lc["status"] as? Double) ?? 0))
+            }
         } else {
-            upd(\.inflight, 0)
+            icon?.upd(\.inflight, 0)
+            put(\.inflight, \.inflight, 0)
         }
         let net = await gw.networkHealthy()
-        upd(\.healthy, net)
-        upd(\.starting, gw.starting || (!net && gw.isChildAlive))
-        upd(\.external, !gw.owned && net)
-        // 自愈：网关不在且非外部实例 → 周期性尝试拉起（ensureRunning 内部 10s 节流）
-        if !net && !external { await gw.ensureRunning() }
+        healthyNow = net
+        externalNow = !gw.owned && net
+        icon?.upd(\.healthy, net)
+        icon?.upd(\.starting, gw.starting || (!net && gw.isChildAlive))
+        put(\.healthy, \.healthy, net)
+        put(\.starting, \.starting, gw.starting || (!net && gw.isChildAlive))
+        put(\.external, \.external, externalNow)
+        // 自愈：网关不在且非外部实例 → 周期性尝试拉起（ensureRunning 内部 10s 节流）；
+        // 判断用实时镜像，不读可能落后一拍的 @Published
+        if !net && !externalNow { await gw.ensureRunning() }
     }
 
-    /// 低频明细轮询（3s）：统计/Provider/事件
+    /// 低频明细轮询：统计/Provider/事件。面板开着 3s 一轮；关着降频 30s
+    /// 且只写快照（零发布、零布局），打开瞬间 flush 即见最新
     public func pollData() async {
-        guard healthy else { return }
+        guard healthyNow else { return }
         var models: [String: Any] = [:]
         // 指标窗口（用户裁决）：**今天 / 昨天**（日历口径，各有上下界），顶部指标卡
         // 与 Providers 行共用；可点击切换。服务端不引时区库 → 面板按本地时区算好
         // 两端 epoch，用 `window=range:<s>-<e>` 传。
+        // ⚠ 窗口值在本轮开始捕获：dataTask 3s 轮询与切换请求可能并发，
+        // 旧窗口的请求晚返回会把新窗口数据盖掉 → 落地前必须校验窗口未变。
+        let windowToday = statWindowToday
         let cal = Calendar.current
         let dayStart = cal.startOfDay(for: Date())
         let startMs: Int64
         let endMs: Int64
-        if statWindowToday {
+        if windowToday {
             startMs = Int64(dayStart.timeIntervalSince1970 * 1000)
             endMs = Int64(Date().timeIntervalSince1970 * 1000)
         } else {
@@ -327,6 +497,8 @@ public final class AppState: ObservableObject {
             startMs = Int64(yStart.timeIntervalSince1970 * 1000)
             endMs = Int64(dayStart.timeIntervalSince1970 * 1000)
         }
+        // 在飞明细：pollData 3s/30s 统一发布一次（ageSec 3s 粒度，避免每秒重建）
+        put(\.inflightDetail, \.inflightDetail, latestInflightDetail)
         // 模型级健康（冷却中/原因）：Model 行显示报错状态用；与 stats 同轮询
         if case (200, let hData)? = try? await get("/api/health"),
            let hObj = try? JSONSerialization.jsonObject(with: hData) as? [String: Any],
@@ -346,7 +518,7 @@ public final class AppState: ObservableObject {
                     || msg.lowercased().contains("quota")
                 cool[mid] = ModelCoolState(ms: max(ms, 0), message: msg, accountLevel: accountLevel)
             }
-            upd(\.modelCooling, cool)
+            put(\.modelCooling, \.modelCooling, cool)
         }
         if case (200, let data)? = try? await get("/api/stats?window=range:\(startMs)-\(endMs)"),
            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -364,7 +536,7 @@ public final class AppState: ObservableObject {
                         unusableReason: ((m["usable"] as? Bool) == false)
                             ? ((m["unusable_reason"] as? String) ?? "unusable") : nil)
                 }
-                upd(\.modelTagMap, tm)
+                put(\.modelTagMap, \.modelTagMap, tm)
             }
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
@@ -374,9 +546,13 @@ public final class AppState: ObservableObject {
                 toks += (s["prompt_tokens"] as? Int) ?? Int((s["prompt_tokens"] as? Double) ?? 0)
                 toks += (s["completion_tokens"] as? Int) ?? Int((s["completion_tokens"] as? Double) ?? 0)
             }
-            upd(\.requests, reqs)
-            upd(\.successRate, reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0)
-            upd(\.tokensK, Self.fmtTok(toks))
+            // 窗口未切才落地（防并发切换时旧窗口晚返回覆盖新数据）
+            if windowToday == statWindowToday {
+                put(\.requests, \.requests, reqs)
+                put(\.successRate, \.successRate, reqs > 0 ? Int(round(100.0 * Double(ok) / Double(reqs))) : 0)
+                put(\.tokensK, \.tokensK, Self.fmtTok(toks))
+                upd(\.windowLoading, false)
+            }
         }
         // Model 维度行（Providers 卡 Model 标签）：同一窗口的逐模型指标，
         // 与 Provider 行同布局，按 tokens 降序前 6 行
@@ -403,7 +579,7 @@ public final class AppState: ObservableObject {
         // 模型打标（实时口径）：仅 today 视图挂到行上（yesterday 的标签是当前态，无意义）
         // 上限 50（可在面板内滚动查看）：仍只含用过的模型
         let mappedRows: [ModelRow] = mrows.prefix(50).map { m in
-            let tag = statWindowToday ? modelTagMap[m.id] : nil
+            let tag = windowToday ? modelTagMap[m.id] : nil
             return ModelRow(id: m.id, tok: m.tok, hit: m.hit, rate: m.rate, ttft: m.ttft,
                             requests: m.requests, capability: tag?.capability, priceTier: tag?.priceTier,
                             failPct: m.failPct,
@@ -415,7 +591,10 @@ public final class AppState: ObservableObject {
                             coolingMs: modelCooling[m.id]?.ms ?? 0,
                             coolMsg: modelCooling[m.id].flatMap { $0.accountLevel ? nil : $0.message })
         }
-        upd(\.modelRows, mappedRows)
+                // 窗口未切才落地（防并发切换时旧窗口晚返回覆盖新数据）
+        if windowToday == statWindowToday {
+            put(\.modelRows, \.modelRows, mappedRows)
+        }
 
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
@@ -427,7 +606,7 @@ public final class AppState: ObservableObject {
             // 顶层没有该字段（旧代码在此读 wrapper["soft_pct"]，永不命中，已删）
             for p in arr {
                 if let sp = (p["soft_pct"] as? Double) ?? (p["soft_pct"] as? Int).map(Double.init) {
-                    upd(\.softPct, Int(sp))
+                    put(\.softPct, \.softPct, Int(sp))
                 }
                 let key = (p["key"] as? String) ?? "-"
                 let kind = (p["plan_kind"] as? String) ?? "-"
@@ -546,7 +725,10 @@ public final class AppState: ObservableObject {
             return $0.key < $1.key
         }
         // 上限 12（面板内滚动；此前 6 条是为了不撑高面板）
-        upd(\.providers, Array(rows.prefix(12)))
+                // 窗口未切才落地（防并发切换时旧窗口晚返回覆盖新数据）
+        if windowToday == statWindowToday {
+            put(\.providers, \.providers, Array(rows.prefix(12)))
+        }
         // 最近 10 天（用户裁决 2026-10-17）：窗口过滤交给服务端（kind=chat + since_ms），
         // 否则 limit 会被非 chat 事件吃掉、只回几小时的数据；面板拿到的就是"10 天内
         // 最近 60 条请求"，由 PanelView 放在固定高度的 ScrollView 里滚动查看
@@ -603,17 +785,20 @@ public final class AppState: ObservableObject {
                     totalTokens: totalTok, cachePct: cachePct, failReason: failReason,
                     capability: modelTags?["capability"] as? String,
                     tags: tags))
-                let did = ((ev["decision_id"] as? String) ?? "")
-                if !did.isEmpty { noteChatEvent(decisionId: did, status: status) }
                 if decRows.count >= 60 { break }
             }
-            upd(\.recent, decRows)
+            put(\.recent, \.recent, decRows)
             // 失败态改由 lastResult（持久到下次成功）承载；60s 时限已废
         }
         // 时钟行=分钟走秒（秒级更新会让 body 每 3s 全量重建，AG 崩溃面）
         let minute = Date(timeIntervalSince1970:
             (Date().timeIntervalSince1970 / 60).rounded(.down) * 60)
-        upd(\.lastSync, minute)
+        put(\.lastSync, \.lastSync, minute)
+        // 兜底清除切换态（stats 拉取失败时上面的落地路径没走到；成功路径
+        // 在 metrics put 时就清了）——旧窗口的轮询不许清新窗口的切换态
+        if windowToday == statWindowToday {
+            upd(\.windowLoading, false)
+        }
     }
 
     /// 冷却模型 id → 短名（去 provider 前缀；provider/ 路径形如 opencode-go-github/kimi-k3）
