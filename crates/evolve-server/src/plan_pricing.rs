@@ -203,19 +203,16 @@ fn snapshot_generated_at() -> String {
 }
 
 /// GET /api/plan-prices：全量价格行 + 与本网关目录模型的归一化匹配
-/// （按 model_key 对齐——同模型在不同 plan 的单价/额度/峰谷一目了然）
+/// （按 model_key 对齐——同模型在不同 plan 的单价/额度/峰谷一目了然）。
+/// 无快照时返回 503（后台任务启动即拉、失败 5 分钟重试——**不在此阻塞刷新**，
+/// 否则源全慢时 API 挂 90s+）。
 pub async fn api_plan_prices() -> axum::response::Response {
-    let rows = snapshot_rows();
-    if rows.is_empty() {
-        // 首次访问尚无快照 → 现场拉一次（异步任务可能还没跑完首轮）
-        refresh().await;
-    }
     let rows = snapshot_rows();
     let generated_at = snapshot_generated_at();
     if rows.is_empty() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            axum::Json(json!({"error": {"message": "price snapshot unavailable (source fetch pending)"}})),
+            axum::Json(json!({"error": {"message": "price snapshot unavailable (background fetch retrying)"}})),
         )
             .into_response();
     }
