@@ -84,14 +84,22 @@ struct Transient {
     until_ms: u64,
 }
 
-/// 冷却阶梯：第 1 次失败**不冷却**（下一条请求立即重试）；之后 30s·2^(n-2)，上限 10 分钟。
+/// 冷却阶梯（2026-10-21 调整）：
+/// - 第 1 次失败：只短暂跳过 **5s**——单次抖动不降级槽位，但避免**同一请求内**
+///   第二次调用（judge 之后还有 route_advisor）再白等一个超时（实测一次判定
+///   阶段 4s×2=8s）；
+/// - 第 2 次失败：60s；
+/// - 第 ≥3 次失败：**30 分钟硬熔断**——持续超时的槽位每被重试一次就白等一个
+///   超时（实证：jev 每次 12s 超时，OCR 一轮几十次串行调用累计超 540s 被掐断）。
+///   规则判定只要 12-18ms，熔断期内请求直接走规则。
 /// 成功一次立即清零 → 恢复使用。
 fn backoff_after(fails: u32) -> u64 {
-    if fails < 2 {
-        return 0;
+    match fails {
+        0 => 0,
+        1 => 5_000,
+        2 => 60_000,
+        _ => 30 * 60_000,
     }
-    let step = (fails - 2).min(5); // 30s, 60s, 120s, 240s, 480s, 600s(封顶)
-    (30_000u64 << step).min(600_000)
 }
 
 /// 最近一次槽位失败（面板/网页横幅显示"为什么不可达"）
@@ -652,15 +660,17 @@ mod tests {
     #[test]
     fn backoff_is_immediate_then_exponential_and_resets_on_success() {
         assert_eq!(backoff_after(0), 0);
-        assert_eq!(backoff_after(1), 0, "first transient failure retries on the next request");
-        assert_eq!(backoff_after(2), 30_000);
-        assert_eq!(backoff_after(3), 60_000);
-        assert_eq!(backoff_after(4), 120_000);
-        assert_eq!(backoff_after(20), 600_000, "capped at 10 minutes");
+        assert_eq!(backoff_after(1), 5_000, "single blip: brief skip, no degradation");
+        assert_eq!(backoff_after(2), 60_000);
+        assert_eq!(backoff_after(3), 30 * 60_000, "repeated timeouts hard-quarantine for 30 min");
+        assert_eq!(backoff_after(20), 30 * 60_000, "quarantine holds");
 
         let h = SlotHealth::default();
         h.note_fail(SlotKind::Jev, SlotFail::Timeout);
-        assert_eq!(h.backoff_remaining_ms(SlotKind::Jev), 0, "no cooldown after the first failure");
+        assert!(
+            h.backoff_remaining_ms(SlotKind::Jev) > 0,
+            "first failure: brief skip so a second call in the same request does not wait again"
+        );
         assert_eq!(h.consecutive_fails(SlotKind::Jev), 1);
         h.note_fail(SlotKind::Jev, SlotFail::Timeout);
         assert!(h.backoff_remaining_ms(SlotKind::Jev) > 0, "second failure starts the cooldown");
