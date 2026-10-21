@@ -37,7 +37,7 @@ opencode · Claude Code · Codex · Pi · openclaw · hermes · dsh
 - [Decision model (optional)](#decision-model-optional) · [Request tags](#request-tags)
 - [macOS menu-bar panel](#macos-menu-bar-panel) · [Dashboard](#dashboard)
 - [Configuration](#configuration) · [Operations](#operations)
-- [Why not another proxy](#why-not-another-proxy) · [Managed plans](#managed-plans) · [Development](#development)
+- [Why not another proxy](#why-not-another-proxy) · [Managed plans](#managed-plans) · [Plan prices & quotas](#managed-plans) · [Development](#development)
 
 ## Install
 
@@ -173,11 +173,13 @@ $$B(m) = \mathrm{clamp}\!\big(1 + (\mathrm{reward}_m - \mathrm{median}_{m'}\math
 
 $$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota\_headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \mathrm{clamp}\!\left(\mathrm{round}\!\big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\big), 3, 0.25\,\mathrm{CAP}\right)$$
 
-*What happens:* `P` healthy providers; each provider gets a slot budget proportional to its headroom, capped at 25 % of the pool so a provider that ships many models cannot take every slot. Inside a provider the **capability × price cells** are filled first, then newest / recently used. Free and pinned models are always in and do not consume slots. Health walks back, it does not exile: **3 consecutive failures** move a provider to fallback-only and schedule probes at **1 m, 5 m, 15 m, 30 m, 60 m**; the first success returns it immediately. A request-shape 4xx quarantines that *(session, model)* pair for **30 min** only.
+*What happens:* `P` healthy providers; each provider gets a slot budget proportional to its headroom, capped at 25 % of the pool so a provider that ships many models cannot take every slot. Inside a provider the **capability × price cells** are filled first, then newest / recently used. Free and pinned models are always in and do not consume slots. Health walks back, it does not exile: **3 consecutive failures** move a provider to fallback-only and schedule probes at **1 m, 5 m, 15 m, 30 m, 60 m** (network-class issues cap at **2 m** — transient blips recover in seconds); the first success returns it immediately. A request-shape 4xx quarantines that *(session, model)* pair for **30 min** only. Accounts of the same plan (same base_url, different keys) are **siblings**: they share telemetry experience (calibration, token ratios, proven window bounds) and never punish each other for a transport error — a sibling account serving 200s proves the endpoint is alive.
 
 ### Step 7 — After routing
 
-Quality cascade: a *successful* response that is degenerate / empty / has broken tool calls is discarded and the next chain candidate is tried — stricter at the chain head, looser further down. Failures are classified (quota · auth · network · context · request shape); the reported status is the **primary** cause, not the last attempt's. The fallback sweep is constraint-aware (window/vision) and rotates across providers. Repeated identical requests hit a local completion cache. Every event records `regret = best-available-score − chosen-score`, and every strategy change must survive `evo-router backtest` (replay on real events) before it ships.
+Quality cascade: a *successful* response that is degenerate / empty / has broken tool calls is discarded and the next chain candidate is tried — stricter at the chain head, looser further down. Failures are classified (quota · auth · network · context · request shape); the reported status is the **primary** cause, not the last attempt's. The fallback sweep is constraint-aware (window/vision) and rotates across providers. Price-gated models re-enter as one near-match per provider at the chain tail, and context-gated models whose window covers the raw estimate get a rescue round ordered by window size — the pool drains gracefully instead of dead-ending. Repeated identical requests hit a local completion cache. Every event records `regret = best-available-score − chosen-score`, and every strategy change must survive `evo-router backtest` (replay on real events) before it ships.
+
+**Two total-failure signals agents can act on**: when nothing fits the context any more, the gateway answers `400 context_length_exceeded` with the input/budget token counts (opencode / qwen-code / pi parse it and **auto-compact**); when the pool is merely out of capacity (quota drained, accounts unpaid), it answers **429 + Retry-After** so clients back off and recover instead of dying on an unretryable 402. The judgment itself is cached per session (10 min, ±50 % magnitude): repeat calls pay zero judgment latency.
 
 ### Price-aware layers
 
@@ -213,7 +215,7 @@ Routing works without one — the built-in rule judge is fully functional. To ad
 ```
 
 - **Priority** jev > laya > openai; the first usable slot wins, and `protocol` / `think_mode` / `api_key_env` are optional per slot.
-- **Fatal errors** (auth, 404, unreachable) blacklist a slot for the process lifetime. **Transient errors** (timeout, 5xx, unparseable) retry on the next request, then back off exponentially (30 s → 10 min) so no request pays the same timeout twice in a row; **one success clears everything**.
+- **Fatal errors** (auth, 404, unreachable) blacklist a slot for the process lifetime. **Transient errors** (timeout, 5xx, unparseable) back off 5 s → 60 s, then **quarantine for 30 min** after repeated timeouts — a dead slot never costs more than one timeout per half hour, and the rules judge (10-20 ms) takes over meanwhile. **One success clears everything**. The judgment itself is cached per session (10 min, magnitude ±50 %), so agent and review-tool loops do not re-judge the same task on every call.
 - **Status is honest**: `GET /api/live` reports `decision.status` = `ok` · `degraded` (slots configured but the last judge fell back to rules — `last_fail` names the cause, e.g. `timeout` or `auth failed (401/403)`) · `stale` (configured, not applied yet) · `missing` (nothing configured), plus `last_judge`, `consecutive_fails` and `retry_in_ms`.
 - Editing `decision` (and `providers`) **hot-reloads in ~5 s** — no restart, or `POST /api/reload` to force it.
 
@@ -366,6 +368,14 @@ Every response also carries `x-ev-model`, `x-ev-reason`, `x-ev-decision-id`, `x-
 | pay-as-you-go | any OpenAI / Anthropic | API | $ per token | — | — |
 
 Plans are detected from base URLs; every window is tracked with provider-truth quota headers where the vendor reports them.
+
+**Live plan prices and quotas** — the gateway pulls the community-maintained [`wmpeng/codingplan`](https://github.com/wmpeng/codingplan) dataset (191 plans / 50 platforms, the data behind vibecoding.dreamfree.space) at startup and every 6 h, with mirror fallbacks:
+
+```bash
+curl -s localhost:8787/api/plan-prices | python3 -m json.tool
+```
+
+Each model groups every platform/plan offer: unit price (¥/M), peak vs off-peak tier (`timeTier` 谷/峰), 5 h / weekly / monthly token allowances, and the cheapest offer highlighted. The `our_providers` section maps your configured providers to their coding-plan platforms via base URL, so you can see at a glance which plan serves your models cheapest. Where the vendor exposes an official quota monitor (zhipu / opencode zen / MiniMax), its observed 5 h usage **overrides local accounting** for the budget gate after a freshness check; providers without an official API (volcengine / ark) run on the local per-request ledger.
 
 ## Development
 
