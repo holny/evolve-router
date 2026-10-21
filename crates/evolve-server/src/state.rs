@@ -787,40 +787,72 @@ impl Inner {
     /// 无额度配置（未声明档位）的方案无压力。
     pub fn plan_pressure_map(&self) -> HashMap<String, f32> {
         let mut out = HashMap::new();
-        // ① 官方观测优先（2026-10-21）：provider monitor 的 5h 剩余百分比是
-        // **真值**（与官方控制台同源，实测一致）；本地积分记账有估算偏差。
-        // 有新鲜（≤10 分钟）官方观测的 plan → 直接用官方占用覆盖本地计算。
-        let now_obs = evolve_memory::quota::now_ms();
-        let mut seen_pv: std::collections::HashSet<(String, String)> = Default::default();
+        // ① 本地实时记账为主源：逐请求实测 usage（无采样延迟）。
+        // ② 官方 monitor（zhipu/opencode/MiniMax）有采样与刷新延迟（分钟级），
+        //    **不做实时源**；仅当与本地估算偏差 >30% 时采信官方值，修正本地漂移
+        //    （2026-10-21 用户裁决：实时需求靠自估，官方数据做校准）。
+        let official = self.official_plan_pressure();
+        let Ok(budgets) = self.plan_budgets.lock() else {
+            // 本地路径不可用 → 官方观测是唯一来源
+            return official;
+        };
+        if !budgets.is_empty() {
+            let now = evolve_memory::quota::now_ms();
+            let sums = self.quota.plan_usage_sums(now, 5 * 3600 * 1000);
+            for m in self.engine.catalog_snapshot() {
+                if let Some(key) = evolve_core::plans::plan_key_for(&m.base_url)
+                    && let Some(&allowance) = budgets.get(key)
+                    && allowance > 0.0
+                    && let Some((i, c, o)) = sums.get(&m.id)
+                {
+                    // 同方案多模型共享账户额度——SUM 而非 MAX（MAX 会漏计并发燃烧）
+                    let credits = evolve_core::plans::plan_credits_used(&m.base_url, &m.id, *i, *c, *o);
+                    let p = (credits / allowance).clamp(0.0, 1.5) as f32;
+                    out.entry(key.to_string()).and_modify(|e: &mut f32| *e = (*e + p).min(1.5)).or_insert(p);
+                }
+            }
+        }
+        // ③ 官方校准（2026-10-21）：新鲜官方观测与本地估算偏差 >30% → 采信官方
+        // 修正本地漂移（本地账本系统性偏差的自动纠偏，如缓存双计类 bug）；
+        // 一致则保留本地实时值。
+        for (key, official_p) in official {
+            match out.get(&key).copied() {
+                Some(local) => {
+                    let drift = (official_p - local).abs() / local.max(0.05);
+                    if drift > 0.30 {
+                        tracing::info!(
+                            plan = %key, local, official = official_p,
+                            "plan pressure recalibrated from official monitor (drift {:.0}%)",
+                            drift * 100.0
+                        );
+                        out.insert(key, official_p);
+                    }
+                }
+                None => {
+                    // 本地没有该 plan 的值（模型都没进账本）→ 采信官方
+                    out.insert(key, official_p);
+                }
+            }
+        }
+        out
+    }
+
+    /// 官方 monitor 的 5h 占用（plan_key → 占用 0-1.5）：按 provider 聚合，
+    /// 多账号（同 plan 双订阅）各自有自己的配额窗 → 占用相加。
+    fn official_plan_pressure(&self) -> HashMap<String, f32> {
+        let mut out: HashMap<String, f32> = HashMap::new();
+        let now = evolve_memory::quota::now_ms();
+        let mut seen: std::collections::HashSet<(String, String)> = Default::default();
         for m in self.engine.catalog_snapshot() {
-            if !seen_pv.insert((m.provider.clone(), m.base_url.clone())) {
+            if !seen.insert((m.provider.clone(), m.base_url.clone())) {
                 continue;
             }
             if let Some(key) = evolve_core::plans::plan_key_for(&m.base_url)
-                && let Some(w) = self.quota.observed_window(&m.provider, "5h", now_obs, 10 * 60 * 1000)
+                && let Some(w) = self.quota.observed_window(&m.provider, "5h", now, 10 * 60 * 1000)
                 && let Some(rem) = w.remaining
             {
                 let p = ((100 - rem.min(100)) as f32 / 100.0).clamp(0.0, 1.5);
-                out.insert(key.to_string(), p);
-            }
-        }
-        let Ok(budgets) = self.plan_budgets.lock() else { return out };
-        if budgets.is_empty() {
-            return out;
-        }
-        let now = evolve_memory::quota::now_ms();
-        let sums = self.quota.plan_usage_sums(now, 5 * 3600 * 1000);
-        // 模型 → plan_key 映射（按 catalog base_url 匹配注册表）
-        for m in self.engine.catalog_snapshot() {
-            if let Some(key) = evolve_core::plans::plan_key_for(&m.base_url)
-                && let Some(&allowance) = budgets.get(key)
-                && allowance > 0.0
-                && let Some((i, c, o)) = sums.get(&m.id)
-            {
-                // 同方案多模型共享账户额度——SUM 而非 MAX（MAX 会漏计并发燃烧）
-                let credits = evolve_core::plans::plan_credits_used(&m.base_url, &m.id, *i, *c, *o);
-                let p = (credits / allowance).clamp(0.0, 1.5) as f32;
-                out.entry(key.to_string()).and_modify(|e| *e = (*e + p).min(1.5)).or_insert(p);
+                *out.entry(key.to_string()).or_insert(0.0) += p;
             }
         }
         out
