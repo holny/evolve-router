@@ -4,7 +4,7 @@
 
 <h1 align="center">EvolveRouter</h1>
 
-<p align="center"><b>先想再路由，每次请求都进化。</b></p>
+<p align="center"><b>判定与路由一程完成，毫秒级响应；每一次请求，都让下一次更聪明。</b></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
