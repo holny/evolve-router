@@ -2768,21 +2768,24 @@ async fn openrouter_balance(
             .timeout(std::time::Duration::from_secs(8))
             .bearer_auth(&key_resolved)
     };
-    let mut total: Option<f64> = None;
+    let mut key_limit_remaining: Option<f64> = None; // key 消费上限余量（**不是余额**）
     let mut usage_monthly: Option<f64> = None;
     let mut is_free_tier = false;
     if let Ok(j) = auth("https://openrouter.ai/api/v1/key").send().await
         && let Ok(j) = j.json::<serde_json::Value>().await
     {
         let d = &j["data"];
-        total = d["limit_remaining"].as_f64().or_else(|| {
+        key_limit_remaining = d["limit_remaining"].as_f64().or_else(|| {
             d["effective_budget"]["remaining_usd"].as_f64()
         });
         usage_monthly = d["usage_monthly"].as_f64();
         is_free_tier = d["is_free_tier"].as_bool().unwrap_or(false);
     }
-    if total.is_none()
-        && let Ok(j) = auth("https://openrouter.ai/api/v1/credits").send().await
+    // 账户真实余额：credits 端点（充值总额 − 已用）。**limit_remaining 是 key 的
+    // 消费上限（封顶），不是余额**——2026-10-21 实证：未充值的号 limit_remaining
+    // 显示 100（key 上限），被误读成"余额 $100"
+    let mut total: Option<f64> = None;
+    if let Ok(j) = auth("https://openrouter.ai/api/v1/credits").send().await
         && let Ok(j) = j.json::<serde_json::Value>().await
     {
         let credits = j["data"]["total_credits"].as_f64().unwrap_or(0.0);
@@ -2795,6 +2798,7 @@ async fn openrouter_balance(
         "is_available": total > 0.0 || is_free_tier,
         "currency": "USD",
         "total": total,
+        "key_limit_remaining": key_limit_remaining,
         "usage_monthly": usage_monthly,
         "is_free_tier": is_free_tier,
     }))
