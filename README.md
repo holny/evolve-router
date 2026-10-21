@@ -171,7 +171,7 @@ $$B(m) = \mathrm{clamp}\!\big(1 + (\mathrm{reward}_m - \mathrm{median}_{m'}\math
 
 ### Step 6 — Routing portfolio and health *(what is routable at all)*
 
-$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota\_headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \mathrm{clamp}\!\left(\mathrm{round}\!\big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\big), 3, 0.25\,\mathrm{CAP}\right)$$
+$$\mathrm{CAP} = \max\big(50,\ 8P\big), \qquad w_i = 1 + \text{quota headroom}_i + 0.1\,\text{free}_i, \qquad \mathrm{slots}_i = \mathrm{clamp}\!\left(\mathrm{round}\!\big(\frac{\mathrm{CAP}\,w_i}{\sum_j w_j}\big), 3, 0.25\,\mathrm{CAP}\right)$$
 
 *What happens:* `P` healthy providers; each provider gets a slot budget proportional to its headroom, capped at 25 % of the pool so a provider that ships many models cannot take every slot. Inside a provider the **capability × price cells** are filled first, then newest / recently used. Free and pinned models are always in and do not consume slots. Health walks back, it does not exile: **3 consecutive failures** move a provider to fallback-only and schedule probes at **1 m, 5 m, 15 m, 30 m, 60 m** (network-class issues cap at **2 m** — transient blips recover in seconds); the first success returns it immediately. A request-shape 4xx quarantines that *(session, model)* pair for **30 min** only. Accounts of the same plan (same base_url, different keys) are **siblings**: they share telemetry experience (calibration, token ratios, proven window bounds) and never punish each other for a transport error — a sibling account serving 200s proves the endpoint is alive.
 
