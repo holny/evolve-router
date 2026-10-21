@@ -787,6 +787,23 @@ impl Inner {
     /// 无额度配置（未声明档位）的方案无压力。
     pub fn plan_pressure_map(&self) -> HashMap<String, f32> {
         let mut out = HashMap::new();
+        // ① 官方观测优先（2026-10-21）：provider monitor 的 5h 剩余百分比是
+        // **真值**（与官方控制台同源，实测一致）；本地积分记账有估算偏差。
+        // 有新鲜（≤10 分钟）官方观测的 plan → 直接用官方占用覆盖本地计算。
+        let now_obs = evolve_memory::quota::now_ms();
+        let mut seen_pv: std::collections::HashSet<(String, String)> = Default::default();
+        for m in self.engine.catalog_snapshot() {
+            if !seen_pv.insert((m.provider.clone(), m.base_url.clone())) {
+                continue;
+            }
+            if let Some(key) = evolve_core::plans::plan_key_for(&m.base_url)
+                && let Some(w) = self.quota.observed_window(&m.provider, "5h", now_obs, 10 * 60 * 1000)
+                && let Some(rem) = w.remaining
+            {
+                let p = ((100 - rem.min(100)) as f32 / 100.0).clamp(0.0, 1.5);
+                out.insert(key.to_string(), p);
+            }
+        }
         let Ok(budgets) = self.plan_budgets.lock() else { return out };
         if budgets.is_empty() {
             return out;
