@@ -6,6 +6,8 @@
 
 <p align="center"><b>Judged and routed in one pass. Smarter with every request.</b></p>
 
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="#development"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>

@@ -6,6 +6,8 @@
 
 <p align="center"><b>判定与路由一程完成，毫秒级响应；每一次请求，都让下一次更聪明。</b></p>
 
+<p align="center"><a href="README.zh-CN.md">简体中文</a> · <a href="README.md">English</a></p>
+
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="#开发"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>
