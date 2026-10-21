@@ -427,7 +427,16 @@ pub fn tier_allowance_by_key(key: &str, tier: &str, window: usize) -> Option<f64
 /// 窗口内积分消耗（官方系数折算）；非积分制（如 OpenCode Go 美元制）返回 0（v2 接入）
 pub fn plan_credits_used(base_url: &str, model_id: &str, in_tok: f64, cached_tok: f64, out_tok: f64) -> f64 {
     match credit_multipliers(base_url, model_id) {
-        Some((ki, kc, ko)) => (in_tok * ki + cached_tok * kc + out_tok * ko) / 10_000.0,
+        Some((ki, kc, ko)) => {
+            // in_tok 是 OpenAI 语义的 prompt_tokens——**包含** cached_tok。
+            // 缓存命中部分按缓存系数计、非缓存部分按输入系数计（各官方
+            // 计费式即此形状）。旧实现 in×ki + cached×kc 把缓存段双计：
+            // 91% 缓存命中的 Agent 流量被虚增数千积分/5h，造成
+            // "plan budget 129% consumed" 假超支、把唯一健康的 provider
+            // 锁出候选集（2026-10-21 实证，zhipu-coding pro 5h 12k 积分）
+            let fresh = (in_tok - cached_tok).max(0.0);
+            (fresh * ki + cached_tok * kc + out_tok * ko) / 10_000.0
+        }
         None => 0.0,
     }
 }
