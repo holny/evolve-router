@@ -4,6 +4,16 @@ use crate::scoring;
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap};
 
+/// 会话级判定缓存（2026-10-21）：同会话在 TTL 内、量级未跳变时**复用上一次判定**。
+/// Agent / 评审工具的连续调用任务不变，重判只是白付判定模型的秒级延迟
+/// （OCR 实证：258 次串行调用 × 3-4.5s 判定 = 累计远超单轮预算）。
+/// 命中条件：同 session_key、判定未过期（10 分钟）、估算量级在 ±50% 内
+/// （量级跳变说明任务换了 → 重新判定）。命中时**不再喂校准器**（避免重复计入）。
+const SESSION_JUDGMENT_TTL_MS: u64 = 10 * 60 * 1000;
+const SESSION_JUDGMENT_CAP: usize = 512;
+
+type SessionJudgmentMap = std::collections::HashMap<String, (JudgmentSet, u64, u64)>;
+
 pub struct RoutingInput<'a> {
     pub session_key: &'a str,
     pub features: RequestFeatures,
@@ -80,6 +90,10 @@ pub struct Engine {
     /// S5 层级比例反馈（实际选用分布 → 目标 7:2:1 的纠偏器）
     ratio: crate::ratio::RatioController,
     ratio_enabled: bool,
+    /// 会话级判定缓存（2026-10-21）：同会话 TTL 内、量级未跳变时复用上次判定，
+    /// 省掉判定模型的秒级调用（Agent/评审工具的连续调用是主要受害者）。
+    /// 实例级（不跨 Engine）——测试之间互不串味，热替换引擎时自然清空。
+    session_judgment: std::sync::RwLock<SessionJudgmentMap>,
 }
 
 impl Engine {
@@ -97,7 +111,45 @@ impl Engine {
             calibration_enabled: true,
             ratio: crate::ratio::RatioController::default(),
             ratio_enabled: true,
+            session_judgment: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// 会话判定缓存查询：命中（TTL 内 + 量级 ±50%）则复用上次判定
+    fn session_judgment_lookup(&self, session: &str, est: u64) -> Option<JudgmentSet> {
+        if session.is_empty() {
+            return None;
+        }
+        let now = now_epoch_ms();
+        let mut map = self.session_judgment.write().ok()?;
+        map.retain(|_, (_, _, at)| now.saturating_sub(*at) < SESSION_JUDGMENT_TTL_MS);
+        let (j, j_est, _) = map.get(session)?;
+        let lo = j_est.saturating_div(2);
+        let hi = j_est.saturating_mul(2);
+        if est < lo || est > hi {
+            return None;
+        }
+        Some(j.clone())
+    }
+
+    /// 会话判定缓存写入（容量上限 + TTL 淘汰）
+    fn session_judgment_store(&self, session: &str, j: &JudgmentSet, est: u64) {
+        if session.is_empty() {
+            return;
+        }
+        let now = now_epoch_ms();
+        let Ok(mut map) = self.session_judgment.write() else { return };
+        map.retain(|_, (_, _, at)| now.saturating_sub(*at) < SESSION_JUDGMENT_TTL_MS);
+        if map.len() >= SESSION_JUDGMENT_CAP
+            && !map.contains_key(session)
+            && let Some(oldest) = map
+                .iter()
+                .min_by_key(|(_, (_, _, at))| *at)
+                .map(|(k, _)| k.clone())
+        {
+            map.remove(&oldest);
+        }
+        map.insert(session.to_string(), (j.clone(), est, now));
     }
 
     /// S5 配置层级比例控制器（target = [cheap, medium, premium] 份额；band 容忍带）
@@ -294,6 +346,8 @@ impl Engine {
         }
 
         let judge_started = now_epoch_ms();
+        #[allow(unused_assignments)]
+        let mut judge_ms = 0u64;
         // A2 Speculative Fan-Out：判定与路由推荐合并为一次 Jev 往返——
         // judge 前按静态画像（tiers 均值 + plan 标记）粗排 top-12，占位符化后
         // 塞进 state.candidates；Jev 在回答 8 维判定的同时直接举荐路由候选。
@@ -328,18 +382,31 @@ impl Engine {
                 .collect();
             (serde_json::to_string(&items).unwrap_or_default(), map)
         };
-        let mut j = match self.judge.read() {
-            Ok(g) => g.judge(&input.features, input.digest, &candidates_hint),
-            Err(p) => p.into_inner().judge(&input.features, input.digest, &candidates_hint),
+        // 会话级判定缓存优先（2026-10-21）：命中则零判定延迟、不调判定模型、
+        // 也不重复喂校准器（否则同一难度被反复计入，分布失真）
+        let mut j = match self.session_judgment_lookup(input.session_key, est) {
+            Some(cached) => {
+                judge_ms = 0;
+                cached
+            }
+            None => {
+                let mut j = match self.judge.read() {
+                    Ok(g) => g.judge(&input.features, input.digest, &candidates_hint),
+                    Err(p) => p.into_inner().judge(&input.features, input.digest, &candidates_hint),
+                };
+                judge_ms = now_epoch_ms().saturating_sub(judge_started);
+                // 难度校准（2026-10）：判定器（尤其 heuristic）的系统性偏高由经验分位
+                // 校准层归一——保证实际分布收敛目标 70/20/10；关闭时直通原值
+                let raw_difficulty = j.difficulty;
+                self.calibrator.observe(raw_difficulty);
+                if self.calibration_enabled {
+                    j.difficulty = self.calibrator.calibrate(j.difficulty);
+                }
+                // 存**已校准**的判定（命中时直接复用，不再二次校准）
+                self.session_judgment_store(input.session_key, &j, est);
+                j
+            }
         };
-        let judge_ms = now_epoch_ms().saturating_sub(judge_started);
-        // 难度校准（2026-10）：判定器（尤其 heuristic）的系统性偏高由经验分位
-        // 校准层归一——保证实际分布收敛目标 70/20/10；关闭时直通原值
-        let raw_difficulty = j.difficulty;
-        self.calibrator.observe(raw_difficulty);
-        if self.calibration_enabled {
-            j.difficulty = self.calibrator.calibrate(j.difficulty);
-        }
         // 会话放大已并入判定器内部（封顶 +0.4）——此处不再二次叠加（旧双计是
         // 难度重心上移的成因之一）
         let difficulty_eff = j.difficulty.clamp(0.0, 3.0);
@@ -1260,6 +1327,68 @@ mod unknown_window_tests {
         let mut inp = input(text, est, &d, None, &h);
         inp.telemetry = tel;
         e.decide(inp)
+    }
+
+    /// 计数判定器：统计被调用次数（会话判定缓存的验证探针）
+    struct CountingJudge {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::types::Judge for CountingJudge {
+        fn judge(
+            &self,
+            _f: &crate::types::RequestFeatures,
+            _d: &crate::types::DigestSignals,
+            _h: &str,
+        ) -> crate::types::JudgmentSet {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::types::JudgmentSet {
+                domain: crate::types::Domain::Code,
+                domain_confidence: 0.5,
+                difficulty: 1.0,
+                difficulty_confidence: 0.5,
+                needs_vision: 0.0,
+                is_trivial: 0.0,
+                tool_heavy: 0.0,
+                high_stakes: 0.0,
+                session_relevance: 0.5,
+                session_depth: 0.5,
+                route_recommendation: None,
+                route_recommendation_confidence: 0.0,
+                judge_source: "test",
+            }
+        }
+    }
+
+    #[test]
+    fn session_judgment_cache_reuses_within_ttl_and_rejudges_on_magnitude_jump() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let e = Engine::new(
+            catalog3(),
+            det_policy(),
+            Box::new(CountingJudge { calls: calls.clone() }),
+        );
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let mut inp = input("你好", 5_000, &d, None, &h);
+        e.decide(inp);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // 同会话 + 同量级 → 复用，不再调判定器
+        let mut inp2 = input("你好", 5_500, &d, None, &h);
+        e.decide(inp2);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "session judgment must be reused within TTL"
+        );
+        // 量级跳变（>2×）→ 任务多半换了 → 重新判定
+        let inp3 = input("你好", 50_000, &d, None, &h);
+        e.decide(inp3);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "magnitude jump must re-judge"
+        );
     }
 
     #[test]
