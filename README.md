@@ -15,7 +15,7 @@
 EvolveRouter is a **local LLM routing gateway** for agents. Every request is judged on eight signals, priced in its own plan's currency, scored on five factors, and routed to the model that fits — then the outcome feeds back so the next decision is better. It ships as one Rust binary with a native macOS menu-bar panel and a zero-build dashboard. Your prompts, sessions and telemetry never leave the machine.
 
 <p align="center">
-  <img src="docs/assets/panel.png" width="320" alt="EvolveRouter macOS menu-bar panel (light)">
+  <img src="docs/assets/panel.png?v=0.3.3" width="320" alt="EvolveRouter macOS menu-bar panel (light)">
 </p>
 
 ```
@@ -237,7 +237,7 @@ Request-side tags live on the request rows; model-side tags live in the Model li
 ## macOS menu-bar panel
 
 <p align="center">
-  <img src="docs/assets/panel-models.png" width="300" alt="Models view with inline failure reasons">
+  <img src="docs/assets/panel-models.png?v=0.3.3" width="300" alt="Models view with inline failure reasons">
 </p>
 
 *The main panel shot is at the top of this page; the second view above is the Models dimension, where each row carries its own failure reason.*
@@ -258,7 +258,7 @@ The panel is a native SwiftUI app; the badge itself is the status light (idle / 
 ## Dashboard
 
 <p align="center">
-  <img src="docs/assets/dashboard.png" width="820" alt="Dashboard: onboarding, live decisions, provider cards">
+  <img src="docs/assets/dashboard.png?v=0.3.3" width="820" alt="Dashboard: onboarding, live decisions, provider cards">
 </p>
 
 `http://127.0.0.1:8787/` — zero build, same data as the panel, wider:
