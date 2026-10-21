@@ -2878,7 +2878,8 @@ pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
             .map(|(id, _)| id.split('\u{1f}').next().unwrap_or(id).to_string())
             .collect();
         let target = cooling.first().cloned();
-        let ok = probe_provider_model(&st, &provider, target.as_deref()).await;
+        // 这里探的是 QuotaExhausted 冷却（配额类）→ 成功标准保持 2xx（配额真恢复）
+        let (ok, _got_http) = probe_provider_model(&st, &provider, target.as_deref()).await;
         if ok {
             // 仅清被探活成功的那一个模型；该 provider 若仍有其它模型在配额冷却，
             // gate 保持关闭（按模型恢复，与失败信号粒度一致）
@@ -2917,7 +2918,17 @@ pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
             .map(|m| m.id.clone());
         match target {
             Some(mid) => {
-                let ok = probe_provider_model(&st, &provider, Some(&mid)).await;
+                let (ok, got_http) = probe_provider_model(&st, &provider, Some(&mid)).await;
+                // Network 类降级的探活只回答一个问题："传输层通了吗？"——
+                // 任何 HTTP 响应（哪怕 400/429）都证明端点可达 → 立即复活。
+                // 非 2xx≠不可达（模型级 400/限流 429 也算"网络是通的"）。
+                // 鉴权/配额类降级仍要求 2xx（那类问题必须真恢复才算）。
+                let issue_is_network = st
+                    .quota
+                    .provider_issue_of(&provider)
+                    .map(|(i, _, _)| i == evolve_memory::quota::ProviderIssue::Network)
+                    .unwrap_or(false);
+                let ok = if issue_is_network { got_http } else { ok };
                 let finished = evolve_memory::quota::now_ms();
                 st.quota.provider_issue_probe_result(&provider, ok, finished);
                 if ok {
@@ -2939,13 +2950,17 @@ pub(crate) async fn quota_refresh_tick(st: AppState, max_age_ms: u64) {
 
 /// 单次探针请求：优先打指定（冷却中）模型，未指定则取该 provider 首模型；
 /// max_tokens=1 的极小 completion，只看是否被上游接受（2xx）
-async fn probe_provider_model(st: &AppState, provider: &str, model_id: Option<&str>) -> bool {
+async fn probe_provider_model(
+    st: &AppState,
+    provider: &str,
+    model_id: Option<&str>,
+) -> (bool, bool) {
     let snap = st.engine.catalog_snapshot();
     let picked = match model_id {
         Some(mid) => snap.iter().find(|m| m.id == mid).or_else(|| snap.iter().find(|m| m.provider == provider)),
         None => snap.iter().find(|m| m.provider == provider),
     };
-    let Some(m) = picked else { return false };
+    let Some(m) = picked else { return (false, false) };
     let base = m.base_url.trim_end_matches('/').to_string();
     let key = m.key_values().first().cloned();
     let upstream = if m.upstream_model.is_empty() { m.id.split('/').last().unwrap_or("").to_string() } else { m.upstream_model.clone() };
@@ -2964,11 +2979,13 @@ async fn probe_provider_model(st: &AppState, provider: &str, model_id: Option<&s
         Ok(resp) => {
             let status = resp.status();
             tracing::info!(provider = %provider, model = %upstream, status = status.as_u16(), "quota probe attempt");
-            status.is_success()
+            // 返回 (2xx?, 是否收到任何 HTTP 响应)：收到响应 = 传输层可达——
+            // Network 类降级只该被"传输层仍不通"维持，而不是被模型级 4xx 卡死
+            (status.is_success(), true)
         }
         Err(e) => {
             tracing::warn!(provider = %provider, error = %e, "quota probe transport error");
-            false
+            (false, false)
         }
     }
 }

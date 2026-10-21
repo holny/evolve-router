@@ -519,6 +519,21 @@ pub async fn chat_completions(
         // 不应升级成 provider 降级（见 note_provider_issue 的豁免检查）
         if status.is_success() && !record.base_url.is_empty() {
             record_endpoint_ok(&record.base_url);
+            // 真流量自愈（2026-10-21）：200 本身证明账号+端点都活着——该 provider
+            // 若还挂着 Network 降级（误伤残留），立即清除，不等探活周期
+            if st
+                .quota
+                .provider_issue_of(&record.provider)
+                .map(|(i, _, _)| i == evolve_memory::quota::ProviderIssue::Network)
+                .unwrap_or(false)
+            {
+                st.quota.provider_issue_probe_result(&record.provider, true, evolve_memory::quota::now_ms());
+                st.events.record(json!({
+                    "kind": "provider_state_changed",
+                    "provider": record.provider, "state": "ok", "source": "real traffic 200",
+                }));
+                tracing::info!(provider = %record.provider, "network degradation cleared by real traffic 200");
+            }
         }
 
         if fallback_eligible(status.as_u16()) {
