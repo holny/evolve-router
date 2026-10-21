@@ -4,7 +4,7 @@
 
 <h1 align="center">EvolveRouter</h1>
 
-<p align="center"><b>Think before you route. Evolve with every request.</b></p>
+<p align="center"><b>Judged and routed in one pass. Smarter with every request.</b></p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
@@ -368,6 +368,25 @@ Every response also carries `x-ev-model`, `x-ev-reason`, `x-ev-decision-id`, `x-
 | pay-as-you-go | any OpenAI / Anthropic | API | $ per token | — | — |
 
 Plans are detected from base URLs; every window is tracked with provider-truth quota headers where the vendor reports them.
+
+### Free models: always in the pool, never on the bill
+
+Coding-plan vendors ship free models — `minimax-m3.1-flash-free`, `beam-free`, `longcat-2.5-preview-free` on opencode zen, openrouter's `:free` variants — and the router treats them as first-class candidates:
+
+- **Always in the pool.** Free and pinned models enter the candidate set unconditionally and **do not consume** provider slots in the routing portfolio, so adding them never crowds out paid models.
+- **Never billed against the plan.** The credit formula prices `-free` models at zero, so plan-budget gates (5 h windows at 129 %, balances at zero) do not touch them — while paid models on the same account are gated normally.
+- **Prioritized, with a floor.** Free models carry a bounded routing bonus; when a provider drains its quota or a key hits its spend cap, requests keep flowing on free capacity instead of dead-ending — the recurring `no credit` failure mode of raw upstreams disappears.
+- **Honest about limits.** Free tiers are still rate-limited upstream (a 429 on a free model is the vendor's throttle, and the router moves on); they are a floor, not a guarantee.
+
+### Subscriptions and pay-as-you-go, one accounting
+
+Multiple subscriptions of the same plan (same base URL, different API keys — e.g. `opencode-go` and `opencode-go-github`) run as **sibling accounts**:
+
+- Per-key quota windows, credit cooldowns and spend caps stay **isolated** — each key burns its own allowance and fails on its own.
+- Model experience is **shared**: calibration, token ratios and proven context bounds are keyed by endpoint × model, so a freshly added key routes with the veteran's learned experience from its first request — no cold-start misjudging.
+- Incidents heal themselves: one account's transport error never blacklists its sibling's route, a single 200 from real traffic clears a stale network flag, and provider-level quota gates reopen automatically when the official windows show remaining capacity.
+
+The budget gate reads the **best available source** for each plan: where the vendor exposes an official quota monitor (zhipu, opencode zen, MiniMax), the observed 5 h percentage is used directly when fresh (≤10 min) — same numbers as the vendor console; plans without an official API (volcengine / ark) run on the local per-request ledger, billing every response with the vendor's exact credit formula (fresh input / cache-hit / output coefficients). Pay-as-you-go providers (deepseek, openrouter) report balances into the same view, and `GET /api/plan-prices` groups every platform's offer per model — unit price, peak / off-peak, 5 h / weekly / monthly allowances — so choosing the cheapest plan for your traffic is a lookup, not research.
 
 **Live plan prices and quotas** — the gateway pulls the community-maintained [`wmpeng/codingplan`](https://github.com/wmpeng/codingplan) dataset (191 plans / 50 platforms, the data behind vibecoding.dreamfree.space) at startup and every 6 h, with mirror fallbacks:
 
