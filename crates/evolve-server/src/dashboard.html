@@ -819,8 +819,40 @@ const T = {
   au_tip_diff:  {zh:'有效难度 = 判定难度 + 会话深度加成；驱动难度联动权重与质量及格线', en:'effective difficulty = judged difficulty + session-depth bonus; drives difficulty-linked weights and the quality floor', ko:'유효 난이도 = 판정 난이도 + 세션 깊이 보너스', ja:'有効難易度 = 判定難易度 + セッション深さボーナス', es:'dificultad efectiva = dificultad juzgada + bono de profundidad de sesión', fr:'difficulté effective = difficulté jugée + bonus de profondeur de session'},
   au_tip_est:   {zh:'预估输入 token——配额硬过滤与预算保护的基准', en:'estimated input tokens — baseline for quota hard-filter and budget protection', ko:'예상 입력 토큰—할당량 필터 기준', ja:'推定入力トークン—quota フィルターの基準', es:'tokens de entrada estimados — base del filtro de cuota', fr:'tokens d\'entrée estimés — base du filtre de quota'},
   au_tip_sticky:{zh:'判定为琐碎请求，会话粘性可直接复用上次选择', en:'judged trivial — session stickiness can reuse the last choice directly', ko:'trivial 판정—세션 스티키 재사용 가능', ja:'瑣碎と判定—セッション粘性で再利用可能', es:'judged trivial — la adherencia de sesión puede reutilizar la última elección', fr:'jugé trivial — la persistance de session peut réutiliser le dernier choix'},
-  au_w_base_vals:{zh:'质量 35 · 速度 15 · 成本 25 · 可靠 15 · 余量 10', en:'quality 35 · speed 15 · cost 25 · reliability 15 · headroom 10', ko:'품질 35 · 속도 15 · 비용 25 · 신뢰성 15 · 여유 10', ja:'品質 35 · 速度 15 · コスト 25 · 信頼性 15 · 余裕 10', es:'calidad 35 · velocidad 15 · coste 25 · fiabilidad 15 · margen 10'},
+  au_w_base_vals:{zh:'质量 35 · 速度 15 · 成本 25 · 可靠 15 · 余量 10', en:'quality 35 · speed 15 · cost 25 · reliability 15 · headroom 10', ko:'품질 35 · 속도 15 · 비용 25 · 신뢰성 15 · 여유 10', ja:'品質 35 · 速度 15 · コスト 25 · 信頼性 15 · 余裕 10', es:'calidad 35 · velocidad 15 · coste 25 · fiabilidad 15 · margen 10', fr:'qualité 35 · vitesse 15 · coût 25 · fiabilité 15 · marge 10'},
 au_gate_closed:{zh:'有条件未通过 → 本次跳过探索（保护高风险/低置信请求）', en:'a condition failed → exploration skipped this run (protects high-stakes / low-confidence requests)', ko:'조건 미충족 → 이번 요청은 탐색 생략(고위험/저신뢰 요청 보호)', ja:'条件未達 → 今回は探索スキップ(高リスク/低信頼リクエスト保護)', es:'una condición falló → exploración omitida (protege solicitudes de alto riesgo / baja confianza)', fr:'une condition a échoué → exploration ignorée (protège les requêtes à haut risque / faible confiance)'},
+// ── 补漏翻译（2026-10 巡检：t→tt 误用 / pv_docs 缺键 / zh-en 二元兜底漏 ko·ja·es·fr / 硬中文无翻译）──
+sec_matrix_allout:{zh:'(全灭 · 降级链试过)', en:'(all out · what the fallback chain tried)', ko:'(전멸 · 폴백 체인 시도)', ja:'（全滅・フォールバック連鎖の試行）', es:'(todos agotados · cadena de reserva probada)', fr:'(tous épuisés · chaîne de repli essayée)'},
+au_w_to_table:{zh:'→ 上表百分比', en:'→ percentages in the table above', ko:'→ 위 표의 백분율', ja:'→ 上表のパーセント', es:'→ porcentajes de la tabla anterior', fr:'→ pourcentages du tableau ci-dessus'},
+au_uw_tip:{zh:'你在面板上为该模型设置的用户权重', en:'user weight you set for this model in the panel', ko:'패널에서 이 모델에 설정한 사용자 가중치', ja:'パネルでこのモデルに設定したユーザー重み', es:'peso de usuario que asignaste a este modelo en el panel', fr:'poids utilisateur défini pour ce modèle dans le panneau'},
+au_qp_damp_tip:{zh:'订阅方案配额消耗超软阈值——预算压制', en:'plan quota burn above the soft threshold — budget damping', ko:'구독 플랜 할당량 소모가 소프트 임계값 초과 — 예산 억제', ja:'サブスク プランの消費がソフト閾値超—予算抑制', es:'consumo de cuota del plan sobre el umbral blando — amortiguación presupuestaria', fr:'consommation du quota de plan au-dessus du seuil doux — amortissement budgétaire'},
+au_flags_none:{zh:'无异常标记', en:'no flags', ko:'이상 플래그 없음', ja:'異常フラグなし', es:'sin indicadores', fr:'aucun signal'},
+au_filt_summary:{zh:'（共 {n} · 示 {m}）', en:'({n} total · showing {m})', ko:'(총 {n} · 표시 {m})', ja:'（計 {n}・表示 {m}）', es:'({n} en total · mostrando {m})', fr:'({n} au total · {m} affichés)'},
+insp_title:{zh:'请求检查器（原始/转换/响应/流分片）', en:'Request inspector (raw / transformed / response / stream)', ko:'요청 검사기(원본/변환/응답/스트림)', ja:'リクエスト検査（元/変換/応答/ストリーム）', es:'Inspector de solicitudes (original / transformada / respuesta / stream)', fr:'Inspecteur de requêtes (brute / transformée / réponse / flux)'},
+insp_loading:{zh:'加载中…', en:'loading…', ko:'불러오는 중…', ja:'読み込み中…', es:'cargando…', fr:'chargement…'},
+insp_req_body:{zh:'原始请求体', en:'request body', ko:'원본 요청 본문', ja:'元リクエストボディ', es:'cuerpo de la solicitud', fr:'corps de la requête'},
+insp_req_headers:{zh:'原始请求头', en:'request headers', ko:'원본 요청 헤더', ja:'元リクエストヘッダー', es:'cabeceras de la solicitud', fr:'en-têtes de la requête'},
+insp_fwd:{zh:'转发上游（转换后）', en:'forwarded upstream', ko:'업스트림 전달(변환 후)', ja:'上流へ転送（変換後）', es:'reenviado aguas arriba (transformada)', fr:'transféré en amont (transformée)'},
+insp_model_only:{zh:'仅 model 名改写（其余字段与原始一致），转发 body 不重复展示。', en:'only the model name was rewritten — forwarded body not duplicated.', ko:'model 이름만 변경됨(나머지는 원본과 동일)—전송 본문 중복 표시 없음.', ja:'model 名のみ書き換え（他は元のまま）—転送ボディは省略。', es:'solo se reescribió el nombre del modelo — el cuerpo reenviado no se duplica.', fr:'seul le nom du modèle a été réécrit — corps transféré non dupliqué.'},
+insp_up_body:{zh:'转换后请求体', en:'transformed body', ko:'변환된 요청 본문', ja:'変換後リクエストボディ', es:'cuerpo transformado', fr:'corps transformé'},
+insp_up_headers:{zh:'上游请求头', en:'upstream headers', ko:'업스트림 요청 헤더', ja:'上流リクエストヘッダー', es:'cabeceras aguas arriba', fr:'en-têtes amont'},
+insp_resp_headers:{zh:'响应头', en:'response headers', ko:'응답 헤더', ja:'応答ヘッダー', es:'cabeceras de respuesta', fr:'en-têtes de réponse'},
+insp_resp_body:{zh:'响应体', en:'response body', ko:'응답 본문', ja:'応答ボディ', es:'cuerpo de respuesta', fr:'corps de réponse'},
+insp_stream:{zh:'流分片（头+尾，截断标记见内）', en:'stream frames (head+tail)', ko:'스트림 프레임(머리+꼬리)', ja:'ストリーム断片（先頭+末尾）', es:'fragmentos de stream (inicio+fin)', fr:'trames de flux (début+fin)'},
+insp_redact:{zh:'redact 模式：body 未捕获（仅尺寸）。', en:'redact mode: bodies not captured (sizes only).', ko:'redact 모드: 본문 미수집(크기만).', ja:'redact モード：ボディ未収集（サイズのみ）。', es:'modo redact: cuerpos no capturados (solo tamaños).', fr:'mode redact : corps non capturés (tailles seulement).'},
+insp_empty:{zh:'该请求无捕获数据（检查环容量 50，已滚动）。', en:'no capture for this request (ring capacity 50, rolled).', ko:'이 요청에 수집 데이터 없음(링 용량 50, 순환됨).', ja:'このリクエストの収集データなし（リング容量 50、上書き済み）。', es:'sin datos capturados para esta solicitud (anillo de 50, ya rotado).', fr:'aucune donnée capturée pour cette requête (anneau de 50, déjà rotationné).'},
+cand_all_cool:{zh:'⚠ 该模型全部 key 处于冷却或不可用', en:'⚠ all keys cooling down or unavailable', ko:'⚠ 이 모델의 모든 키가 쿨다운 또는 사용 불가', ja:'⚠ このモデルの全キーがクールダウンまたは利用不可', es:'⚠ todas las claves de este modelo en enfriamiento o no disponibles', fr:'⚠ toutes les clés de ce modèle en recharge ou indisponibles'},
+bias_neutral_tip:{zh:'learned bias（1.00 = 与群体一致）', en:'learned bias (1.00 = at the group baseline)', ko:'학습 편향(1.00 = 집단 기준)', ja:'学習バイアス（1.00 = 集団基準）', es:'sesgo aprendido (1.00 = en la base del grupo)', fr:'biais appris (1,00 = à la base du groupe)'},
+q_week:{zh:'周', en:'wk', ko:'주', ja:'週', es:'sem', fr:'sem'},
+q_month:{zh:'月', en:'mo', ko:'월', ja:'月', es:'mes', fr:'mois'},
+age_ago:{zh:'{n} 前', en:'{n} ago', ko:'{n} 전', ja:'{n} 前', es:'hace {n}', fr:'il y a {n}'},
+pv_bal_tip:{zh:'账号余额（官方余额端点实测）', en:'account balance (from the official balance endpoint)', ko:'계정 잔액(공식 잔액 엔드포인트 실측)', ja:'アカウント残高（公式残高エンドポイント実測）', es:'saldo de la cuenta (del endpoint oficial de saldo)', fr:'solde du compte (depuis le point de terminaison officiel)'},
+pv_bal:{zh:'余额', en:'bal', ko:'잔액', ja:'残高', es:'saldo', fr:'solde'},
+pv_bal_bad:{zh:'不可用', en:'unavailable', ko:'사용 불가', ja:'利用不可', es:'no disponible', fr:'indisponible'},
+pv_kind_api:{zh:'API 按量', en:'API pay-as-you-go', ko:'API 종량제', ja:'API 従量課金', es:'API por uso', fr:'API à l\'usage'},
+theme_light_tip:{zh:'明亮模式（点击切换暗色）', en:'Light mode (click to switch to dark)', ko:'밝은 모드(클릭하면 어두운 모드로)', ja:'ライトモード（クリックでダークへ）', es:'Modo claro (clic para cambiar a oscuro)', fr:'Mode clair (cliquer pour passer en sombre)'},
+theme_dark_tip:{zh:'暗色模式（点击切换明亮）', en:'Dark mode (click to switch to light)', ko:'어두운 모드(클릭하면 밝은 모드로)', ja:'ダークモード（クリックでライトへ）', es:'Modo oscuro (clic para cambiar a claro)', fr:'Mode sombre (cliquer pour passer en clair)'},
+pv_docs:{zh:'打开该 Provider 的官方文档', en:'open this provider\'s official docs', ko:'이 Provider의 공식 문서 열기', ja:'この Provider の公式ドキュメントを開く', es:'abrir la documentación oficial de este proveedor', fr:'ouvrir la documentation officielle de ce fournisseur'},
 };
 const t = k => (T[k] && (T[k][lang] ?? T[k].zh)) ?? k;
 
@@ -1057,7 +1089,7 @@ function linkView(e){
       const failTxt = fail ? ' '+esc(fail.replace(m, '').replace(/^[\[\(]/, '(')) : '';
       return '<span style="display:inline-block;padding:1px 6px;border:1px solid var(--border);border-radius:3px;margin:1px;font-size:10px;color:var(--dim)">'+esc(shortId(m))+failTxt+'</span>';
     }).join(' ');
-    parts.push('<div class="lk-h">'+esc(t('sec_matrix'))+' <span class="dim2">(全灭 · 降级链试过)</span></div>' +
+    parts.push('<div class="lk-h">'+esc(t('sec_matrix'))+' <span class="dim2">'+esc(t('sec_matrix_allout'))+'</span></div>' +
       '<div style="line-height:1.8">'+tried+'</div>');
   }
   return parts.join('');
@@ -1249,7 +1281,7 @@ function renderAutopsy(e){
       '<div>① '+esc(t('au_w_base'))+'：'+esc(t('au_w_base_vals'))+'</div>' +
       '<div>② '+esc(t('au_w_diff'))+'（d<sub>eff</sub>='+deff.toFixed(2)+'，d='+d.toFixed(2)+'）：'+esc(t('au_factor_c'))+' ×'+costBoost.toFixed(2)+' · '+esc(t('au_factor_q'))+' ×'+qScale.toFixed(2)+'</div>' +
       '<div>③ '+esc(t('au_w_quota'))+'：'+esc(t('au_w_quota_none'))+'</div>' +
-      '<div>④ '+esc(t('au_w_norm'))+' → 上表百分比</div>' +
+      '<div>④ '+esc(t('au_w_norm'))+' '+esc(t('au_w_to_table'))+'</div>' +
       '<div class="dim2" style="margin-top:3px">'+esc(t('au_w_custom'))+'</div>' +
       '</div></details>');
   }
@@ -1272,9 +1304,9 @@ function renderAutopsy(e){
       const mults = [];
       const bv = +(r.bias||1);
       if (Math.abs(bv-1) > 0.001) mults.push('<span class="m'+(bv>1?' hot':' damp')+'" title="'+esc(t('au_bias_tip'))+'">bias ×'+bv.toFixed(3)+'</span>');
-      if (r.uw && +r.uw !== 1) mults.push('<span class="m" title="你在面板上为该模型设置的用户权重">user ×'+(+r.uw).toFixed(2)+'</span>');
+      if (r.uw && +r.uw !== 1) mults.push('<span class="m" title="'+esc(t('au_uw_tip'))+'">user ×'+(+r.uw).toFixed(2)+'</span>');
       const qp = +(r.qp||1);
-      if (qp < 0.99) mults.push('<span class="m damp" title="订阅方案配额消耗超软阈值——预算压制">'+esc(t('au_qp').replace('{q}', qp.toFixed(2)))+'</span>');
+      if (qp < 0.99) mults.push('<span class="m damp" title="'+esc(t('au_qp_damp_tip'))+'">'+esc(t('au_qp').replace('{q}', qp.toFixed(2)))+'</span>');
       L.push('<div class="au-cand'+(win?' win':'')+'">' +
         '<div class="top"><span class="nm" title="'+esc(r.model_id)+'">'+esc(shortId(r.model_id))+'</span>' +
         (win ? '<span class="win-tag">★ '+esc(t('au_win'))+'</span>' : '') +
@@ -1358,7 +1390,7 @@ function renderAutopsy(e){
     if (e.quality) {
       const flags = e.quality.flags || [];
       L.push('<div class="dim2" style="margin-top:4px">'+esc(t('m_quality'))+': ' +
-        (flags.length ? esc(JSON.stringify(flags)) : (lang==='zh'?'无异常标记':'no flags')) + '</div>');
+        (flags.length ? esc(JSON.stringify(flags)) : esc(t('au_flags_none'))) + '</div>');
     }
   }
 
@@ -1376,7 +1408,7 @@ function renderAutopsy(e){
       '<span title="'+esc(fl.model)+'">'+esc(shortId(fl.model))+'</span>（'+esc(causeLocal(fl.cause))+'）').join('、 ');
     const shownN = Math.min(total, chainBad.length+rest.length);
     L.push('<details style="margin-top:8px"><summary class="dim2" style="cursor:pointer">'+esc(t('st_filtered_head')) +
-      (lang==='zh' ? '（共 '+total+' · 示 '+shownN+'）' : ' ('+total+' total · showing '+shownN+')') + '</summary>' +
+      esc(t('au_filt_summary').replace('{n}', total).replace('{m}', shownN)) + '</summary>' +
       '<div class="dim2" style="margin-top:4px;line-height:1.7">' + shown + (total > chainBad.length+rest.length ? ' …' : '') + '</div></details>');
   }
 
@@ -1388,9 +1420,9 @@ function renderAutopsy(e){
   const insp = document.createElement('details');
   insp.style.marginTop = '8px';
   insp.innerHTML = '<summary class="dim2" style="cursor:pointer">' +
-    (lang==='zh' ? '请求检查器（原始/转换/响应/流分片）' : 'Request inspector (raw / transformed / response / stream)') +
+    esc(t('insp_title')) +
     '</summary><div class="ri-body dim2" style="margin-top:6px">' +
-    (lang==='zh' ? '加载中…' : 'loading…') + '</div>';
+    esc(t('insp_loading')) + '</div>';
   B.appendChild(insp);
   const body = insp.querySelector('.ri-body');
   fetch('/api/inspect/detail?decision_id=' + encodeURIComponent(e.decision_id || ''))
@@ -1402,24 +1434,24 @@ function renderAutopsy(e){
         'padding:6px 8px;border-radius:6px;white-space:pre-wrap;word-break:break-all;font-size:11px">' +
         esc(prettyBody(val)) + '</pre></div>') : '';
       body.innerHTML =
-        sect((lang==='zh'?'原始请求体':'request body'), d.client_body) +
-        sect((lang==='zh'?'原始请求头':'request headers'), d.client_headers) +
+        sect(t('insp_req_body'), d.client_body) +
+        sect(t('insp_req_headers'), d.client_headers) +
         (d.upstream_url
-          ? '<div style="margin-top:6px"><b>' + (lang==='zh'?'转发上游（转换后）':'forwarded upstream') +
+          ? '<div style="margin-top:6px"><b>' + esc(t('insp_fwd')) +
             (d.translated ? ' · ⇄' : '') + '</b><div class="dim2" style="font-size:11px">' + esc(d.upstream_url||'') + '</div>' +
             (d.upstream_same
               ? '<div class="dim2" style="margin:4px 0">' +
-                (lang==='zh'?'仅 model 名改写（其余字段与原始一致），转发 body 不重复展示。':'only the model name was rewritten — forwarded body not duplicated.') + '</div>'
-              : sect((lang==='zh'?'转换后请求体':'transformed body'), d.upstream_body)) +
-            sect((lang==='zh'?'上游请求头':'upstream headers'), d.upstream_headers) + '</div>'
+                esc(t('insp_model_only')) + '</div>'
+              : sect(t('insp_up_body'), d.upstream_body)) +
+            sect(t('insp_up_headers'), d.upstream_headers) + '</div>'
           : '') +
-        sect((lang==='zh'?'响应头':'response headers'), d.resp_headers) +
-        sect((lang==='zh'?'响应体':'response body'), d.resp_body) +
-        sect((lang==='zh'?'流分片（头+尾，截断标记见内）':'stream frames (head+tail)'), d.stream_head || d.stream_tail);
+        sect(t('insp_resp_headers'), d.resp_headers) +
+        sect(t('insp_resp_body'), d.resp_body) +
+        sect(t('insp_stream'), d.stream_head || d.stream_tail);
       if (d.redacted) body.innerHTML = '<div class="dim2">' +
-        (lang==='zh'?'redact 模式：body 未捕获（仅尺寸）。':'redact mode: bodies not captured (sizes only).') + '</div>';
+        esc(t('insp_redact')) + '</div>';
       if (!d.client_body && !d.upstream_body && !d.resp_body && !d.stream_head && !d.redacted)
-        body.innerHTML = '<div class="dim2">' + (lang==='zh'?'该请求无捕获数据（检查环容量 50，已滚动）。':'no capture for this request (ring capacity 50, rolled).') + '</div>';
+        body.innerHTML = '<div class="dim2">' + esc(t('insp_empty')) + '</div>';
     })
     .catch(() => { body.innerHTML = '<div class="dim2">inspect unavailable</div>'; });
 }
@@ -1458,7 +1490,7 @@ function renderDyn(){
     const pkShort = {'api':'API', coding:'CP', token:'TP', agent:'AP'}[s.plan_kind] || '';
     const pkFull = {'api':'pk_api', coding:'pk_coding', token:'pk_token', agent:'pk_agent'}[s.plan_kind];
     const pkBadge = pkShort ? ' <span class="pbadge dim2" title="'+esc(t(pkFull))+'">'+pkShort+'</span>' : '';
-    const src = '<span'+(degraded?' style="color:var(--red)" title="'+(lang==='zh'?'⚠ 该模型全部 key 处于冷却或不可用':'⚠ all keys cooling down or unavailable')+'"':'')+'>'+esc(srcLabel(s.source))+(degraded?' ⚠':'')+'</span>'+pkBadge;
+    const src = '<span'+(degraded?' style="color:var(--red)" title="'+esc(t('cand_all_cool'))+'"':'')+'>'+esc(srcLabel(s.source))+(degraded?' ⚠':'')+'</span>'+pkBadge;
     const tc = s.tool_calls || {};
     const toolRate = tc.total ? Math.round(100*(tc.valid_json/tc.total))+'%' : '-';
     const tok = '<div title="'+esc(t('t_actual'))+'">'+fmtK(s.prompt_tokens??0)+t('s_in')+' '+fmtK(s.completion_tokens??0)+t('s_out')+'</div>' +
@@ -1532,7 +1564,7 @@ function renderWheel(){
       (() => { const up = lb > 1.005, dn = lb < 0.995;
         const cls = up ? 'la c' : dn ? 'la f' : 'la';
         const arrow = up ? '↑' : dn ? '↓' : '→';
-        return '<span class="'+cls+'" title="learned bias（1.00 = 与群体一致）">'+arrow+' '+lb.toFixed(2)+'</span>'; })();
+        return '<span class="'+cls+'" title="'+esc(t('bias_neutral_tip'))+'">'+arrow+' '+lb.toFixed(2)+'</span>'; })();
     const fb = s.feedback || {ok:0,total:0};
     const sem = s.semantic || {matched:0,total:0};
     const act = lastAct[id];
@@ -1546,12 +1578,12 @@ function renderWheel(){
       '<td class="num">'+(s.success_rate==null?'-':Math.round(s.success_rate*100)+'%')+'</td>' +
       '<td class="num">'+(s.cache_hit_rate==null?'-':Math.round(s.cache_hit_rate*100)+'%')+'</td>' +
       '<td class="num">'+(s.plan_kind && s.plan_kind !== 'api'
-        ? '<span class="pbadge" title="'+esc(t('w_cost._t'))+'">'+esc(t('w_sub'))+'</span>'
+        ? '<span class="pbadge" title="'+esc(tt('w_cost._t'))+'">'+esc(t('w_sub'))+'</span>'
         : fmtCost(s.est_cost, s.currency))+'</td>' +
       '<td class="num">'+(s.samples??0)+'</td>' +
       '<td class="num">'+esc(String(sem.matched ?? 0)+'/'+String(sem.total ?? 0))
         + (fb.total > 0 ? ' <span class="dim2">('+fb.ok+'/'+fb.total+')</span>' : '')+'</td>' +
-      '<td class="num"><span class="wedit" title="'+esc(t('m_interv._t'))+'" data-wmodel="'+esc(id)+'" data-wcur="'+uw+'">'+Math.round(50*Math.sqrt(uw*lb))+'</span></td></tr>';
+      '<td class="num"><span class="wedit" title="'+esc(tt('m_interv._t'))+'" data-wmodel="'+esc(id)+'" data-wcur="'+uw+'">'+Math.round(50*Math.sqrt(uw*lb))+'</span></td></tr>';
   });
   wb.innerHTML = rows.length ? rows.join('') : '<tr><td colspan="12" style="color:var(--dim)">'+t('wheelcold')+'</td></tr>';
   wb.querySelectorAll('.wedit').forEach(el => el.addEventListener('click', () => {
@@ -1667,8 +1699,8 @@ function tierSelectHtml(v){
   for (const o of opts) {
     seen.add(o.tier);
     const q = [o.h5 != null ? '5h ' + fmtK(o.h5) : null,
-               o.weekly != null ? '周 ' + fmtK(o.weekly) : null,
-               o.monthly != null ? '月 ' + fmtK(o.monthly) : null].filter(Boolean).join(' · ');
+               o.weekly != null ? t('q_week') + ' ' + fmtK(o.weekly) : null,
+               o.monthly != null ? t('q_month') + ' ' + fmtK(o.monthly) : null].filter(Boolean).join(' · ');
     html += '<option value="' + esc(o.tier) + '"' + (v.tier === o.tier ? ' selected' : '') + '>'
       + esc(o.tier) + (q ? ' — ' + esc(q) : '') + '</option>';
   }
@@ -1820,7 +1852,7 @@ function renderProviders(){
       const ageTxt = age < 60 ? age+'s' : Math.floor(age/60)+'m';
       obsRows.push('<span class="dim2" style="font-size:10px;margin-right:10px">'
         + '<b style="color:'+col+'">'+esc(obsMap[k])+'</b>: '+w.remaining+' / '+limTxt
-        + ' <span class="dim2">('+ageTxt+' 前)</span></span>');
+        + ' <span class="dim2">(' + esc(t('age_ago').replace('{n}', ageTxt)) + ')</span></span>');
     });
     if (obsRows.length) {
       provHtml = '<div style="margin-top:4px">'
@@ -1858,7 +1890,7 @@ function renderProviders(){
     const wk = p.windows && p.windows['weekly'];
     const mo = p.windows && p.windows['monthly'];
     const winInfo = (allowance || wk || mo)
-      ? '<span class="dim2" style="font-size:10px;margin-left:4px">5h:'+fq(allowance)+' 周:'+fq(wk)+' 月:'+fq(mo)+'</span>'
+      ? '<span class="dim2" style="font-size:10px;margin-left:4px">5h:'+fq(allowance)+' '+t('q_week')+':'+fq(wk)+' '+t('q_month')+':'+fq(mo)+'</span>'
       : '';
     // 按量余额（payg_balance：官方 /user/balance 实测；负数/不可用红字）
     const paygBal = (p.payg_balance && typeof p.payg_balance.total === 'number')
@@ -1866,9 +1898,9 @@ function renderProviders(){
           const avail = !!p.payg_balance.is_available;
           const total = Number(p.payg_balance.total).toFixed(2);
           const bad = !avail || p.payg_balance.total < 0;
-          return '<span class="pbadge" title="账号余额（官方余额端点实测）" style="'
+          return '<span class="pbadge" title="'+esc(t('pv_bal_tip'))+'" style="'
             + (bad ? 'background:var(--badge-dead-bg);color:var(--red)' : 'background:var(--badge-ok-bg);color:var(--green)')
-            + '">余额 '+esc(String(p.payg_balance.currency))+' '+esc(total)+(bad?' · 不可用':'')+'</span>';
+            + '">'+esc(t('pv_bal'))+' '+esc(String(p.payg_balance.currency))+' '+esc(total)+(bad?' · '+esc(t('pv_bal_bad')):'')+'</span>';
         })()
       : '';
     // 来源说明：provider 从哪来（用户配置 / 哪个 agent 配置 + **账号名**）。
@@ -1957,7 +1989,7 @@ function openProviderDrawer(key, isManual){
       <option value="coding" ${v.plan_kind==='coding'?'selected':''}>Coding Plan</option>
       <option value="agent" ${v.plan_kind==='agent'?'selected':''}>Agent Plan</option>
       <option value="go" ${v.plan_kind==='go'?'selected':''}>OpenCode Go (Token)</option>
-      <option value="api" ${v.plan_kind==='api'?'selected':''}>API 按量</option>
+      <option value="api" ${v.plan_kind==='api'?'selected':''}>${t('pv_kind_api')}</option>
     </select>`],
     ['pv_field_tier', tierSelectHtml(v)],
     ['pv_field_window5h',`<input id="pv-w5h" type="number" min="0" value="${v.window_5h??''}" placeholder="2000" style="width:100%;background:var(--input-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 6px">`],
@@ -2424,9 +2456,7 @@ es.onmessage = ev => { try { addRow(JSON.parse(ev.data)); } catch(_){} };
     const light = cur === 'light';
     if (sun) sun.style.display = light ? '' : 'none';
     if (moon) moon.style.display = light ? 'none' : '';
-    btn.title = light
-      ? (lang === 'zh' ? '明亮模式（点击切换暗色）' : 'Light mode (click to switch to dark)')
-      : (lang === 'zh' ? '暗色模式（点击切换明亮）' : 'Dark mode (click to switch to light)');
+    btn.title = light ? t('theme_light_tip') : t('theme_dark_tip');
   };
   sync();
   btn.addEventListener('click', () => {
