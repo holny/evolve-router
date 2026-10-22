@@ -583,6 +583,7 @@ pub async fn chat_completions(
 
         // 检查器：上游响应状态 + 头（最后一次尝试为准）
         crate::request_inspect::with_entry(&inspect, |g| {
+            g.status = status.as_u16();
             g.resp_status = Some(status.as_u16());
             let rh: serde_json::Map<String, Value> = resp
                 .headers()
