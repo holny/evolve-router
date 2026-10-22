@@ -1404,10 +1404,13 @@ function renderAutopsy(e){
       body.innerHTML =
         sect((lang==='zh'?'原始请求体':'request body'), d.client_body) +
         sect((lang==='zh'?'原始请求头':'request headers'), d.client_headers) +
-        (d.upstream_body
+        (d.upstream_url
           ? '<div style="margin-top:6px"><b>' + (lang==='zh'?'转发上游（转换后）':'forwarded upstream') +
             (d.translated ? ' · ⇄' : '') + '</b><div class="dim2" style="font-size:11px">' + esc(d.upstream_url||'') + '</div>' +
-            sect((lang==='zh'?'转换后请求体':'transformed body'), d.upstream_body) +
+            (d.upstream_same
+              ? '<div class="dim2" style="margin:4px 0">' +
+                (lang==='zh'?'转换后请求体与原始完全一致，不重复展示。':'transformed body is identical to the original — not duplicated.') + '</div>'
+              : sect((lang==='zh'?'转换后请求体':'transformed body'), d.upstream_body)) +
             sect((lang==='zh'?'上游请求头':'upstream headers'), d.upstream_headers) + '</div>'
           : '') +
         sect((lang==='zh'?'响应头':'response headers'), d.resp_headers) +

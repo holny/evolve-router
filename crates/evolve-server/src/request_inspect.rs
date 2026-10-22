@@ -42,6 +42,8 @@ pub struct InspectEntry {
     pub upstream_url: Option<String>,
     pub upstream_headers: Option<String>,
     pub upstream_body: Option<String>,
+    /// 转发 body 与客户端原始 body 完全一致（无有效转换）→ UI 只提示不重复展示
+    pub upstream_same: bool,
     pub translated: bool,
     // ── 响应（上游 → 网关 → 客户端）──
     pub resp_status: Option<u16>,

@@ -74,6 +74,7 @@ pub async fn chat_completions(
         upstream_url: None,
         upstream_headers: None,
         upstream_body: None,
+        upstream_same: false,
         translated: false,
         resp_status: None,
         resp_headers: None,
@@ -531,9 +532,14 @@ pub async fn chat_completions(
             crate::request_inspect::with_entry(&inspect, |g| {
                 g.upstream_url = Some(url.clone());
                 g.upstream_headers = Some(serde_json::to_string_pretty(&upstream_headers).unwrap_or_default());
-                g.upstream_body = (!redact_on).then(|| {
-                    String::from_utf8_lossy(&fwd_body).into_owned()
-                });
+                // body 与原始完全一致（无有效转换）→ 不存重复体，只记标记
+                let same = fwd_body == body;
+                g.upstream_body = if same || redact_on {
+                    None
+                } else {
+                    Some(String::from_utf8_lossy(&fwd_body).into_owned())
+                };
+                g.upstream_same = same;
                 g.translated = to_anthropic;
             });
         }
