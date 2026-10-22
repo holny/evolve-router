@@ -5,7 +5,7 @@
 //! （单次变化 ≤ 0.15）写入 ~/.evo-router/distilled.json，叠加到 catalog。
 //! 红线：用户显式声明（tiers_explicit）不被蒸馏覆盖；回滚 = 删除该文件。
 
-use crate::types::{ModelRecord, Tiers};
+use crate::types::{ModelRecord, Tiers, TiersSource};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -16,6 +16,19 @@ pub const DISTILL_MIN_INTERVAL_MS: u64 = 7 * 24 * 3600 * 1000;
 /// 蒸馏只能微调：单次 tier 变化上限
 pub const MAX_TIER_SHIFT: f32 = 0.15;
 
+/// 锚定带宽 = 相对初始声明的累计偏移上限（×MAX_TIER_SHIFT），按初始卡的
+/// 信号置信度分级（2026-10 用户定）：初始评估可信才值得锚紧——provider
+/// 官方字段锚最紧；参考仓库/命名先验置信度递减、带宽递增；无信号 Flat
+/// 卡的初始值本身没依据，基本放开（±0.9 覆盖全域 ≈ 不设限）。
+pub fn anchor_band(source: TiersSource) -> f32 {
+    match source {
+        TiersSource::Provider => 2.0,
+        TiersSource::Reference => 3.0,
+        TiersSource::Heuristic => 4.0,
+        TiersSource::Flat => 6.0,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistilledCard {
     pub tiers: Tiers,
@@ -23,6 +36,10 @@ pub struct DistilledCard {
     /// 基准固定为原始声明（否则每轮以上一轮蒸馏值为基准，多轮几何漂移
     /// 无上界）
     pub declared: Tiers,
+    /// 首次蒸馏时初始卡的信号来源——锚定带宽按此分级（见 anchor_band）；
+    /// 旧卡无此字段 → serde default = Flat（带宽最宽，向后兼容不收缩）
+    #[serde(default)]
+    pub tiers_source: TiersSource,
     /// 客观摘要（本地拼接，非 LLM 生成）：蒸馏依据的观测形态
     pub note: String,
     /// epoch ms
@@ -80,12 +97,13 @@ pub fn due_for_distill(success: u64, card: Option<&DistilledCard>) -> bool {
 }
 
 /// 保守收缩：蒸馏建议与**原始声明**五五开，且相对原始声明的累计偏移
-/// ≤ 2×MAX_TIER_SHIFT——review#5 修复：基准若用上一轮蒸馏值，多轮会
-/// 几何漂移到建议值；固定声明基准 + 全局偏移上限才真正"只微调"
-pub fn conservative_merge(declared: &Tiers, suggested: &Tiers) -> Tiers {
+/// ≤ `band_mult`×MAX_TIER_SHIFT——review#5 修复：基准若用上一轮蒸馏值，
+/// 多轮会几何漂移到建议值；固定声明基准 + 全局偏移上限才真正"只微调"。
+/// band_mult 按初始卡信号置信度分级（anchor_band）：先验卡多给自由度。
+pub fn conservative_merge(declared: &Tiers, suggested: &Tiers, band_mult: f32) -> Tiers {
     let shrink = |dec: f32, sug: f32| -> f32 {
         let merged = 0.5 * dec + 0.5 * sug;
-        let capped = merged.clamp(dec - 2.0 * MAX_TIER_SHIFT, dec + 2.0 * MAX_TIER_SHIFT);
+        let capped = merged.clamp(dec - band_mult * MAX_TIER_SHIFT, dec + band_mult * MAX_TIER_SHIFT);
         capped.clamp(0.0, 1.0)
     };
     Tiers {
@@ -141,14 +159,32 @@ mod tests {
     fn conservative_merge_limits_cumulative_shift() {
         let declared = tiers(0.5);
         // 建议剧烈上修到 0.95：累计偏移相对原始声明封顶 2×MAX_TIER_SHIFT
-        let merged = conservative_merge(&declared, &tiers(0.95));
+        let merged = conservative_merge(&declared, &tiers(0.95), anchor_band(TiersSource::Provider));
         assert!((merged.reasoning - 0.5).abs() <= 2.0 * MAX_TIER_SHIFT + 1e-4);
         assert!(merged.reasoning > 0.5, "suggestion above declared should pull up");
         // 五五开理想值 0.725（在 0.5±0.30 封顶内，故不被截断）
         assert!((merged.reasoning - 0.725).abs() < 1e-4);
         // 即使 suggested 极端反向，累计偏移也被同一上界封顶
-        let down = conservative_merge(&declared, &tiers(0.0));
+        let down = conservative_merge(&declared, &tiers(0.0), anchor_band(TiersSource::Provider));
         assert!((down.reasoning - 0.5).abs() <= 2.0 * MAX_TIER_SHIFT + 1e-4);
+    }
+
+    /// 锚定带宽按初始卡置信度分级（2026-10 用户定）：provider 官方锚最紧，
+    /// 先验/无信号卡多给蒸馏自由度。注：五五开合并本身把偏移限制在 ≤0.5，
+    /// 所以带宽的实际区分点是 Provider（±0.30 会截断）vs 先验/Flat（≥±0.60
+    /// 不再截断——对低置信初始评估等于不设硬锚）
+    #[test]
+    fn anchor_band_widens_as_confidence_drops() {
+        let declared = tiers(0.3);
+        let suggestion = tiers(1.0);
+        let provider = conservative_merge(&declared, &suggestion, anchor_band(TiersSource::Provider));
+        let reference = conservative_merge(&declared, &suggestion, anchor_band(TiersSource::Reference));
+        let heuristic = conservative_merge(&declared, &suggestion, anchor_band(TiersSource::Heuristic));
+        // 理想五五开 = 0.65（偏移 0.35）：provider ±0.30 截断到 0.60，其余不截
+        assert!((provider.reasoning - 0.60).abs() < 1e-4, "provider anchored tight: {}", provider.reasoning);
+        assert!((reference.reasoning - 0.65).abs() < 1e-4, "reference band fits: {}", reference.reasoning);
+        assert!((heuristic.reasoning - 0.65).abs() < 1e-4, "heuristic/flat effectively unanchored: {}", heuristic.reasoning);
+        assert!(heuristic.reasoning > provider.reasoning);
     }
 
     #[test]
@@ -158,6 +194,7 @@ mod tests {
         let fresh = DistilledCard {
             tiers: tiers(0.5),
             declared: tiers(0.5),
+            tiers_source: TiersSource::Flat,
             note: String::new(),
             at: now_ms(),
             basis_success: 60,
@@ -174,7 +211,7 @@ mod tests {
         let mut store = DistilledStore::new();
         store.insert(
             "m".into(),
-            DistilledCard { tiers: tiers(0.9), declared: tiers(0.3), note: String::new(), at: 0, basis_success: 50, version: 1 },
+            DistilledCard { tiers: tiers(0.9), declared: tiers(0.3), tiers_source: TiersSource::Flat, note: String::new(), at: 0, basis_success: 50, version: 1 },
         );
         // 非 explicit：被蒸馏覆盖
         let mut free = ModelRecord { id: "m".into(), ..Default::default() };

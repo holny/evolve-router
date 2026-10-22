@@ -1051,19 +1051,25 @@ impl Inner {
             };
             // review#12 复查修复：merge 基准必须用首次蒸馏时固化的原始声明
             // （card.declared）——上一版 declared_base 存了但 merge 用的还是
-            // 当前 catalog tiers（已是上轮 merged 值），多轮仍会阶梯漂移
-            let declared_base = store
+            // 当前 catalog tiers（已是上轮 merged 值），多轮仍会阶梯漂移。
+            // 锚定带宽按初始卡信号置信度分级（2026-10 用户定）：provider 官方
+            // 锚紧、参考仓库/命名先验放宽、无信号 Flat 卡基本放开
+            let (declared_base, declared_source) = store
                 .get(id)
-                .map(|c| c.declared.clone())
+                .map(|c| (c.declared.clone(), c.tiers_source))
                 .unwrap_or_else(|| {
                     self.engine
                         .catalog_snapshot()
                         .into_iter()
                         .find(|m| m.id == *id)
-                        .map(|m| m.tiers)
-                        .unwrap_or_else(|| suggested.clone())
+                        .map(|m| (m.tiers, m.tiers_source))
+                        .unwrap_or_else(|| (suggested.clone(), evolve_core::types::TiersSource::Flat))
                 });
-            let merged = evolve_core::distill::conservative_merge(&declared_base, &suggested);
+            let merged = evolve_core::distill::conservative_merge(
+                &declared_base,
+                &suggested,
+                evolve_core::distill::anchor_band(declared_source),
+            );
             let note = evolve_core::distill::stats_note(
                 s.success,
                 success_rate as f32,
@@ -1077,6 +1083,7 @@ impl Inner {
                 evolve_core::distill::DistilledCard {
                     tiers: merged,
                     declared: declared_base,
+                    tiers_source: declared_source,
                     note,
                     at: evolve_core::distill::now_ms(),
                     basis_success: s.success,

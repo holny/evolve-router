@@ -147,6 +147,8 @@ pub fn record_from_openai_model(
     };
     if let Some(t) = tiers {
         rec.tiers = t;
+        // provider 官方能力字段 = 最高置信来源（蒸馏锚定带宽最紧）
+        rec.tiers_source = TiersSource::Provider;
     }
     Some(rec)
 }

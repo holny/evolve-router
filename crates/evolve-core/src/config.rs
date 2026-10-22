@@ -573,6 +573,8 @@ impl FileConfig {
             source: Source::User,
             source_note: entry.source_note.clone(),
             release_ts: None,
+            // 用户配置卡：tiers_explicit 已挡蒸馏，带宽来源不会被消费
+            tiers_source: TiersSource::Flat,
         }
     }
 

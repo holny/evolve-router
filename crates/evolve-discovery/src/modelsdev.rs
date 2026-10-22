@@ -11,7 +11,7 @@
 //! provider 不必同名（用户裁决）：全局命中即可；**同一模型被多家转售时取最早
 //! 发布日**（最早那条才是模型真正的发布时间）。
 
-use evolve_core::types::{Cost, ModelRecord, Tiers};
+use evolve_core::types::{Cost, ModelRecord, Tiers, TiersSource};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -117,13 +117,19 @@ pub fn enrich(records: &mut [ModelRecord], api: &Value) {
                         vision: if vision { 0.85 } else { 0.0 },
                         agentic: if tool_call { 0.7 } else { 0.4 },
                     };
+                    // 参考仓库来源（置信度中：蒸馏锚定带宽中等）
+                    r.tiers_source = TiersSource::Reference;
                     touched = true;
                 }
             }
         }
         // 命名先验兜底：models.dev 条目缺失或无能力字段时，至少按后缀语义
-        // 给冷启动卡一个方向（flash 快而略弱 / max 旗舰 / think 推理 / vl 视觉）
-        r.apply_naming_priors();
+        // 给冷启动卡一个方向（flash 快而略弱 / max 旗舰 / think 推理 / vl 视觉）。
+        // Flat 卡被命名信号命中 → 来源升为 Heuristic（置信度低：锚定带宽放宽）；
+        // Provider/Reference 卡只做小幅微调、来源不变（主信号置信度占优）
+        if r.apply_naming_priors() && r.tiers_source == TiersSource::Flat {
+            r.tiers_source = TiersSource::Heuristic;
+        }
         if touched {
             r.source_note = Some(match r.source_note.take() {
                 Some(n) => format!("{n} +models.dev"),
@@ -385,6 +391,63 @@ mod tests {
         });
         let m = find_model(&api, "unknown-provider", "glm-5.3-flash").unwrap();
         assert_eq!(m.get("release_date").and_then(|v| v.as_str()), Some("2025-08-20"));
+    }
+
+    /// 来源置信度链（2026-10 用户定）：provider 官方 > 参考仓库 > 命名先验。
+    /// provider 已给能力卡的条目不被 models.dev 覆盖；models.dev 命中 →
+    /// Reference；仅命名信号命中 → Heuristic；无信号 → Flat
+    #[test]
+    fn tiers_source_follows_confidence_chain() {
+        let api = json!({
+            "zenmux": {"models": {"gpt-x": {
+                "tool_call": true, "reasoning": true,
+                "limit": {"context": 400_000},
+            }}}
+        });
+        // provider 官方卡：不被参考仓库覆盖，来源保持 Provider
+        let mut provider_card = ModelRecord {
+            id: "openrouter/gpt-x".into(),
+            provider: "openrouter".into(),
+            upstream_model: "gpt-x".into(),
+            tiers: Tiers { reasoning: 0.8, coding: 0.7, vision: 0.0, agentic: 0.9 },
+            tiers_source: TiersSource::Provider,
+            ..Default::default()
+        };
+        // 注意：Provider 卡的 tiers ≠ default，参考仓库填充被跳过
+        let mut records = vec![provider_card.clone()];
+        enrich(&mut records, &api);
+        assert_eq!(records[0].tiers, provider_card.tiers, "official card untouched");
+        assert_eq!(records[0].tiers_source, TiersSource::Provider);
+
+        // 无信号卡命中参考仓库 → Reference
+        let mut records = vec![ModelRecord {
+            id: "p/gpt-x".into(),
+            provider: "p".into(),
+            upstream_model: "gpt-x".into(),
+            ..Default::default()
+        }];
+        enrich(&mut records, &api);
+        assert_eq!(records[0].tiers_source, TiersSource::Reference, "models.dev fill → Reference");
+
+        // 仅命名信号（参考仓库无条目）→ Heuristic
+        let mut records = vec![ModelRecord {
+            id: "p/glm-9b-flash".into(),
+            provider: "p".into(),
+            upstream_model: "glm-9b-flash".into(),
+            ..Default::default()
+        }];
+        enrich(&mut records, &api);
+        assert_eq!(records[0].tiers_source, TiersSource::Heuristic, "naming prior → Heuristic");
+
+        // 无任何信号 → Flat
+        let mut records = vec![ModelRecord {
+            id: "p/plain-9b".into(),
+            provider: "p".into(),
+            upstream_model: "plain-9b".into(),
+            ..Default::default()
+        }];
+        enrich(&mut records, &api);
+        assert_eq!(records[0].tiers_source, TiersSource::Flat);
     }
 
     #[test]

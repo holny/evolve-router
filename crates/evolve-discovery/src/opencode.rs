@@ -262,6 +262,7 @@ fn extract_models(root: &Value) -> Vec<ModelRecord> {
                 source: Source::Discovered,
                 source_note: Some("opencode".into()),
                 release_ts: None,
+                tiers_source: evolve_core::types::TiersSource::Flat,
             });
         }
     }

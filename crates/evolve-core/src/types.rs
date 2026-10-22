@@ -51,6 +51,24 @@ impl Default for Tiers {
     }
 }
 
+/// 能力卡信号来源（2026-10 用户定）：初始能力评估的置信度分级——
+/// provider 官方能力字段 > models.dev 参考仓库 + 基模相似 > 命名先验 >
+/// 无信号 default 卡。蒸馏的锚定带宽按此放宽：初始评估越可信锚得越紧，
+/// 先验/无信号卡多给蒸馏自由度（初始评估本身没依据，别拿它当硬锚点）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TiersSource {
+    /// provider /models 官方能力字段（OpenRouter 风格 pricing/参数/模态）
+    Provider,
+    /// models.dev 参考仓库的能力字段（经基模相似匹配继承）
+    Reference,
+    /// 命名先验（后缀语义：flash/max/think/vl…）
+    Heuristic,
+    /// 无任何信号（default 卡）
+    #[default]
+    Flat,
+}
+
 /// One credential slot for a model (multi-key pool, decision record #12).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeySlot {
@@ -89,6 +107,9 @@ pub struct ModelRecord {
     /// → models.dev `release_date` → 模型 id 内嵌日期解析（见 recency.rs）
     #[serde(default)]
     pub release_ts: Option<u64>,
+    /// 能力卡信号来源（蒸馏锚定带宽按此分级，见 TiersSource）
+    #[serde(default)]
+    pub tiers_source: TiersSource,
 }
 
 impl Default for ModelRecord {
@@ -114,6 +135,7 @@ impl Default for ModelRecord {
             source: Source::User,
             source_note: None,
             release_ts: None,
+            tiers_source: TiersSource::Flat,
         }
     }
 }
@@ -178,10 +200,11 @@ impl ModelRecord {
     /// Thinking = 推理强化、-vl = 视觉）：轻量款 speed ↑ 能力略 ↓，旗舰款反之。
     /// `free` 段先剥离——商业变体与基模同能力（`minimax-m3.1-flash-free` ≡
     /// `minimax-m3.1-flash`）。只是一层浅先验：蒸馏卡与实测观测随时覆盖；
-    /// 用户显式 tiers（tiers_explicit）不动。
-    pub fn apply_naming_priors(&mut self) {
+    /// 用户显式 tiers（tiers_explicit）不动。返回是否有命名信号命中
+    /// （调用方据此把 Flat 卡的来源升为 Heuristic）。
+    pub fn apply_naming_priors(&mut self) -> bool {
         if self.tiers_explicit {
-            return;
+            return false;
         }
         let segs: Vec<String> = self
             .upstream_model
@@ -191,32 +214,39 @@ impl ModelRecord {
             .collect();
         let has = |names: &[&str]| segs.iter().any(|s| names.contains(&s.as_str()));
         let mut t = self.tiers;
+        let mut matched = false;
         // 轻量提速组：延迟低、成本低，但同系里能力偏弱（flash/turbo/lite/mini…）
         if has(&["flash", "flashx", "turbo", "lite", "mini", "small", "tiny", "nano",
                  "air", "instant", "highspeed", "lightning"]) {
             self.speed_tier = self.speed_tier.max(0.8);
             t.reasoning = (t.reasoning - 0.05).max(0.35);
             t.coding = (t.coding - 0.05).max(0.35);
+            matched = true;
         }
         // 旗舰组：能力上限更高、速度让位（pro/max/ultra/plus/super…）
         if has(&["pro", "max", "ultra", "plus", "super", "heavy", "large"]) {
             t.reasoning = (t.reasoning + 0.10).min(0.85);
             t.coding = (t.coding + 0.10).min(0.85);
             self.speed_tier = (self.speed_tier - 0.05).max(0.3);
+            matched = true;
         }
         // 推理强化组：think/thinking 系（o 系/DeepSeek-R 系惯例）
         if has(&["think", "thinking", "reasoner", "reasoning"]) {
             t.reasoning = (t.reasoning + 0.15).min(0.9);
+            matched = true;
         }
         // 视觉组（-vl = vision-language，Qwen-VL 系惯例）
         if has(&["vl", "vision", "omni", "multimodal"]) {
             t.vision = t.vision.max(0.7);
+            matched = true;
         }
         // 代码专精组
         if has(&["coder", "code", "codegen"]) {
             t.coding = (t.coding + 0.10).min(0.85);
+            matched = true;
         }
         self.tiers = t;
+        matched
     }
 }
 
