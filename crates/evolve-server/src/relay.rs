@@ -39,15 +39,57 @@ pub async fn chat_completions(
         return json_error(StatusCode::BAD_REQUEST, "invalid json body");
     };
 
+
+
     let model_field = parsed.get("model").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
     let target = match resolve_target(&st, &model_field) {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-
+    // 请求检查器（2026-10-21）：原始请求头/体入检查环（redact=true 不存体，
+    // authorization 类头打码）；decision_id/model 在路由后回填
+    let redact_on = st.config.decision.redact;
+    let inspect = crate::request_inspect::begin(crate::request_inspect::InspectEntry {
+        decision_id: String::new(),
+        session: String::new(),
+        agent: agent_hdr.clone(),
+        model: model_field.clone(),
+        ts_ms: evolve_memory::health::now(),
+        status: 0,
+        total_ms: None,
+        stream: false,
+        redacted: redact_on,
+        client_headers: Some(crate::request_inspect::header_json(&headers)),
+        client_body: if redact_on {
+            None
+        } else {
+            crate::request_inspect::cap_body(
+                &body,
+                crate::request_inspect::BODY_CAP,
+                &mut Vec::new(),
+                "client_body",
+            )
+        },
+        client_body_bytes: body.len() as u64,
+        upstream_url: None,
+        upstream_headers: None,
+        upstream_body: None,
+        translated: false,
+        resp_status: None,
+        resp_headers: None,
+        resp_body: None,
+        stream_head: None,
+        stream_tail: None,
+        stream_bytes: 0,
+        stream_done: false,
+        truncated: Vec::new(),
+    });
     let session_key = session_key_of(&st, &headers, &parsed);
     // 在飞登记：先记"(routing)/会话"，选出模型后再更新（面板重启提示可读）
     live.describe("", &session_key, &agent_hdr);
+    crate::request_inspect::with_entry(&inspect, |g| {
+        g.session = session_key.clone();
+    });
     // 内部状态（粘性/L3 反馈）按 agent 隔离：跨 agent 同名会话绝不共享状态
     let sticky_key = format!("{}\u{1f}{}", agent_hdr, session_key);
     let header_policy = headers
@@ -471,6 +513,31 @@ pub async fn chat_completions(
         };
         let cross = to_anthropic;
 
+        // 检查器：最后一次尝试的转发现场（URL / 上游头 / 转换或重写后的 body）
+        {
+            let upstream_headers = if to_anthropic {
+                json!({"content-type": "application/json", "anthropic-version": "2023-06-01",
+                       "x-api-key": key_value.as_deref().map(|k| format!("«masked len={}>", k.len()))})
+            } else {
+                let mut h = json!({"content-type": "application/json"});
+                if record.base_url.contains("opencode.ai/zen") {
+                    h["x-opencode-session"] = json!(session_key);
+                }
+                if let Some(k) = key_value.as_deref() {
+                    h["authorization"] = json!(format!("«masked len={}>", k.len()));
+                }
+                h
+            };
+            crate::request_inspect::with_entry(&inspect, |g| {
+                g.upstream_url = Some(url.clone());
+                g.upstream_headers = Some(serde_json::to_string_pretty(&upstream_headers).unwrap_or_default());
+                g.upstream_body = (!redact_on).then(|| {
+                    String::from_utf8_lossy(&fwd_body).into_owned()
+                });
+                g.translated = to_anthropic;
+            });
+        }
+
         let mut req = st.http.post(&url).header("content-type", "application/json");
         if to_anthropic {
             req = req.header("anthropic-version", "2023-06-01");
@@ -513,6 +580,21 @@ pub async fn chat_completions(
         };
 
         let status = resp.status();
+
+        // 检查器：上游响应状态 + 头（最后一次尝试为准）
+        crate::request_inspect::with_entry(&inspect, |g| {
+            g.resp_status = Some(status.as_u16());
+            let rh: serde_json::Map<String, Value> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| {
+                    (k.as_str().to_string(),
+                     serde_json::Value::String(
+                         v.to_str().map(|s| s.to_string()).unwrap_or("<binary>".into())))
+                })
+                .collect();
+            g.resp_headers = Some(serde_json::to_string_pretty(&rh).unwrap_or_default());
+        });
 
         // 端点级存活记录（2026-10-20）：同 baseURL 的多账号（同 plan 双订阅）
         // 共享端点命运——任一账号 200 即证明端点可达，兄弟账号的传输失败
@@ -824,6 +906,12 @@ pub async fn chat_completions(
         decision.upstream_model = record.upstream_model.clone();
         decision.id = format!("{}-{}", decision.id, skipped.len());
 
+        // 检查器：回填 decision_id / 最终模型 / 本次判定的量级
+        crate::request_inspect::with_entry(&inspect, |g| {
+            g.decision_id = decision.id.clone();
+            g.model = decision.chosen.clone();
+        });
+
         // 响应头到达时刻 = 非流式 TTFT / 流式首块前基准
         let head_ms = started.elapsed().as_millis() as u64;
         let telem = std::sync::Arc::new(std::sync::Mutex::new(crate::stream::Telemetry {
@@ -924,6 +1012,7 @@ pub async fn chat_completions(
                 let telem_body = crate::stream::telemetry_body(
                     resp.bytes_stream(),
                     telem,
+                    Some(crate::request_inspect::Tap(Some(inspect.clone()))),
                     st.events.clone(),
                     st.flywheel.clone(),
                     st.sessions.clone(),
@@ -940,6 +1029,7 @@ pub async fn chat_completions(
             let stream = crate::stream::telemetry_body(
                 resp.bytes_stream(),
                 telem,
+                Some(crate::request_inspect::Tap(Some(inspect.clone()))),
                 st.events.clone(),
                 st.flywheel.clone(),
                 st.sessions.clone(),

@@ -1408,6 +1408,8 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/healthz", axum::routing::get(crate::meta::healthz))
         .route("/api/health", axum::routing::get(crate::meta::api_health))
         .route("/api/plan-prices", axum::routing::get(crate::plan_pricing::api_plan_prices))
+        .route("/api/inspect", axum::routing::get(crate::request_inspect::api_inspect_list))
+        .route("/api/inspect/detail", axum::routing::get(crate::request_inspect::api_inspect_detail))
         .route("/api/stats", axum::routing::get(crate::meta::api_stats_query))
         .route("/api/live", axum::routing::get(crate::meta::api_live))
         .route("/api/reload", axum::routing::post(crate::meta::api_reload))

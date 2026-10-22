@@ -150,6 +150,7 @@ pub fn classify_stream_end(finish_reason: Option<&str>, upstream_eof: bool) -> S
 pub fn telemetry_body<E>(
     inner: impl Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
     telem: SharedTelem,
+    tap: Option<crate::request_inspect::Tap>,
     events: EventLog,
     flywheel: Flywheel,
     sessions: SessionStore,
@@ -169,13 +170,17 @@ where
         pinned,
         Some(Finalizer {
             telem: telem.clone(),
+            tap: tap.clone(),
             events: Some(events),
             flywheel: Some(flywheel),
             sessions: Some(sessions),
             quota: Some(quota),
             bus: Some(bus),
             request,
-            acc: StreamAcc::new(anthropic_mode),
+            acc: StreamAcc {
+                tap: tap.clone(),
+                ..Default::default()
+            },
             upstream_eof: false,
             tail_done: false,
             model_id: health_model.clone(),
@@ -206,6 +211,8 @@ where
 
 #[derive(Default)]
 struct StreamAcc {
+    /// 请求检查器的流分片捕获句柄（2026-10-21）
+    tap: Option<crate::request_inspect::Tap>,
     content: String,
     content_capped: bool,
     tool_calls: BTreeMap<u32, (String, String, String)>, // idx -> (id, name, args)
@@ -233,6 +240,10 @@ impl StreamAcc {
     }
 
     fn push_chunk(&mut self, chunk: &[u8]) {
+        // 检查器：原始上游分片入检查条目（头 64KB + 尾 128KB 截断）
+        if let Some(t) = &self.tap {
+            t.capture(chunk);
+        }
         self.byte_buf.extend_from_slice(chunk);
         while let Some(pos) = self.byte_buf.iter().position(|&b| b == b'\n') {
             let line_bytes: Vec<u8> = self.byte_buf.drain(..=pos).collect();
@@ -428,6 +439,8 @@ struct Finalizer {
     /// 判定用的模型 id（截断时给健康注册表记账 → 该模型冷却，路由避开）
     model_id: String,
     health: Option<evolve_memory::health::HealthRegistry>,
+    /// 请求检查器的流分片捕获句柄（2026-10-21）
+    tap: Option<crate::request_inspect::Tap>,
 }
 
 const TAIL_CAP: usize = 16 * 1024;
@@ -475,6 +488,16 @@ impl Drop for Finalizer {
             }
         };
         t.usage = self.acc.usage.clone();
+        // 检查器收尾：流结束标记 + 会话账本入账（流式路径的 usage 在此才齐）
+        if let Some(tap) = &self.tap {
+            tap.done();
+        }
+        if let Some(u) = &t.usage
+            && let Some(raw) = t.est_raw
+        {
+            let pt = u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
+            crate::relay::record_session_tokens(&t.session.clone(), raw, pt);
+        }
         // 会话真实上下文入账（2026-10-20）：流式请求的 usage 在这里才落定——
         // 此前只有非流式路径入账本，流式会话永远无锚点 → 校准堆叠永远生效
         if let Some(u) = &t.usage

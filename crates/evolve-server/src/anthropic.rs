@@ -463,6 +463,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             let telem_body = crate::stream::telemetry_body(
                 raw,
                 telem,
+                None,
                 st.events.clone(),
                 st.flywheel.clone(),
                 st.sessions.clone(),
