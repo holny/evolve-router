@@ -1409,7 +1409,7 @@ function renderAutopsy(e){
             (d.translated ? ' · ⇄' : '') + '</b><div class="dim2" style="font-size:11px">' + esc(d.upstream_url||'') + '</div>' +
             (d.upstream_same
               ? '<div class="dim2" style="margin:4px 0">' +
-                (lang==='zh'?'转换后请求体与原始完全一致，不重复展示。':'transformed body is identical to the original — not duplicated.') + '</div>'
+                (lang==='zh'?'仅 model 名改写（其余字段与原始一致），转发 body 不重复展示。':'only the model name was rewritten — forwarded body not duplicated.') + '</div>'
               : sect((lang==='zh'?'转换后请求体':'transformed body'), d.upstream_body)) +
             sect((lang==='zh'?'上游请求头':'upstream headers'), d.upstream_headers) + '</div>'
           : '') +

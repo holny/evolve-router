@@ -532,14 +532,29 @@ pub async fn chat_completions(
             crate::request_inspect::with_entry(&inspect, |g| {
                 g.upstream_url = Some(url.clone());
                 g.upstream_headers = Some(serde_json::to_string_pretty(&upstream_headers).unwrap_or_default());
-                // body 与原始完全一致（无有效转换）→ 不存重复体，只记标记
-                let same = fwd_body == body;
-                g.upstream_body = if same || redact_on {
-                    None
-                } else {
-                    Some(String::from_utf8_lossy(&fwd_body).into_owned())
+                // 去掉 model 字段后比较：仅 model 名不同 = "语义一致"（只是名字映射），
+                // 结构性变化（图片剥离 / 协议转换 / 字段增删）才是真转换。
+                // 语义一致 → 不存重复体（只记标记），UI 提示"仅 model 名改写"
+                let model_name_only = match (
+                    serde_json::from_slice::<serde_json::Value>(&body).ok(),
+                    serde_json::from_slice::<serde_json::Value>(&fwd_body).ok(),
+                ) {
+                    (Some(client), Some(fwd)) => {
+                        let strip = |v: &serde_json::Value| {
+                            let mut c = v.clone();
+                            if let Some(o) = c.as_object_mut() { o.remove("model"); }
+                            c
+                        };
+                        strip(&client) == strip(&fwd)
+                    }
+                    _ => false,
                 };
-                g.upstream_same = same;
+                g.upstream_body = if !model_name_only && !redact_on {
+                    Some(String::from_utf8_lossy(&fwd_body).into_owned())
+                } else {
+                    None
+                };
+                g.upstream_same = model_name_only;
                 g.translated = to_anthropic;
             });
         }
