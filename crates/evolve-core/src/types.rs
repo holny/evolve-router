@@ -172,6 +172,52 @@ impl ModelRecord {
             }
         v
     }
+
+    /// 命名先验（2026-10）：按模型名后缀语义对**冷启动**能力卡做小幅相对修正。
+    /// 语义为业界惯例（Gemini Flash-Lite = 快省轻量、Pro/Max/Ultra = 旗舰、
+    /// Thinking = 推理强化、-vl = 视觉）：轻量款 speed ↑ 能力略 ↓，旗舰款反之。
+    /// `free` 段先剥离——商业变体与基模同能力（`minimax-m3.1-flash-free` ≡
+    /// `minimax-m3.1-flash`）。只是一层浅先验：蒸馏卡与实测观测随时覆盖；
+    /// 用户显式 tiers（tiers_explicit）不动。
+    pub fn apply_naming_priors(&mut self) {
+        if self.tiers_explicit {
+            return;
+        }
+        let segs: Vec<String> = self
+            .upstream_model
+            .split(['-', '_', '.', '/', ':', '+'])
+            .map(|s| s.to_ascii_lowercase())
+            .filter(|s| s != "free")
+            .collect();
+        let has = |names: &[&str]| segs.iter().any(|s| names.contains(&s.as_str()));
+        let mut t = self.tiers;
+        // 轻量提速组：延迟低、成本低，但同系里能力偏弱（flash/turbo/lite/mini…）
+        if has(&["flash", "flashx", "turbo", "lite", "mini", "small", "tiny", "nano",
+                 "air", "instant", "highspeed", "lightning"]) {
+            self.speed_tier = self.speed_tier.max(0.8);
+            t.reasoning = (t.reasoning - 0.05).max(0.35);
+            t.coding = (t.coding - 0.05).max(0.35);
+        }
+        // 旗舰组：能力上限更高、速度让位（pro/max/ultra/plus/super…）
+        if has(&["pro", "max", "ultra", "plus", "super", "heavy", "large"]) {
+            t.reasoning = (t.reasoning + 0.10).min(0.85);
+            t.coding = (t.coding + 0.10).min(0.85);
+            self.speed_tier = (self.speed_tier - 0.05).max(0.3);
+        }
+        // 推理强化组：think/thinking 系（o 系/DeepSeek-R 系惯例）
+        if has(&["think", "thinking", "reasoner", "reasoning"]) {
+            t.reasoning = (t.reasoning + 0.15).min(0.9);
+        }
+        // 视觉组（-vl = vision-language，Qwen-VL 系惯例）
+        if has(&["vl", "vision", "omni", "multimodal"]) {
+            t.vision = t.vision.max(0.7);
+        }
+        // 代码专精组
+        if has(&["coder", "code", "codegen"]) {
+            t.coding = (t.coding + 0.10).min(0.85);
+        }
+        self.tiers = t;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -728,5 +774,81 @@ mod token_ratio_tests {
             ..Default::default()
         };
         assert!(t.token_ratio().is_none(), "zero/absent estimate must not produce a ratio");
+    }
+}
+
+#[cfg(test)]
+mod naming_prior_tests {
+    use super::*;
+
+    fn rec(name: &str) -> ModelRecord {
+        ModelRecord {
+            id: format!("p/{name}"),
+            provider: "p".into(),
+            base_url: "http://x/v1".into(),
+            upstream_model: name.into(),
+            ..Default::default()
+        }
+    }
+
+    /// free 段先剥离：商业变体与基模同先验（2026-10 用户需求核心场景）
+    #[test]
+    fn free_variant_matches_base_model() {
+        let mut f = rec("minimax-m3.1-flash-free");
+        let mut b = rec("minimax-m3.1-flash");
+        f.apply_naming_priors();
+        b.apply_naming_priors();
+        assert_eq!(f.tiers, b.tiers, "free is a commercial variant of the base model");
+        assert_eq!(f.speed_tier, b.speed_tier);
+    }
+
+    /// 轻量组提速 + 略弱；旗舰组反之
+    #[test]
+    fn lightweight_speeds_up_flagship_strengthen() {
+        let mut flash = rec("glm-5.3-flash");
+        flash.apply_naming_priors();
+        assert!(flash.speed_tier >= 0.8, "flash must look fast: {}", flash.speed_tier);
+        assert!(flash.tiers.reasoning < 0.5 && flash.tiers.coding < 0.5, "lightweight slightly weaker");
+
+        let mut big = rec("qwen3.8-max");
+        big.apply_naming_priors();
+        assert!(big.tiers.reasoning > 0.55 && big.tiers.coding > 0.55, "flagship stronger");
+        assert!(big.speed_tier < 0.6, "flagship slightly slower: {}", big.speed_tier);
+
+        // minimax 整段不会被拆成 mini+max 误判
+        let mut mm = rec("MiniMax-M3");
+        mm.apply_naming_priors();
+        assert_eq!(mm.tiers, Tiers::default(), "brand name must not trigger priors");
+    }
+
+    /// think/vl/coder 各自强化对应维度
+    #[test]
+    fn domain_suffixes_boost_matching_dimension() {
+        let mut think = rec("glm-5.3-think");
+        think.apply_naming_priors();
+        assert!(think.tiers.reasoning >= 0.65, "think → reasoning: {}", think.tiers.reasoning);
+
+        let mut vl = rec("qwen3.8-vl");
+        vl.apply_naming_priors();
+        assert!(vl.tiers.vision >= 0.7, "vl → vision: {}", vl.tiers.vision);
+
+        let mut coder = rec("kimi-k3-code");
+        coder.apply_naming_priors();
+        assert!(coder.tiers.coding >= 0.6, "code → coding: {}", coder.tiers.coding);
+    }
+
+    /// 用户显式 tiers 不动；无信号名字保持 default
+    #[test]
+    fn explicit_tiers_and_signal_free_names_untouched() {
+        let mut u = rec("x-flash");
+        u.tiers = Tiers { reasoning: 0.9, coding: 0.9, vision: 0.9, agentic: 0.9 };
+        u.tiers_explicit = true;
+        let before = u.tiers;
+        u.apply_naming_priors();
+        assert_eq!(u.tiers, before, "user-declared tiers are never touched");
+
+        let mut plain = rec("step-5-preview");
+        plain.apply_naming_priors();
+        assert_eq!(plain.tiers, Tiers::default(), "preview carries no capability signal");
     }
 }

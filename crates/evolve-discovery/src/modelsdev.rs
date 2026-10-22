@@ -11,7 +11,7 @@
 //! provider 不必同名（用户裁决）：全局命中即可；**同一模型被多家转售时取最早
 //! 发布日**（最早那条才是模型真正的发布时间）。
 
-use evolve_core::types::{Cost, ModelRecord};
+use evolve_core::types::{Cost, ModelRecord, Tiers};
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -73,29 +73,57 @@ pub fn enrich(records: &mut [ModelRecord], api: &Value) {
     let index = build_canon_index(api);
     for r in records.iter_mut() {
         let model_entry = find_model_indexed(api, &index, &r.provider, &r.upstream_model);
-        let Some(m) = model_entry else { continue };
         let mut touched = false;
-        if r.context_window.is_none()
-            && let Some(w) = m.get("limit").and_then(|l| l.get("context")).and_then(|v| v.as_u64()) {
-                r.context_window = Some(w);
-                touched = true;
+        if let Some(m) = model_entry {
+            if r.context_window.is_none()
+                && let Some(w) = m.get("limit").and_then(|l| l.get("context")).and_then(|v| v.as_u64()) {
+                    r.context_window = Some(w);
+                    touched = true;
+                }
+            if r.cost.is_none()
+                && let Some(cost) = m.get("cost").and_then(|c| {
+                    let input = c.get("input").and_then(|v| v.as_f64())? as f32;
+                    let output = c.get("output").and_then(|v| v.as_f64())? as f32;
+                    Some(Cost { input, output })
+                }) {
+                    r.cost = Some(cost);
+                    touched = true;
+                }
+            // 发布时间（三级来源链之 ②）：provider /models 的 created 优先（已在
+            // discovery 层写入），此处补 models.dev 的 release_date
+            if r.release_ts.is_none()
+                && let Some(ts) = m.get("release_date").and_then(|v| v.as_str()).and_then(parse_release_date) {
+                    r.release_ts = Some(ts);
+                    touched = true;
+                }
+            // 能力先验（2026-10）：models.dev 的 tool_call/reasoning/modalities
+            // 进 tiers——此前只取窗口/价格/发布日，能力卡一直是 default
+            // 0.5/0.5/0/0.5，免费模型要等蒸馏器几百次实测才爬得回来。
+            // 仅当记录仍是无信号的 default 卡；映射口径与 remote.rs 的
+            // OpenRouter 风格一致。`free`/`preview` 等变体名已被 canon 归一
+            // 到基模 → 免费模型直接继承基模的能力条目。
+            if r.tiers == Tiers::default() {
+                let tool_call = m.get("tool_call").and_then(|v| v.as_bool()).unwrap_or(false);
+                let reasoning = m.get("reasoning").map(|v| !v.is_null()).unwrap_or(false);
+                let vision = m.get("modalities")
+                    .and_then(|mo| mo.get("input"))
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().any(|x| x.as_str() == Some("image")))
+                    .unwrap_or(false);
+                if tool_call || reasoning || vision {
+                    r.tiers = Tiers {
+                        reasoning: if reasoning { 0.75 } else { 0.5 },
+                        coding: 0.6,
+                        vision: if vision { 0.85 } else { 0.0 },
+                        agentic: if tool_call { 0.7 } else { 0.4 },
+                    };
+                    touched = true;
+                }
             }
-        if r.cost.is_none()
-            && let Some(cost) = m.get("cost").and_then(|c| {
-                let input = c.get("input").and_then(|v| v.as_f64())? as f32;
-                let output = c.get("output").and_then(|v| v.as_f64())? as f32;
-                Some(Cost { input, output })
-            }) {
-                r.cost = Some(cost);
-                touched = true;
-            }
-        // 发布时间（三级来源链之 ②）：provider /models 的 created 优先（已在
-        // discovery 层写入），此处补 models.dev 的 release_date
-        if r.release_ts.is_none()
-            && let Some(ts) = m.get("release_date").and_then(|v| v.as_str()).and_then(parse_release_date) {
-                r.release_ts = Some(ts);
-                touched = true;
-            }
+        }
+        // 命名先验兜底：models.dev 条目缺失或无能力字段时，至少按后缀语义
+        // 给冷启动卡一个方向（flash 快而略弱 / max 旗舰 / think 推理 / vl 视觉）
+        r.apply_naming_priors();
         if touched {
             r.source_note = Some(match r.source_note.take() {
                 Some(n) => format!("{n} +models.dev"),
@@ -367,5 +395,52 @@ mod tests {
         let b = canon("glm-5.3-flash");
         assert!(a.starts_with(&b) && a.len() - b.len() <= 6, "{a} vs {b}");
         assert_eq!(canon("doubao-seed-1-6-250615"), canon("doubao-seed-1-6"));
+    }
+
+    /// 免费变体继承基模能力（2026-10 用户需求）：`-free` 后缀经 canon 剥离后
+    /// 命中基模条目 → 窗口 + 能力（tool_call/reasoning/modalities）全部填充。
+    /// 实证场景：opencode-go/minimax-m3.1-flash-free 此前能力卡一直是
+    /// default 0.5/0.5/0/0.5，要等蒸馏器 2952 次实测才爬回真实水平。
+    #[test]
+    fn free_variant_inherits_base_model_capabilities() {
+        let api = json!({
+            "zenmux": {"models": {"minimax-m3.1-flash": {
+                "release_date": "2026-10-19",
+                "tool_call": true,
+                "reasoning": true,
+                "modalities": {"input": ["text", "image"]},
+                "limit": {"context": 1_000_000, "output": 512_000},
+                "cost": {"input": 0.3, "output": 1.2},
+            }}}
+        });
+        let mut records = vec![ModelRecord {
+            id: "opencode-go/minimax-m3.1-flash-free".into(),
+            provider: "opencode-go".into(),
+            upstream_model: "minimax-m3.1-flash-free".into(),
+            ..Default::default()
+        }];
+        enrich(&mut records, &api);
+        let r = &records[0];
+        assert_eq!(r.context_window, Some(1_000_000), "window via canon -free strip");
+        assert!(r.tiers.reasoning > 0.6, "reasoning:true → boosted: {:?}", r.tiers);
+        assert!(r.tiers.agentic > 0.6, "tool_call:true → boosted: {:?}", r.tiers);
+        assert!(r.tiers.vision > 0.6, "image modality → vision: {:?}", r.tiers);
+        assert_eq!(r.cost.map(|c| c.input), Some(0.3));
+    }
+
+    /// models.dev 条目缺失时命名先验兜底：flash 名获得提速先验，
+    /// 能力不再是无方向的 default
+    #[test]
+    fn naming_priors_apply_without_modelsdev_entry() {
+        let api = json!({});
+        let mut records = vec![ModelRecord {
+            id: "p/glm-5.3-flash".into(),
+            provider: "p".into(),
+            upstream_model: "glm-5.3-flash".into(),
+            ..Default::default()
+        }];
+        enrich(&mut records, &api);
+        assert!(records[0].context_window.is_none(), "no entry → no window");
+        assert!(records[0].speed_tier >= 0.8, "flash naming prior: {}", records[0].speed_tier);
     }
 }

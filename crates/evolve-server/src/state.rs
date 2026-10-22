@@ -1142,6 +1142,13 @@ impl Inner {
         let removed: std::collections::HashSet<String> =
             load_overrides(&self.config.data.dir).removed_base_urls.into_iter().collect();
         let excluded = self.excluded_ids();
+        let mut fresh = fresh;
+        // 新模型同样过 models.dev 参考 + 命名先验（此前直接入目录 = default
+        // 能力卡，要等重启才有窗口/能力——每小时刷新带来的模型最多等 1h+重启）
+        if !fresh.is_empty()
+            && let Some(api) = evolve_discovery::modelsdev::load_fresh(&self.config.data.dir) {
+                evolve_discovery::modelsdev::enrich(&mut fresh, &api);
+            }
         let mut models = base_records;
         let mut added = 0usize;
         for r in fresh {
