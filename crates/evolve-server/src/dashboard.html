@@ -1383,6 +1383,47 @@ function renderAutopsy(e){
   B.innerHTML = L.join('');
   const hint = document.querySelector('#autopsy .au-hint');
   if (hint) hint.style.display = 'none';
+  // ⑩ 请求检查器（2026-10-21）：原始/转换后请求 + 响应 + 流分片（异步拉取，
+  //    折叠的 JSON pretty 块；redact 模式网关不存体 → 该段显示"未捕获"）
+  const insp = document.createElement('details');
+  insp.style.marginTop = '8px';
+  insp.innerHTML = '<summary class="dim2" style="cursor:pointer">' +
+    (lang==='zh' ? '请求检查器（原始/转换/响应/流分片）' : 'Request inspector (raw / transformed / response / stream)') +
+    '</summary><div class="ri-body dim2" style="margin-top:6px">' +
+    (lang==='zh' ? '加载中…' : 'loading…') + '</div>';
+  B.appendChild(insp);
+  const body = insp.querySelector('.ri-body');
+  fetch('/api/inspect/detail?decision_id=' + encodeURIComponent(e.decision_id || ''))
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(d => {
+      const sect = (title, val) => val ? (
+        '<div style="margin-top:6px"><b>' + title + '</b>' +
+        '<pre class="ri-pre" style="max-height:260px;overflow:auto;background:var(--feed-detail-bg);' +
+        'padding:6px 8px;border-radius:6px;white-space:pre-wrap;word-break:break-all;font-size:11px">' +
+        esc(prettyBody(val)) + '</pre></div>') : '';
+      body.innerHTML =
+        sect((lang==='zh'?'原始请求体':'request body'), d.client_body) +
+        sect((lang==='zh'?'原始请求头':'request headers'), d.client_headers) +
+        (d.upstream_body
+          ? '<div style="margin-top:6px"><b>' + (lang==='zh'?'转发上游（转换后）':'forwarded upstream') +
+            (d.translated ? ' · ⇄' : '') + '</b><div class="dim2" style="font-size:11px">' + esc(d.upstream_url||'') + '</div>' +
+            sect((lang==='zh'?'转换后请求体':'transformed body'), d.upstream_body) +
+            sect((lang==='zh'?'上游请求头':'upstream headers'), d.upstream_headers) + '</div>'
+          : '') +
+        sect((lang==='zh'?'响应头':'response headers'), d.resp_headers) +
+        sect((lang==='zh'?'响应体':'response body'), d.resp_body) +
+        sect((lang==='zh'?'流分片（头+尾，截断标记见内）':'stream frames (head+tail)'), d.stream_head || d.stream_tail);
+      if (d.redacted) body.innerHTML = '<div class="dim2">' +
+        (lang==='zh'?'redact 模式：body 未捕获（仅尺寸）。':'redact mode: bodies not captured (sizes only).') + '</div>';
+      if (!d.client_body && !d.upstream_body && !d.resp_body && !d.stream_head && !d.redacted)
+        body.innerHTML = '<div class="dim2">' + (lang==='zh'?'该请求无捕获数据（检查环容量 50，已滚动）。':'no capture for this request (ring capacity 50, rolled).') + '</div>';
+    })
+    .catch(() => { body.innerHTML = '<div class="dim2">inspect unavailable</div>'; });
+}
+
+// body 捕获是 JSON 时 pretty 化，否则原文（截断标记原样保留）
+function prettyBody(v){
+  try { return JSON.stringify(JSON.parse(v), null, 2); } catch (_) { return v; }
 }
 
 const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0, onboarding:null, portfolio:null };
