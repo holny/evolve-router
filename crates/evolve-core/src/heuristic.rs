@@ -166,7 +166,7 @@ impl HeuristicJudge {
             high_stakes,
             session_relevance,
             session_depth,
-            judge_source: "heuristic",
+            judge_source: JudgeSource::Heuristic,
         route_recommendation: None,
         route_recommendation_confidence: 0.0,
         }

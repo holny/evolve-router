@@ -408,7 +408,7 @@ mod difficulty_cost_tests {
             high_stakes: 0.0,
             session_relevance: 0.0,
             session_depth: 0.0,
-            judge_source: "test",
+            judge_source: JudgeSource::Test,
         route_recommendation: None,
         route_recommendation_confidence: 0.0,
         }

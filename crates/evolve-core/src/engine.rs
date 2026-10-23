@@ -320,7 +320,7 @@ impl Engine {
                     high_stakes: sticky.flags.high_stakes,
                     session_relevance: 1.0,
                     session_depth: 0.0,
-                    judge_source: "sticky",
+                    judge_source: JudgeSource::Sticky,
                 route_recommendation: None,
                 route_recommendation_confidence: 0.0,
                 };
@@ -1355,7 +1355,7 @@ mod unknown_window_tests {
                 session_depth: 0.5,
                 route_recommendation: None,
                 route_recommendation_confidence: 0.0,
-                judge_source: "test",
+                judge_source: JudgeSource::Test,
             }
         }
     }

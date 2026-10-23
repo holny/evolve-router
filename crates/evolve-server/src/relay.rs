@@ -1809,7 +1809,7 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
                 high_stakes: 0.0,
                 session_relevance: 0.0,
                 session_depth: 0.0,
-                judge_source: "explicit",
+                judge_source: JudgeSource::Explicit,
             route_recommendation: None,
             route_recommendation_confidence: 0.0,
             },

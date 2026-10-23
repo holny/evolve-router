@@ -289,6 +289,40 @@ pub struct DigestSignals {
     pub session_tools_seen: usize,
 }
 
+/// 判定来源（2026-10-23 review 重构）：此前是散落 8 个文件的裸 `&'static str`，
+/// 下游（fuse_judgments / mode_label）按字符串相等分支——打错一个字面量编译器
+/// 不吭声，面板判定来源标签静默消失。枚举 + 穷尽 match 后新增变体强制补全；
+/// `as_str()` 保持事件/面板序列化字符串不变（无 schema 变更）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JudgeSource {
+    /// 决策模型判定（JEV/LAYA/OpenAI 槽位链）
+    DecisionModel,
+    /// 决策模型 + 规则融合（fuse_judgments 派生值）
+    DecisionModelPlusRules,
+    /// 启发式兜底（槽位不可用/未配置）
+    Heuristic,
+    /// 会话粘性直接复用
+    Sticky,
+    /// 用户显式指定模型（auto 别名之外的直接路由）
+    Explicit,
+    /// 测试桩
+    Test,
+}
+
+impl JudgeSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            JudgeSource::DecisionModel => "decision_model",
+            JudgeSource::DecisionModelPlusRules => "decision_model+rules",
+            JudgeSource::Heuristic => "heuristic",
+            JudgeSource::Sticky => "sticky",
+            JudgeSource::Explicit => "explicit",
+            JudgeSource::Test => "test",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct JudgmentSet {
     pub domain: Domain,
@@ -305,9 +339,9 @@ pub struct JudgmentSet {
     pub route_recommendation: Option<String>,
     /// route_recommendation 的置信度（0-1）——高置信度时 engine 加分该模型
     pub route_recommendation_confidence: f32,
-    /// 谁做的判定：decision_model / decision_model+rules / heuristic /
-    /// sticky / explicit——进事件供面板展示判定来源
-    pub judge_source: &'static str,
+    /// 谁做的判定——进事件供面板展示判定来源（序列化为 decision_model /
+    /// decision_model+rules / heuristic / sticky / explicit，与历史事件兼容）
+    pub judge_source: JudgeSource,
 }
 
 pub trait Judge: Send + Sync {
@@ -702,7 +736,11 @@ pub fn fuse_judgments(jev: &JudgmentSet, heur: &JudgmentSet) -> JudgmentSet {
         // ⚠ 只有**主判官真的走了模型**才标 "decision_model+rules"：槽位链在冷却/失败时
         // 会回退成启发式（judge_source = "heuristic"），此时融合结果必须如实标 heuristic，
         // 否则界面判定不出"配了模型但当前没在用"（用户实测：超时后状态仍 ok）
-        judge_source: if jev.judge_source == "heuristic" { "heuristic" } else { "decision_model+rules" },
+        judge_source: if jev.judge_source == JudgeSource::Heuristic {
+            JudgeSource::Heuristic
+        } else {
+            JudgeSource::DecisionModelPlusRules
+        },
         route_recommendation: jev.route_recommendation.clone(),
         route_recommendation_confidence: jev.route_recommendation_confidence,
     }
@@ -743,7 +781,7 @@ mod currency_tests {
 mod fusion_tests {
     use super::*;
 
-    fn mk(source: &'static str) -> JudgmentSet {
+    fn mk(source: JudgeSource) -> JudgmentSet {
         JudgmentSet {
             domain: Domain::Code,
             domain_confidence: 1.0,
@@ -764,13 +802,16 @@ mod fusion_tests {
     /// 回归：槽位链回退成启发式时，双判官融合不得声称"模型判定"（否则界面无法识别降级）
     #[test]
     fn fusion_reports_when_the_model_was_not_used() {
-        let heur = mk("heuristic");
+        let heur = mk(JudgeSource::Heuristic);
         assert_eq!(
-            fuse_judgments(&mk("heuristic"), &heur).judge_source,
-            "heuristic",
+            fuse_judgments(&mk(JudgeSource::Heuristic), &heur).judge_source,
+            JudgeSource::Heuristic,
             "model not used → must not claim model+rules"
         );
-        assert_eq!(fuse_judgments(&mk("decision_model"), &heur).judge_source, "decision_model+rules");
+        assert_eq!(
+            fuse_judgments(&mk(JudgeSource::DecisionModel), &heur).judge_source,
+            JudgeSource::DecisionModelPlusRules
+        );
     }
 }
 

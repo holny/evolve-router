@@ -28,16 +28,19 @@ pub fn domain_label(domain: Domain) -> &'static str {
 }
 
 /// 判定来源：5 条互斥路径。前两条走了决策模型，后三条没有
-pub fn mode_label(judge_source: &str, sticky: bool) -> Option<&'static str> {
+pub fn mode_label(judge_source: evolve_core::types::JudgeSource, sticky: bool) -> Option<&'static str> {
+    use evolve_core::types::JudgeSource as J;
     if sticky {
         return Some("reused");
     }
+    // 穷尽 match：新增变体时编译器强制补标签（2026-10-23 review 重构）
     match judge_source {
-        "decision_model" => Some("model"),
-        "decision_model+rules" => Some("model+rules"),
-        "heuristic" => Some("rules"),
-        "explicit" => Some("pinned"),
-        _ => None,
+        J::DecisionModel => Some("model"),
+        J::DecisionModelPlusRules => Some("model+rules"),
+        J::Heuristic => Some("rules"),
+        J::Explicit => Some("pinned"),
+        J::Sticky => Some("reused"),
+        J::Test => None,
     }
 }
 
@@ -112,7 +115,7 @@ pub fn derive(j: &JudgmentSet, capability: Option<&str>, sticky: bool) -> Value 
 mod tests {
     use super::*;
 
-    fn j(difficulty: f32, domain: Domain, judge_source: &'static str) -> JudgmentSet {
+    fn j(difficulty: f32, domain: Domain, judge_source: evolve_core::types::JudgeSource) -> JudgmentSet {
         JudgmentSet {
             domain,
             domain_confidence: 1.0,
@@ -145,10 +148,10 @@ mod tests {
     #[test]
     fn placeholder_paths_emit_mode_only() {
         // 显式指定：没判定过 → 只出 mode
-        let pinned = derive(&j(0.0, Domain::Other, "explicit"), Some("basic"), false);
+        let pinned = derive(&j(0.0, Domain::Other, evolve_core::types::JudgeSource::Explicit), Some("basic"), false);
         assert_eq!(pinned, json!({ "mode": "pinned" }));
         // 粘性复用：沿用值是真的 → 全量出（含 mode）
-        let mut st = j(1.2, Domain::Code, "sticky");
+        let mut st = j(1.2, Domain::Code, evolve_core::types::JudgeSource::Sticky);
         st.is_trivial = 0.0;
         st.tool_heavy = 0.9;
         let reused = derive(&st, Some("standard"), true);
@@ -157,7 +160,7 @@ mod tests {
         assert_eq!(reused["domain"], "code");
         assert_eq!(reused["flags"], json!(["tools"]));
         assert_eq!(reused["fit"], "match");
-        let model = derive(&j(1.2, Domain::Code, "decision_model"), Some("standard"), false);
+        let model = derive(&j(1.2, Domain::Code, evolve_core::types::JudgeSource::DecisionModel), Some("standard"), false);
         assert_eq!(model["mode"], "model");
         assert_eq!(model["difficulty"], "medium");
         assert_eq!(model["domain"], "code");
@@ -166,7 +169,7 @@ mod tests {
 
     #[test]
     fn flags_use_routing_thresholds() {
-        let mut x = j(1.0, Domain::Code, "heuristic");
+        let mut x = j(1.0, Domain::Code, evolve_core::types::JudgeSource::Heuristic);
         x.needs_vision = 0.5; // 不 > 0.5 → 不算 vision（与 engine 硬约束同口径）
         x.high_stakes = 0.6; // 不 > 0.6 → 不算 stakes（与探索抑制同口径）
         x.is_trivial = 0.51;
@@ -194,14 +197,22 @@ pub fn derive_from_event(ev: &Value) -> Option<Value> {
         Some("Chitchat") => Domain::Chitchat,
         _ => Domain::Other,
     };
-    let judge_source: &'static str = match ev.get("judge").and_then(|x| x.as_str()) {
-        Some("decision_model") => "decision_model",
-        Some("decision_model+rules") => "decision_model+rules",
-        Some("heuristic") => "heuristic",
-        Some("explicit") => "explicit",
-        Some("sticky") => "sticky",
-        _ => return None,
-    };
+    // 事件回读走 serde（JudgeSource 序列化口径与历史事件字符串一致）
+    let judge_source: evolve_core::types::JudgeSource =
+        serde_json::from_value(ev.get("judge").cloned().unwrap_or(serde_json::Value::Null))
+            .or_else(|_| -> Result<evolve_core::types::JudgeSource, serde_json::Error> {
+                // 历史事件的宽松兜底：按字符串匹配到枚举
+                use evolve_core::types::JudgeSource as J;
+                match ev.get("judge").and_then(|x| x.as_str()) {
+                    Some("decision_model") => Ok(J::DecisionModel),
+                    Some("decision_model+rules") => Ok(J::DecisionModelPlusRules),
+                    Some("heuristic") => Ok(J::Heuristic),
+                    Some("sticky") => Ok(J::Sticky),
+                    Some("explicit") => Ok(J::Explicit),
+                    _ => Err(serde::de::Error::custom("unknown judge source")),
+                }
+            })
+            .ok()?;
     let mut set = JudgmentSet {
         domain,
         domain_confidence: 1.0,

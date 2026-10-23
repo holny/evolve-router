@@ -600,7 +600,7 @@ pub(crate) fn parse_judgment_answers(a: &serde_json::Value) -> Option<JudgmentSe
             .and_then(|x| x.get("confidence"))
             .and_then(|x| x.as_f64())
             .unwrap_or(0.0) as f32,
-        judge_source: "decision_model",
+        judge_source: JudgeSource::DecisionModel,
     })
 }
 
@@ -757,7 +757,7 @@ mod startlux_answers_tests {
         });
         let j = parse_judgment_answers(&a).expect("null choice must not abort the whole judgment");
         assert_eq!(j.domain, Domain::Code);
-        assert_eq!(j.judge_source, "decision_model");
+        assert_eq!(j.judge_source, JudgeSource::DecisionModel);
         assert!((j.difficulty - 1.2).abs() < 1e-6);
         assert!(j.is_trivial > 0.5);
     }

@@ -3,7 +3,7 @@
 //! 内置实现：heuristic / typesafe(Jev) / laya，均适配同一 Judge 接口。
 
 use async_trait::async_trait;
-use evolve_core::types::{DigestSignals, Judge, JudgmentSet, RequestFeatures};
+use evolve_core::types::{DigestSignals, Judge, JudgeSource, JudgmentSet, RequestFeatures};
 use serde_json::Value;
 
 /// 通用判定请求：state 由各后端按自身协议组装
@@ -100,6 +100,6 @@ pub fn parse_judgment_response(v: &Value) -> Option<JudgmentSet> {
             .and_then(|x| x.get("confidence"))
             .and_then(|x| x.as_f64())
             .unwrap_or(0.0) as f32,
-        judge_source: "decision_model",
+        judge_source: JudgeSource::DecisionModel,
     })
 }

@@ -426,15 +426,13 @@ pub fn reload_config(st: &AppState, path: &std::path::Path) -> bool {
 }
 
 /// 记录一次判定的实际来源（决策完成后调用；轻量，一次锁写入）
-pub fn note_judge(st: &AppState, judge_source: &str) {
-    let src = judge_source.trim();
-    if src.is_empty() {
-        return;
-    }
+pub fn note_judge(st: &AppState, judge_source: evolve_core::types::JudgeSource) {
+    let src = judge_source.as_str();
     if let Ok(mut g) = st.last_judge.lock() {
         g.source = src.to_string();
         g.at_ms = evolve_memory::health::now();
-        g.model_used = src.starts_with("decision_model");
+        g.model_used = judge_source == evolve_core::types::JudgeSource::DecisionModel
+            || judge_source == evolve_core::types::JudgeSource::DecisionModelPlusRules;
     }
 }
 
