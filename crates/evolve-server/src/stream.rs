@@ -218,6 +218,9 @@ struct StreamAcc {
     tool_calls: BTreeMap<u32, (String, String, String)>, // idx -> (id, name, args)
     finish_reason: Option<String>,
     usage: Option<Value>,
+    /// 上游流过思考 delta（reasoning_content/reasoning）——"只有思考、正文
+    /// 为空"的截断轮据此给出可行动的收尾报错（2026-10-23）
+    saw_reasoning: bool,
     // byte-level line buffer: decode only complete lines so multi-byte
     // UTF-8 chars split across HTTP chunks survive (BUG-6)
     byte_buf: Vec<u8>,
@@ -359,6 +362,15 @@ impl StreamAcc {
                 } else {
                     self.content_capped = true;
                 }
+            }
+            // 思考内容探测（2026-10-23）：zhipuai/DeepSeek 系在 delta 里流式
+            // 回 reasoning_content/reasoning——"只有思考、正文为空"的截断轮
+            // 靠这个标记给出可行动的收尾报错
+            if !self.saw_reasoning
+                && (delta.get("reasoning_content").is_some()
+                    || delta.get("reasoning").is_some())
+            {
+                self.saw_reasoning = true;
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                 for tc in tcs {
@@ -647,9 +659,19 @@ impl Stream for TelemetryStream {
                         == StreamEnd::IncompleteUpstream
                     {
                         f.tail_done = true;
-                        let msg = "upstream stream truncated (ended without a finish_reason; the \
-                                   provider did not complete the response)"
-                            .to_string();
+                        // 区分"只有思考、正文为空"：可行动报错指向压缩会话/换模型，
+                        // 而不是一句语焉不详的截断（2026-10-23 实证：zhipuai flash
+                        // 在 15 万 token 上下文上只产出 9KB reasoning + 空正文）
+                        let msg = if f.acc.content.is_empty() && f.acc.saw_reasoning {
+                            "model produced only reasoning content with an empty answer — \
+                             the provider truncated the generation (large context); \
+                             compact the session or route to a different model"
+                                .to_string()
+                        } else {
+                            "upstream stream truncated (ended without a finish_reason; the \
+                             provider did not complete the response)"
+                                .to_string()
+                        };
                         return Poll::Ready(Some(Ok(f.error_tail(&msg))));
                     }
                     this.1 = None; // triggers Finalizer::drop
