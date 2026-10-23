@@ -227,8 +227,19 @@ impl QuotaLedger {
         }
         e.api_backed = api_backed;
         if e.reset_epoch_ms.is_none() { e.reset_epoch_ms = reset_epoch_ms; }
-        // 重排下次探测/重试：API 型 1h 兜底；本地无 API 型 5~10min 退避
-        e.probe_at_ms = now + if api_backed { ProviderGateState::API_RETRY_MS } else { ProviderGateState::PROBE_BASE_MS };
+        // 重排下次探测/重试：API 型 1h 兜底；本地无 API 型 5min 起步。
+        // 上游**明示了重置时刻**且晚于基础间隔 → 探测定在重置后 1min
+        // （2026-10-23 用户定：一次配额失败即冷却到上游声明的重置点，
+        // 中间的探测全是注定 429 的白耗——openrouter 日限实证）
+        let base = if api_backed {
+            ProviderGateState::API_RETRY_MS
+        } else {
+            ProviderGateState::PROBE_BASE_MS
+        };
+        e.probe_at_ms = match reset_epoch_ms {
+            Some(r) if !api_backed && r > now + base => r + 60_000,
+            _ => now + base,
+        };
         e.probing = false;
     }
 

@@ -355,6 +355,31 @@ mod tests {
 pub fn parse_reset_epoch_ms(body: &str, now_ms: u64) -> Option<u64> {
     let l = body.to_lowercase();
 
+    // ⓪ body 内嵌的 X-RateLimit-Reset（OpenRouter 实证 2026-10-23：429 的
+    // 重置时刻在 body JSON `metadata.headers["X-RateLimit-Reset"]`，纯数字
+    // epoch——HTTP 头上没有，此前解析不到 → 免费模型每日配额只冷 5 分钟、
+    // 全天反复白试）。秒/毫秒分档判定与 retry-after 头一致。
+    if let Some(pos) = l.find("ratelimit-reset")
+        && let Some(rest) = body.get(pos..)
+        && let Some(digit_start) = rest.find(|c: char| c.is_ascii_digit())
+    {
+        let tail = &rest[digit_start..];
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<i64>() {
+            let epoch_ms = if n > 1_000_000_000_000 {
+                n as u64
+            } else if n > 1_000_000_000 {
+                (n * 1000) as u64
+            } else {
+                0
+            };
+            // 合法窗：≥ 当前时刻且 ≤ 400 天（防解析到无关数字）
+            if epoch_ms > now_ms && epoch_ms <= now_ms + 400 * 24 * 3600 * 1000 {
+                return Some(epoch_ms);
+            }
+        }
+    }
+
     // ③ 相对分钟 / 小时（先于绝对时间扫：两种写法不共存，顺序无所谓）
     if let Some(pos) = l.find("minute") {
         if let Some(n) = num_before(&l[..pos]) {
@@ -498,5 +523,21 @@ mod reset_tests {
         let now = 1_760_000_000_000;
         assert_eq!(parse_reset_epoch_ms("nothing here", now), None);
         assert_eq!(parse_reset_epoch_ms("reset at 2001-01-01 00:00:00 +0800", now), None);
+    }
+
+    /// body 内嵌的 X-RateLimit-Reset（OpenRouter 429 实证 2026-10-23）：
+    /// 纯数字 epoch 在 body JSON metadata 里——解析到即按其冷却，
+    /// 过去时刻/无关数字不采纳
+    #[test]
+    fn parses_body_embedded_ratelimit_reset() {
+        let now = 1_760_000_000_000u64;
+        let body = r#"{"error":{"message":"Rate limit exceeded: free-models-per-day","metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"0","X-RateLimit-Reset":"1792800000000"}}}}"#;
+        assert_eq!(parse_reset_epoch_ms(body, now), Some(1_792_800_000_000));
+        // 秒级 epoch → ×1000
+        let body_s = r#"{"metadata":{"headers":{"X-RateLimit-Reset":"1792800000"}}}"#;
+        assert_eq!(parse_reset_epoch_ms(body_s, now), Some(1_792_800_000 * 1000));
+        // 过去时刻 → 不采纳
+        let past = r#"{"metadata":{"headers":{"X-RateLimit-Reset":"1000"}}}"#;
+        assert_eq!(parse_reset_epoch_ms(past, now), None);
     }
 }

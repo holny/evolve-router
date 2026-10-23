@@ -801,7 +801,13 @@ pub async fn chat_completions(
                         pk_gate,
                         "minimax-coding" | "zhipu-coding" | "zai-devpack" | "opencode-go"
                     );
-                    let reset_ms = failure_windows.iter().filter_map(|w| w.reset_epoch_ms).max();
+                    let reset_ms = failure_windows
+                        .iter()
+                        .filter_map(|w| w.reset_epoch_ms)
+                        // body 内嵌重置时刻（OpenRouter 429 的 metadata 头）也计入——
+                        // 免费日限的重置只在 body 里，HTTP 头上没有
+                        .chain(failure.until_epoch_ms)
+                        .max();
                     if st.quota.gate_get(provider_name).is_none() {
                         st.events.record(json!({
                             "kind": "quota_state_changed",
