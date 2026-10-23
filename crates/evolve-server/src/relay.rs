@@ -1403,7 +1403,11 @@ pub async fn chat_completions(
 fn fallback_eligible(status: u16) -> bool {
     // review#6：补 413（上下文超限→ContextOverflow 换模型）与 451（上游 WAF
     // 地域拦截——此前走"成功"路径被 mark_ok，实际上游根本不可用）
-    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 413 | 429 | 451) || status >= 500
+    // 2026-10-23 实证：opencode zen 免费 MiniMax 对超大请求回 410（0 字节，
+    // ttft 7.3s）——此前不在白单里走"成功"路径透传给客户端，会话直接死
+    // （客户端收 410 空体即放弃，无重试）；实际该模型常态 200，410 属
+    // 上游瞬时拒绝 → 换模型失败转移（Transient 短冷却）
+    matches!(status, 400 | 401 | 402 | 403 | 404 | 408 | 410 | 413 | 429 | 451) || status >= 500
 }
 
 /// 端点级最近成功记录（baseURL → 最后一次 200 的时刻）：同 baseURL 多账号
@@ -2180,7 +2184,7 @@ mod winner_queue_tests {
 
 #[cfg(test)]
 mod auto_alias_tests {
-    use super::auto_request;
+    use super::{auto_request, fallback_eligible};
 
     #[test]
     fn accepts_human_readable_auto_wiring() {
@@ -2200,5 +2204,16 @@ mod auto_alias_tests {
         assert!(!auto_request("opencode-go/glm-5.3"));
         assert!(!auto_request(""));
         assert!(!auto_request("autopilot"));
+    }
+
+    /// 410 必须走失败转移（2026-10-23 实证：opencode zen 免费 MiniMax 对超大
+    /// 请求回 410 空体——透传会让客户端会话直接死，且模型被误标 OK）
+    #[test]
+    fn upstream_410_is_fallback_eligible() {
+        assert!(fallback_eligible(410));
+        assert!(fallback_eligible(413));
+        assert!(fallback_eligible(502));
+        assert!(!fallback_eligible(200));
+        assert!(!fallback_eligible(204));
     }
 }
