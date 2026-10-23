@@ -2263,7 +2263,10 @@ pub fn model_usability(st: &AppState) -> std::collections::HashMap<String, Optio
                 Some("no-key")
             } else if deleted.contains(m.id.as_str()) {
                 Some("deleted")
-            } else if gated.contains(&m.provider) {
+            } else if gated.contains(&m.provider) && !m.is_free() {
+                // 免费直通车豁免：账号级配额闸不连带免费模型（与 relay 侧
+                // quota_view 豁免同口径，2026-10-23）；上游模型级 429 仍走
+                // cooldown 分支正常灰显
                 Some("quota-gated")
             } else if health.get(&m.id).map(|h| !h.available(now)).unwrap_or(false) {
                 Some("cooldown")

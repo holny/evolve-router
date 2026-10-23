@@ -196,10 +196,18 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
                 // 同时出现时标 weekly/monthly（诚实：不限缩小到单一窗口）
                 let wk = lower.contains("weekly") || lower.contains("week") || lower.contains("每周");
                 let mo = lower.contains("monthly") || lower.contains("month") || lower.contains("每月");
+                // 关键词没说窗名、但精确重置时刻在 24h 外 → 实际是月窗级别
+                // （实证 2026-10-23：openrouter 免费 :free 模型月度上限 429，
+                // 正文无 weekly/monthly 关键词，被默认标成 "(5h)" 而实际冷却
+                // 30 天——标签与冷却时长自相矛盾）
+                let far_reset = until
+                    .map(|u| u.saturating_sub(now()) > 24 * 3600 * 1000)
+                    .unwrap_or(false);
                 let win = match (wk, mo) {
                     (true, true) => " (weekly/monthly)",
                     (true, false) => " (weekly)",
                     (false, true) => " (monthly)",
+                    (false, false) if far_reset => " (monthly)",
                     (false, false) => " (5h)",
                 };
                 Failure { kind: HealthKind::QuotaExhausted, message: format!("quota window exhausted{win}"), until_epoch_ms: until }

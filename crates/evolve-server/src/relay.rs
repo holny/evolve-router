@@ -185,7 +185,10 @@ pub async fn chat_completions(
                     continue;
                 }
                 for mid in st.engine.catalog_snapshot().iter()
-                    .filter(|m| m.provider == provider)
+                    // 免费直通车豁免（2026-10-23 用户追问实证）：免费模型不烧
+                    // 方案配额，账号级配额闸（weekly/5h 耗尽）不连带——否则
+                    // 付费窗耗尽时免费模型也被一并清零，违背直通车裁决
+                    .filter(|m| m.provider == provider && !m.is_free())
                     .map(|m| m.id.clone()) {
                     quota_view.insert(mid, 0);
                 }
