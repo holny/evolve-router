@@ -528,6 +528,9 @@ impl PolicyProfile {
 pub enum HealthKind {
     Ok,
     AuthFailed,
+    /// 地区封锁（上游 403 RegionError / not available in your country）——
+    /// 不会自愈，冷却 1 天（2026-10-23 用户定）
+    RegionBlocked,
     PaymentRequired,
     QuotaExhausted,
     RateLimited,
@@ -541,6 +544,7 @@ impl HealthKind {
         match self {
             HealthKind::Ok => "ok",
             HealthKind::AuthFailed => "auth failed",
+            HealthKind::RegionBlocked => "region blocked",
             HealthKind::PaymentRequired => "no credit",
             HealthKind::QuotaExhausted => "quota exhausted",
             HealthKind::RateLimited => "rate limited",
@@ -552,12 +556,15 @@ impl HealthKind {
     pub fn default_cooldown_ms(&self) -> u64 {
         match self {
             HealthKind::Ok => 0,
+            // 时长表（2026-10-23 用户定）：地区封锁 1 天（不会自愈）、配额 1h、
+            // 限流/网络 5min（重复失败经 escalation 最多到 20min）
+            HealthKind::RegionBlocked => 24 * 60 * 60 * 1000,
             HealthKind::AuthFailed | HealthKind::PaymentRequired => 30 * 60 * 1000,
             HealthKind::Unsupported => 24 * 60 * 60 * 1000,
             HealthKind::ContextOverflow => 2 * 60 * 1000,
-            HealthKind::QuotaExhausted => 5 * 60 * 1000,
-            HealthKind::RateLimited => 60 * 1000,
-            HealthKind::Transient => 30 * 1000,
+            HealthKind::QuotaExhausted => 60 * 60 * 1000,
+            HealthKind::RateLimited => 5 * 60 * 1000,
+            HealthKind::Transient => 5 * 60 * 1000,
         }
     }
 }

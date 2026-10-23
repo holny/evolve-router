@@ -325,6 +325,7 @@ pub async fn chat_completions(
     };
 
     // 价位闸临近模型预放行（用户裁决 2026-10-20）：价位闸从"掐死"降级为
+    let mut skipped: Vec<String> = Vec::new();
     // "压排序"——每 provider 一个最临近的代表补到链尾，任何请求的候选集
     // 都覆盖全部 provider；精确档全灭时直接落到位，不用先空转一轮等救援
     let price_near = price_gated_retries(&decision.filtered, &decision.scores, &attempts, 6);
@@ -362,23 +363,39 @@ pub async fn chat_completions(
             attempts.extend(ctx_retry);
         }
         // 链耗尽续跑（2026-10-23 实证：top-3 全灭时 zhipu glm-5.3-flash 排在
-        // 榜单 3 名开外从未被试到，而同池直连它是 200）：评分榜的后续候选按序
-        // 补进尝试列表，总尝试数封顶 12——故障转移走完榜单，而不是止步前三。
+        // 榜单第 8 名从未被试到，而同池直连它是 200）：**评分榜 top-12 强制
+        // 入列**——首个版本用"总尝试数 ≤12"做预算，但价格邻近/上下文救命
+        // 扩展先行占满了名额，扩展自身变成零贡献。改为按榜计数：scored 前
+        // 12 名（去重后）无论如何都在队列里，故障转移真正走完榜单。
+        // 本轮 walk 中刚被标记冷却的模型不再入列（用户定：明确不可重试的
+        // 不进重试队列）——全部入列后仍无可走时保留原列表兜底。
         {
-            const ATTEMPT_BUDGET: usize = 12;
-            let ranked = decision.scored.iter().map(|sc| &sc.model_id).collect::<Vec<_>>();
-            for id in ranked {
-                if attempts.len() >= ATTEMPT_BUDGET {
+            const SCORED_TOP_N: usize = 12;
+            let now = evolve_memory::health::now();
+            let health = st.health.snapshot();
+            let mut counted = 0usize;
+            for sc in decision.scored.iter() {
+                if counted >= SCORED_TOP_N {
                     break;
                 }
-                if !attempts.contains(&id) {
-                    attempts.push(id.clone());
+                counted += 1;
+                if attempts.contains(&sc.model_id) {
+                    continue;
                 }
+                // 冷却中（含本轮 walk 刚拉黑的）→ 跳过，不排进重试队列
+                if health
+                    .get(&sc.model_id)
+                    .map(|h| !h.available(now))
+                    .unwrap_or(false)
+                {
+                    skipped.push(format!("{}(blacklisted: cooling after failure)", sc.model_id));
+                    continue;
+                }
+                attempts.push(sc.model_id.clone());
             }
         }
     }
 
-    let mut skipped: Vec<String> = Vec::new();
     // 会话级拉黑剔除（2026-10）：该会话历史与某模型不兼容（请求形状类 4xx）→
     // 本会话不再试它；**其它会话不受影响**。全部被拉黑时保留原列表（宁可再试
     // 一次也不让会话彻底无路可走），并把剔除原因写进 skipped。

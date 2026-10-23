@@ -59,8 +59,9 @@ impl HealthRegistry {
         entry.hits += 1;
         // escalate cooldown when repeat failures stack. Quota windows are
         // periodic (coding-plan windows reset on their own schedule), so
-        // quota stays flat: probe every base interval, reset on each failure
-        let mult = if f.kind == HealthKind::QuotaExhausted {
+        // quota stays flat: probe every base interval, reset on each failure.
+        // RegionBlocked 同样持平（1 天固定——地区封锁不会自愈，倍增无意义）
+        let mult = if matches!(f.kind, HealthKind::QuotaExhausted | HealthKind::RegionBlocked) {
             1
         } else {
             entry.hits.min(4) as u64
@@ -165,6 +166,21 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
             Failure {
                 kind: HealthKind::Unsupported,
                 message: "model does not support this protocol (provider requires another API)".into(),
+                until_epoch_ms: None,
+            }
+        }
+        // 地区封锁（2026-10-23 实证：zen beam-free 403 RegionError "This model
+        // is not available in your country"）——不会自愈 → 冷却 1 天（用户定），
+        // 与普通鉴权失败（30min，可能换 key 复原）区分
+        401 | 403 if lower.contains("not available in your country")
+            || lower.contains("regionerror")
+            || lower.contains("region error")
+            || lower.contains("region not supported")
+            || lower.contains("unsupported_region") =>
+        {
+            Failure {
+                kind: HealthKind::RegionBlocked,
+                message: "region blocked by upstream".into(),
                 until_epoch_ms: None,
             }
         }
@@ -299,6 +315,14 @@ mod tests {
     /// 上游实证报错样本（volcengine / 智谱 / opencode）——分类必须不退化
     #[test]
     fn classifies_real_world_provider_errors() {
+        // zen beam-free：地区封锁（2026-10-23 实证 403 RegionError）→ 1 天冷却
+        let f = classify_failure(
+            403,
+            r#"{"type":"error","error":{"type":"RegionError","message":"This model is not available in your country"}}"#,
+            None,
+        );
+        assert_eq!(f.kind, HealthKind::RegionBlocked, "geo-block is RegionBlocked");
+        assert_eq!(f.message, "region blocked by upstream");
         // volcengine：请求过频（真实限流，不是配额）
         let f = classify_failure(
             429,
