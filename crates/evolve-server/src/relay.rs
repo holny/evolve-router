@@ -326,6 +326,11 @@ pub async fn chat_completions(
 
     // 价位闸临近模型预放行（用户裁决 2026-10-20）：价位闸从"掐死"降级为
     let mut skipped: Vec<String> = Vec::new();
+    // 候选遍历游标 + 评分榜续补游标（2026-10-23）：初始补 scored 前 12 名，
+    // 队列走完后从第 13 名继续续补（跳过冷却/已入列）——拉黑完成后自动
+    // 往下走榜单 = 用最新失败信息重新决策
+    let mut cand_idx = 0usize;
+    let mut top_up_cursor = 12usize;
     // "压排序"——每 provider 一个最临近的代表补到链尾，任何请求的候选集
     // 都覆盖全部 provider；精确档全灭时直接落到位，不用先空转一轮等救援
     let price_near = price_gated_retries(&decision.filtered, &decision.scores, &attempts, 6);
@@ -453,7 +458,39 @@ pub async fn chat_completions(
     // 自递归防护（审查 M-6）：候选 base_url 指向自身监听地址时出局——
     // 不依赖用户给网关条目起什么名字（命名约定不可靠）
     let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
-    'cands: for (cand_idx, cand) in attempts.iter().enumerate() {
+    'cands: while cand_idx < attempts.len() {
+        // 队列走完 → 评分榜续补下一批（跳过冷却/已入列）：拉黑完成后自动
+        // 往下走榜单 = 用最新失败信息重新决策（榜单即决策）。补尽即止。
+        if cand_idx >= attempts.len() {
+            let now = evolve_memory::health::now();
+            let health = st.health.snapshot();
+            let mut added = 0usize;
+            while top_up_cursor < decision.scored.len()
+                && added < 6
+                && attempts.len() < 36
+            {
+                let sc = &decision.scored[top_up_cursor];
+                top_up_cursor += 1;
+                if health
+                    .get(&sc.model_id)
+                    .map(|h| !h.available(now))
+                    .unwrap_or(false)
+                {
+                    continue; // 冷却中（本轮刚拉黑）→ 不入列
+                }
+                if attempts.contains(&sc.model_id) {
+                    continue;
+                }
+                attempts.push(sc.model_id.clone());
+                added += 1;
+            }
+            if cand_idx >= attempts.len() {
+                break 'cands;
+            }
+        }
+        let this_idx = cand_idx; // body 内索引语义保持（quality 级联/sweep 判定用）
+        cand_idx += 1;
+        let cand = &attempts[this_idx];
         let Some(record) = st.catalog_get(cand) else { continue };
         if record.base_url.contains(&self_addr) || record.base_url.contains("127.0.0.1:8787") {
             skipped.push(format!("{cand}(self-loop: points back at this gateway)"));
@@ -502,7 +539,7 @@ pub async fn chat_completions(
         {
             // 链外兜底段（cand_idx >= sweep_from）冷却不再拦——全灭好过硬报错，
             // 单次尝试不会形成打爆（失败会重新记账冷却）
-            let sweep = cand_idx >= sweep_from;
+            let sweep = this_idx >= sweep_from;
             if !sweep {
                 let remaining = h
                     .cooldown_remaining_ms(now_ms)
@@ -1214,14 +1251,14 @@ pub async fn chat_completions(
                 // 流式不级联（内容已发出无法重试）；truncated 不触发（max_tokens
                 // 问题换模型无益且双倍计费）；refusal 不触发（可能正当拒绝）。
                 // 链耗尽则回退返回此响应（降质好过硬报错）。
-                let quality_poor = if cand_idx == 0 {
+                let quality_poor = if this_idx == 0 {
                     q.degenerate
                         || q.empty_response
                         || (q.tool_calls_total > 0 && !q.syntactic_ok())
                 } else {
                     q.degenerate || q.empty_response
                 };
-                if quality_poor && cand_idx + 1 < attempts.len() {
+                if quality_poor && this_idx + 1 < attempts.len() {
                     crate::stream::finalize_event(&st.events, &st.flywheel.clone(), &st.quota, &st.bus, &t);
                     tracing::warn!(model = %cand, flags = ?q.flags, "quality cascade: escalating to next candidate");
                     quality_fallback = Some((map_status(status), h.clone(), bytes.clone()));
