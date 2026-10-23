@@ -7,6 +7,23 @@ pub struct Catalog {
     index: HashMap<String, usize>,
 }
 
+/// id→index 构建（review 2026-10-23）：重复 id 只保**首条**并告警——
+/// 旧实现 last-write-wins 静默指向后条，路由引擎与面板可能各说各话
+fn build_index(models: &[ModelRecord]) -> std::collections::HashMap<String, usize> {
+    let mut index = std::collections::HashMap::with_capacity(models.len());
+    for (i, m) in models.iter().enumerate() {
+        match index.entry(m.id.clone()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(i);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                tracing::warn!(model = %m.id, index = i, "duplicate model id in catalog — keeping the first occurrence");
+            }
+        }
+    }
+    index
+}
+
 impl Catalog {
     pub fn from_records(models: Vec<ModelRecord>) -> Self {
         let mut models = models;
@@ -15,7 +32,7 @@ impl Catalog {
                 m.currency = infer_currency(&m.provider).to_string();
             }
         }
-        let index = models.iter().enumerate().map(|(i, m)| (m.id.clone(), i)).collect();
+        let index = build_index(&models);
         Self { models, index }
     }
 
@@ -32,7 +49,6 @@ impl Catalog {
             .into_iter()
             .filter(|m| m.provider != "evolve")
             .collect();
-        let _user_ids: Vec<&str> = user.iter().map(|m| m.id.as_str()).collect();
         // user light-weight overrides (e.g. only weight) inherit connection
         // facts from the discovered layer with the same id — the discovered
         // facts also originate from user agent configs (decision #22)
@@ -114,7 +130,7 @@ impl Catalog {
                 m.plan = true;
             }
         }
-        let index = models.iter().enumerate().map(|(i, m)| (m.id.clone(), i)).collect();
+        let index = build_index(&models);
         Self { models, index }
     }
 

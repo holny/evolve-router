@@ -261,7 +261,12 @@ pub fn info_for(base_url: &str) -> Option<&'static ProviderInfo> {
         .to_lowercase();
     PROVIDERS
         .iter()
-        .find(|p| host == p.host || host.ends_with(&format!(".{}", p.host)))
+        .find(|p| {
+            // 免每次调用的 format! 分配：点前缀匹配直接用字节比较
+            host == p.host || (host.len() > p.host.len()
+                && host.ends_with(p.host)
+                && host.as_bytes()[host.len() - p.host.len() - 1] == b'.')
+        })
 }
 
 /// 峰谷折扣系数：非高峰返回 off_peak_factor（如 0.5），高峰/无峰谷返回 1.0。

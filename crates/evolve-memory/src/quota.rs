@@ -69,6 +69,10 @@ pub struct ProviderGateState {
     pub probe_failures: u32,
     /// 探测进行中（探测单在飞时闸门暂开）
     pub probing: bool,
+    /// 本次探测被领取的时刻（租约起点，2026-10-23）：probe 结果丢失时
+    /// `probing` 会永久为 true → pick 永远跳过 → 闸门探测卡死。
+    /// 租约超时（60s，> 探针 10s 超时）后允许重新领取。
+    pub probe_picked_at_ms: u64,
     // ── 非配额故障（2026-10 新增：provider 级，连续失败达标才降级 + 定时探活）──
     /// 当前故障类型（None = 无）
     pub issue: Option<ProviderIssue>,
@@ -117,13 +121,18 @@ impl ProviderGateState {
     }
 
     pub fn backoff_ms(&self, now: u64) -> u64 {
-        if self.api_backed {
+        // probe_at_ms 是绝对时刻（now + interval 各处赋值）→ 剩余等待 =
+        // probe_at_ms − now。旧式 `interval − (now − probe_at_ms)` 只在
+        // "probe_at 恰为上次赋值时刻 + interval" 时碰巧正确，重排后即错。
+        let interval = if self.api_backed {
             Self::API_RETRY_MS
         } else {
             (Self::PROBE_BASE_MS + self.probe_failures as u64 * 60_000).min(Self::PROBE_CAP_MS)
-        }
-        .saturating_sub(now.saturating_sub(self.probe_at_ms))
-        .max(0)
+        };
+        self.probe_at_ms
+            .saturating_sub(now)
+            .min(interval)
+            .max(0)
     }
 
     /// 非配额故障的退避剩余（0 = 可以探测了）
@@ -160,20 +169,24 @@ impl QuotaLedger {
     pub fn gate_observe_windows(&self, provider: &str, windows: &[WindowState], now: u64) {
         if provider.is_empty() { return; }
         let Ok(mut m) = self.provider_gate.lock() else { return };
+        // 2026-10-23 修复：此前排除的恰好是调用方（refresh_observed）实际发送的
+        // 全部 scope（5h/weekly/monthly）→ 关闸分支不可达、"开闸"日志每轮刷屏
         let full: Vec<String> = windows.iter()
-            .filter(|w| !matches!(w.scope.as_str(), "5h" | "weekly" | "monthly"))
+            .filter(|w| w.scope != "requests")
             .filter(|w| w.remaining == Some(0))
             .map(|w| w.scope.clone())
             .collect();
         if full.is_empty() {
             if let Some(e) = m.get_mut(provider) {
-                tracing::info!(provider = %provider, "provider quota gate opened (official windows show remaining)");
+                let was_closed = !e.windows_full.is_empty();
+                e.windows_full.clear();
+                e.reset_epoch_ms = None;
                 // 配额开了，但网络/鉴权 issue 可能仍在 → 只清配额相关，保留故障状态
-                if e.issue.is_some() {
-                    e.windows_full.clear();
-                    e.reset_epoch_ms = None;
-                } else {
+                if e.issue.is_none() {
                     m.remove(provider);
+                }
+                if was_closed {
+                    tracing::info!(provider = %provider, "provider quota gate opened (official windows show remaining)");
                 }
             }
             return;
@@ -200,7 +213,10 @@ impl QuotaLedger {
         let newly = !m.contains_key(provider);
         let e = m.entry(provider.to_string()).or_insert_with(|| ProviderGateState {
             api_backed,
-            windows_full: vec![],
+            // 合成窗标记：429/402 关闸时没有官方窗名可记，但所有"关闸"消费方
+            // （gate_blocked / meta watchdog / relay 904）都以 windows_full 非空
+            // 为判据——空列表会让这次关闸对它们完全不可见
+            windows_full: vec!["quota".to_string()],
             reset_epoch_ms,
             since_ms: now,
             probe_at_ms: now + ProviderGateState::API_RETRY_MS,
@@ -319,17 +335,14 @@ impl QuotaLedger {
         let Ok(mut m) = self.provider_gate.lock() else { return };
         let Some(e) = m.get_mut(provider) else { return };
         e.probing = false;
+        // 快照需要清理的字段（ borrow 结束后再做整条移除）
+        let issue_only_entry = ok && e.windows_full.is_empty();
         if ok {
             e.issue = None;
             e.issue_fails = 0;
             e.issue_counting = None;
             e.issue_probe_at_ms = 0;
             tracing::info!(provider = %provider, "probe succeeded — provider revived");
-            if e.windows_full.is_empty() {
-                // 只承载 issue 的条目：恢复后整条移除（配额状态本就为空）
-                drop(e);
-                m.remove(provider);
-            }
         } else {
             e.issue_probe_failures = e.issue_probe_failures.saturating_add(1);
             e.issue_probe_at_ms = now
@@ -337,6 +350,10 @@ impl QuotaLedger {
                     e.issue.unwrap_or(ProviderIssue::Network),
                     e.issue_probe_failures,
                 );
+        }
+        // 只承载 issue 的条目：恢复后整条移除（配额状态本就为空）
+        if issue_only_entry {
+            m.remove(provider);
         }
     }
 
@@ -354,18 +371,26 @@ impl QuotaLedger {
         self.provider_gate.lock().ok()?.get(provider).cloned()
     }
 
-    /// 选一个进入探测的 provider（无 API 型）：探测窗口到 + 未在探测中
+    /// 选一个进入探测的 provider（无 API 型）：探测窗口到 + 未在探测中。
+    /// probing 带租约（60s）：领取后超时未见结果 → 视为泄漏，允许重新领取
+    /// （与 issue 探活同一防楔死模式，2026-10-23 实证）。
     pub fn gate_pick_probe(&self, now: u64) -> Option<String> {
+        const PICK_LEASE_MS: u64 = 60 * 1000;
         let mut m = self.provider_gate.lock().ok()?;
         let mut best: Option<(u64, String)> = None;
         for (k, e) in m.iter() {
-            if e.api_backed || e.probing || now < e.probe_at_ms { continue; }
+            if e.api_backed || now < e.probe_at_ms { continue; }
+            if e.probing && now.saturating_sub(e.probe_picked_at_ms) < PICK_LEASE_MS { continue; }
             if best.as_ref().map(|(t, _)| e.probe_at_ms < *t).unwrap_or(true) {
                 best = Some((e.probe_at_ms, k.clone()));
             }
         }
         let (t, k) = best?;
-        if let Some(e) = m.get_mut(&k) { e.probing = true; e.probe_at_ms = t; }
+        if let Some(e) = m.get_mut(&k) {
+            e.probing = true;
+            e.probe_picked_at_ms = now;
+            e.probe_at_ms = t;
+        }
         tracing::info!(provider = %k, "quota gate: probe request allowed (real-state redetection)");
         Some(k)
     }
@@ -575,6 +600,10 @@ impl QuotaLedger {
     pub fn model_remaining_tokens(&self, model_id: &str) -> Option<u64> {
         let m = self.inner.lock().ok()?;
         let now = now_ms();
+        // stale-window guards（对齐 best_remaining_by_models 的 review#8 修复）：
+        // 24h 前的窗是垃圾数据；零余量且无重置时刻只封锁 30min
+        const MAX_WINDOW_AGE_MS: u64 = 24 * 3600 * 1000;
+        const UNKNOWN_RESET_BLOCK_MS: u64 = 30 * 60 * 1000;
         let mut best: Option<u64> = None;
         for (k, slots) in m.iter() {
             if health_model_id(k) != model_id {
@@ -584,11 +613,18 @@ impl QuotaLedger {
                 if w.scope == "requests" {
                     continue;
                 }
-                // expired window = budget refreshed; treat as unknown/ok
-                if let Some(r) = w.reset_epoch_ms
-                    && r <= now {
-                        continue;
+                if now.saturating_sub(w.updated_epoch_ms) > MAX_WINDOW_AGE_MS {
+                    continue;
+                }
+                match w.reset_epoch_ms {
+                    Some(r) if r <= now => continue,
+                    None if w.remaining == Some(0)
+                        && now.saturating_sub(w.updated_epoch_ms) > UNKNOWN_RESET_BLOCK_MS =>
+                    {
+                        continue
                     }
+                    _ => {}
+                }
                 if let Some(rem) = w.remaining {
                     // 跨 key 取 best（max）——"哪个 key 余量最多就用哪个"
                     best = Some(match best {
@@ -698,10 +734,9 @@ pub fn parse_rfc3339_ms(s: &str) -> Option<u64> {
         main
     };
     let bytes = main.as_bytes();
-    if (bytes.len() < 19 || (bytes.len() == 20 && bytes[19] != b'Z'))
-        && bytes.len() < 19 {
-            return None;
-        }
+    if bytes.len() < 19 {
+        return None;
+    }
     let num = |a: usize, b: usize| main.get(a..b)?.parse::<i64>().ok();
     let year = num(0, 4)?;
     let month = num(5, 7)?;

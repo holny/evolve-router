@@ -11,8 +11,12 @@ public struct RecentDecision: Identifiable, Equatable {
     }
     /// RecentDecision 的稳定身份：内容即可识别（model+时刻+总量）；此前每次
     /// 轮询生成 UUID → ForEach 视 60 行为"全新行"整组拆建，AG 属性累积的
-    /// anti-pattern，等同 AG 崩溃的主要膨胀面
-    public var id: String { "\(model)|\(time)|\(totalMs)|\(status)" }
+    /// anti-pattern，等同 AG 崩溃的主要膨胀面。
+    /// 秒级时刻同秒并发会撞车（review 2026-10-23）→ 追加 totalTokens/ttft，
+    /// 同秒不同请求也能区分
+    public var id: String {
+        "\(model)|\(time)|\(totalMs)|\(status)|\(totalTokens)|\(ttftMs.map(String.init) ?? "-")"
+    }
     public let model: String
     public let status: Int
     public let totalMs: Int
@@ -553,9 +557,10 @@ public final class AppState: ObservableObject {
                 put(\.tokensK, \.tokensK, Self.fmtTok(toks))
                 upd(\.windowLoading, false)
             }
-        }
         // Model 维度行（Providers 卡 Model 标签）：同一窗口的逐模型指标，
         // 与 Provider 行同布局，按 tokens 降序前 6 行
+        // ⚠ 必须留在 HTTP-200 守卫内（review 2026-10-23）：放守卫外时瞬时
+        // 失败会用空/旧 models 清空 modelRows，面板模型列闪空
         var mrows: [ModelRow] = []
         for (mid, msAny) in models {
             guard let ms = msAny as? [String: Any] else { continue }
@@ -595,6 +600,7 @@ public final class AppState: ObservableObject {
         if windowToday == statWindowToday {
             put(\.modelRows, \.modelRows, mappedRows)
         }
+        } // /api/stats 200 守卫结束：瞬时失败时 modelRows 保持上一轮，不清空
 
         var rows: [ProviderRow] = []
         // 派生量（配额窗口/绑定窗口/冷却/黑名单/可用性）全部由服务端算好——macOS
@@ -834,7 +840,11 @@ public final class AppState: ObservableObject {
     }
 
     private func get(_ path: String) async throws -> (Int, Data) {
-        let (data, resp) = try await URLSession.shared.data(from: URL(string: Config.baseURL + path)!)
+        // URL 构造失败（环境变量被改坏）不炸进程：返回 0 让调用方走失败路径
+        guard let url = URL(string: Config.baseURL + path) else {
+            throw URLError(.badURL)
+        }
+        let (data, resp) = try await URLSession.shared.data(from: url)
         return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
     }
 }

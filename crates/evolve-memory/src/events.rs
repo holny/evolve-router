@@ -38,22 +38,17 @@ impl EventLog {
     pub fn record(&self, mut event: Value) {
         const ROTATE_BYTES: u64 = 32 * 1024 * 1024;
         // simple size-based rotation: events.jsonl -> events.jsonl.1
-        // 锁守卫必须在独立作用域内释放：Rust2024 let-chain 守卫会存活到
-        // 整条 if 结束，块内再 lock 同一把锁会永久自死锁（32MB 后网关挂死）
-        let needs_rotate = match &self.inner.file {
-            Some(f) => {
-                let g = f.lock().unwrap_or_else(|p| p.into_inner());
-                g.metadata().map(|m| m.len() > ROTATE_BYTES).unwrap_or(false)
-            }
-            None => false,
-        };
-        if needs_rotate
-            && let Some(path) = &self.inner.path
-        {
-            let rotated = path.with_extension("jsonl.1");
-            let _ = std::fs::rename(path, &rotated);
-            if let Some(f) = &self.inner.file {
-                let mut g = f.lock().unwrap_or_else(|p| p.into_inner());
+        // 旋转全程持锁（检查 + rename + 重开同一临界区）：此前"先查大小（放锁）
+        // 再 rename"的 check-then-act 缝隙里，并发 append 会写进已改名的 .1
+        // 文件丢行。锁守卫在本块结束即释放，下方写入再重新加锁——不会自死锁
+        if let Some(f) = &self.inner.file {
+            let mut g = f.lock().unwrap_or_else(|p| p.into_inner());
+            let needs_rotate = g.metadata().map(|m| m.len() > ROTATE_BYTES).unwrap_or(false);
+            if needs_rotate
+                && let Some(path) = &self.inner.path
+            {
+                let rotated = path.with_extension("jsonl.1");
+                let _ = std::fs::rename(path, &rotated);
                 if let Ok(nf) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)

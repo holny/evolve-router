@@ -163,17 +163,21 @@ impl ModelRecord {
     }
 }
 
-/// 国内厂商按人民币计价；其余默认美元（可被配置显式覆盖）
+/// 国内厂商按人民币计价；其余默认美元（可被配置显式覆盖）。
+/// 匹配规则（2026-10-23 review）：厂商键须为**标识符段前缀**（段 = 按
+/// -_/. 分隔），不再裸子串——"sparkbenchmark" 不再因含 "ark" 误判 CNY，
+/// 而 "zhipuai-*"（段前缀 zhipu）、"moonshotai" 等既有命名照常命中。
 pub fn infer_currency(provider: &str) -> &'static str {
     let p = provider.to_lowercase();
-    for cn in ["zhipu", "deepseek", "minimax", "volces", "volcengine", "ark", "moonshot", "kimi",
-               "qwen", "dashscope", "alibaba", "baidu", "ernie", "tencent", "hunyuan",
-               "stepfun", "01ai", "baichuan", "sensetime", "doubao"] {
-        if p.contains(cn) {
-            return "CNY";
-        }
+    const CN: &[&str] = &["zhipu", "deepseek", "minimax", "volces", "volcengine", "ark",
+        "moonshot", "kimi", "qwen", "dashscope", "alibaba", "baidu", "ernie", "tencent",
+        "hunyuan", "stepfun", "01ai", "baichuan", "sensetime", "doubao"];
+    if CN.iter().any(|k| p.starts_with(k)) {
+        return "CNY";
     }
-    "USD"
+    let seg_hit = p.split(['-', '_', '.', '/', ':'])
+        .any(|seg| CN.iter().any(|k| seg.starts_with(k)));
+    if seg_hit { "CNY" } else { "USD" }
 }
 
 impl ModelRecord {
@@ -699,8 +703,8 @@ pub fn fuse_judgments(jev: &JudgmentSet, heur: &JudgmentSet) -> JudgmentSet {
         // 会回退成启发式（judge_source = "heuristic"），此时融合结果必须如实标 heuristic，
         // 否则界面判定不出"配了模型但当前没在用"（用户实测：超时后状态仍 ok）
         judge_source: if jev.judge_source == "heuristic" { "heuristic" } else { "decision_model+rules" },
-    route_recommendation: jev.route_recommendation.clone(),
-    route_recommendation_confidence: jev.route_recommendation_confidence,
+        route_recommendation: jev.route_recommendation.clone(),
+        route_recommendation_confidence: jev.route_recommendation_confidence,
     }
 }
 

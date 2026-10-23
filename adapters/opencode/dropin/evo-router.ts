@@ -40,13 +40,11 @@ async function report(path, body) {
   }
 }
 
-export const ModelroutePlugin = async ({ project }) => {
-  const cwd = project?.worktree ?? project?.path ?? ""
+export const EvolveRouterPlugin = async ({ project }) => {
   return {
     "chat.headers": async (input, output) => {
       output.headers["x-ev-session"] = input.sessionID
-      if (input.agent) output.headers["x-ev-agent"] = input.agent
-      if (cwd) output.headers["x-ev-cwd-len"] = String(cwd.length)
+      if (input.agent) output.headers["x-ev-client"] = input.agent
     },
 
     "tool.execute.after": async (input, output) => {

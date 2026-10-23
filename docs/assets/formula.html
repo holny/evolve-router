@@ -2,10 +2,10 @@
 <html>
 <head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}]});"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-9fc31577846c348534b40bf872dd274da01b0c9c0f2730c46aa483d68748f9676d5d1196b76913bc615ab07a52cb7495" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" integrity="sha384-5e32b238e946c1c8cd4c02101c8a603a7a341e5d5842acd438495e38b00b9aea9e8677941bebe719cb6651bd1963497c" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" integrity="sha384-f95071777afa5e0511c9caad675d7b9d8c38e0e39c21ac79e99e1d09159bc723edd0aa1a875b87a0ad28e3efd1444d39" crossorigin="anonymous"
+  onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]});"></script>
 <style>
   body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #fafafa; color: #1a1a2e;
          width: 940px; padding: 28px 34px; margin: 0; }
@@ -30,7 +30,7 @@
 <h2>0 · Price-aware stack <span class="tag">difficulty → tiers → gate → cache/economics (2026-10)</span></h2>
 $$d_{\mathrm{eff}} = \mathrm{calib}(d_{\mathrm{raw}})\;\xrightarrow{\;\text{quantile reshape (70/20/10)}\,}\;\text{L1}|\text{L2}|\text{L3}$$
 $$\text{tier}_{\mathrm{max}} = \begin{cases} \text{cheap} & d_{\mathrm{eff}} \le 0.8\\ \text{cheap}|\text{medium} & d_{\mathrm{eff}} \le 2.0\\ \text{all} & \text{otherwise}\end{cases}\qquad \text{gate: } \text{tier}(m) \le \text{tier}_{\mathrm{max}} \ \lor\ \text{cost}(m) \le \operatorname{median}_{\text{allowed family}} \text{cost}$$
-$$\text{cost}(m) = \big[\,p^{\mathrm{miss}}_{\mathrm{in}}(1-h) + p^{\mathrm{hit}}_{\mathrm{in}} h\,\big]\cdot T_{\mathrm{in}} + p_{\mathrm{out}} T_{\mathrm{out}} \times \text{peak}(t) \qquad \text{sticky keeps a warm-cache model unless a rival is } &gt;15\% \text{ cheaper}$$
+$$\text{cost}(m) = \Big(\big[\,p^{\mathrm{miss}}_{\mathrm{in}}(1-h) + p^{\mathrm{hit}}_{\mathrm{in}} h\,\big]\cdot T_{\mathrm{in}} + p_{\mathrm{out}} T_{\mathrm{out}}\Big)  \times \text{peak}(t) \qquad \text{sticky keeps a warm-cache model unless a rival is } &gt;15\% \text{ cheaper}$$
 <div class="note">$d_{\mathrm{eff}}$ is reshaped by a rolling-quantile calibrator (target 70% easy / 20% medium / 10% hard). Capability and price tags are assigned by quantiles <em>over the currently usable pool only</em> (cooling / quota-gated / keyless models are excluded dynamically). Ratio controller then nudges the <em>observed</em> tier mix back to 7:2:1. Off-peak windows and cache-hit prices come from the provider registry; a 50-slot active set keeps only the newest-released (20-slot floor) + recently-used (14d) models routable.</div>
 </div>
 

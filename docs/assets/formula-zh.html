@@ -2,10 +2,10 @@
 <html>
 <head>
 <meta charset="utf-8">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-  onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false}]});"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-9fc31577846c348534b40bf872dd274da01b0c9c0f2730c46aa483d68748f9676d5d1196b76913bc615ab07a52cb7495" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" integrity="sha384-5e32b238e946c1c8cd4c02101c8a603a7a341e5d5842acd438495e38b00b9aea9e8677941bebe719cb6651bd1963497c" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" integrity="sha384-f95071777afa5e0511c9caad675d7b9d8c38e0e39c21ac79e99e1d09159bc723edd0aa1a875b87a0ad28e3efd1444d39" crossorigin="anonymous"
+  onload="renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'\\(',right:'\\)',display:false},{left:'$',right:'$',display:false}]});"></script>
 <style>
   body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #fafafa; color: #1a1a2e;
          width: 940px; padding: 28px 34px; margin: 0; }
@@ -30,8 +30,8 @@
 <h2>0 · 价格感知四层 <span class="tag">难度 → 档位 → 硬闸 → 缓存/经济学（2026-10）</span></h2>
 $$d_{\mathrm{eff}} = \mathrm{calib}(d_{\mathrm{raw}})\;\xrightarrow{\;\text{滚动分位重塑（70/20/10）}\,}\;\text{L1}|\text{L2}|\text{L3}$$
 $$\text{档位上限} = \begin{cases} \text{cheap} & d_{\mathrm{eff}} \le 0.8\\ \text{cheap}|\text{medium} & d_{\mathrm{eff}} \le 2.0\\ \text{全开} & \text{其他}\end{cases}\qquad \text{硬闸：}\ \text{档位}(m) \le \text{上限} \ \lor\ \text{成本}(m) \le \operatorname{中位}_{\text{同家族允许层}} \text{成本}$$
-$$\text{有效成本}(m) = \big[\,p^{\mathrm{未命中}}_{\mathrm{入}}(1-h) + p^{\mathrm{命中}}_{\mathrm{入}} h\,\big]\cdot T_{\mathrm{入}} + p_{\mathrm{出}} T_{\mathrm{出}} \times \text{峰谷}(t) \qquad \text{暖缓存不被替换，除非对手便宜 } &gt;15\%$$
-<div class="note">$d_{\mathrm{eff}}$ 经滚动分位校准（目标 70% 简单 / 20% 一般 / 10% 困难）。能力档与价位档按分位分配，且**只在当前可用池上统计**（冷却 / 配额闸门 / 无凭据的模型动态排除）。比例控制器再把**实际选用**的档位占比拉回 7:2:1。峰谷与缓存命中价来自 provider 注册表；活跃集 50 席只保留最近发布（保底 20 席）+ 最近使用（14 天内）的模型。</div>
+$$\text{有效成本}(m) = \Big(\big[\,p^{\mathrm{未命中}}_{\mathrm{入}}(1-h) + p^{\mathrm{命中}}_{\mathrm{入}} h\,\big]\cdot T_{\mathrm{入}} + p_{\mathrm{出}} T_{\mathrm{出}}\Big)  \times \text{峰谷}(t) \qquad \text{暖缓存不被替换，除非对手便宜 } &gt;15\%$$
+<div class="note">$d_{\mathrm{eff}}$ 经滚动分位校准（目标 70% 简单 / 20% 一般 / 10% 困难）。能力档与价位档按分位分配，且<em>只在当前可用池上统计</em>（冷却 / 配额闸门 / 无凭据的模型动态排除）。比例控制器再把<em>实际选用</em>的档位占比拉回 7:2:1。峰谷与缓存命中价来自 provider 注册表；活跃集 50 席只保留最近发布（保底 20 席）+ 最近使用（14 天内）的模型。</div>
 </div>
 
 <div class="card">
@@ -49,7 +49,7 @@ $$\text{score}(m) = \underbrace{\Big[\textstyle\sum_k W_k \cdot f_k(m)\Big]}_{\t
 <div class="card">
 <h2>2 · 动态权重 <span class="tag">难度联动 × 配额感知（BaRP Eq.1）</span></h2>
 $$\mathbf{W} = \operatorname{norm}\Big(\underbrace{\mathbf{w}^{\,\mathrm{diff}}(d_{\mathrm{eff}})}_{\text{难任务}\,\Rightarrow\,\text{质量}\uparrow} \odot \underbrace{\mathbf{w}^{\,\mathrm{quota}}(t)}_{\text{配额紧}\,\Rightarrow\,W_c(1+1.5t),\,W_q(1-0.25t)}\Big), \quad t \in [0,1]$$
-<div class="note">t = 剩余配额不足 8× 预估 token 的候选占比；无配额数据时不干预。</div>
+<div class="note">t = 剩余配额不足 8× 预估 token 的候选占比；无配额数据时不干预。质量下限随难度单调上行：<em>d≈0 时 0.50 → d=3 时 0.85</em>——简单任务由成本决定，困难任务必须有实力。</div>
 </div>
 
 <div class="card">

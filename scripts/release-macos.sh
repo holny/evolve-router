@@ -8,8 +8,8 @@ VER="${1:?用法: release-macos.sh <version>，例 v0.1.1}"
 OUT="apps/tray/build/release"
 rm -rf "$OUT" && mkdir -p "$OUT"
 
-echo "[1/6] cargo 双架构 release 构建（**总是构建**：cargo 自身做增量，
-        早期"存在即跳过"曾把 10-13 的旧二进制打进 v0.1.3 发布包）..."
+echo "[1/6] cargo 双架构 release 构建（总是构建：cargo 自身做增量，
+        早期「存在即跳过」曾把 10-13 的旧二进制打进 v0.1.3 发布包）..."
 for T in aarch64-apple-darwin x86_64-apple-darwin; do
     echo "  building $T ..."
     cargo build -p evolve-server --release --target "$T"
@@ -36,14 +36,26 @@ rm -rf "$APP" && mkdir -p "$APPDIR/MacOS" "$APPDIR/Resources"
 cp "$SWIFT_UNI" "$APPDIR/MacOS/${APP_NAME}"
 cp "$OUT/evo-router" "$APPDIR/MacOS/evo-router"
 chmod +x "$APPDIR/MacOS/${APP_NAME}" "$APPDIR/MacOS/evo-router"
-[[ -f docs/assets/logo-color.png ]] || bash apps/tray/make-icons.sh >/dev/null
 if [[ -f docs/assets/logo-color.png ]]; then
     ICONSET="apps/tray/build/${APP_NAME}.iconset"
     rm -rf "$ICONSET" && mkdir -p "$ICONSET"
-    for s in 16 32 64 128 256 512 1024; do
-        sips -z $s $s docs/assets/logo-color.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null 2>&1 || true
-    done
+    # Apple 规范 iconset 文件名（icon_NxN.png + @2x；旧实现 64x64/1024x1024
+    # 不是合法成员，iconutil 会静默丢弃或报错——review 2026-10-23）
+    ic() { sips -z "$2" "$2" docs/assets/logo-color.png --out "$ICONSET/icon_$1" >/dev/null 2>&1 || true; }
+    ic "16x16.png" 16
+    ic "16x16@2x.png" 32
+    ic "32x32.png" 32
+    ic "32x32@2x.png" 64
+    ic "128x128.png" 128
+    ic "128x128@2x.png" 256
+    ic "256x256.png" 256
+    ic "256x256@2x.png" 512
+    ic "512x512.png" 512
+    ic "512x512@2x.png" 1024
     iconutil -c icns "$ICONSET" -o "$APPDIR/Resources/${APP_NAME}.icns" 2>/dev/null || true
+else
+    # make-icons.sh 消费 logo-color.png 而不是生成它——旧回退永远不成立
+    echo "警告: docs/assets/logo-color.png 缺失，跳过 .icns 生成（.app 无自定义图标）" >&2
 fi
 cat > "$APPDIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

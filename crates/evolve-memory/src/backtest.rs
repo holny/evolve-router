@@ -14,7 +14,6 @@ use std::io::BufRead;
 use std::path::Path;
 
 const MIN_MODEL_SAMPLES: usize = 5;
-const BIAS_RECENT: usize = 30;
 const SPEED_LN_MAX: f32 = 11.512_925; // ln(100_000)
 
 #[derive(Debug, Serialize)]
@@ -85,14 +84,23 @@ fn parse_events(path: &Path, limit: usize) -> anyhow::Result<Vec<EvRow>> {
         };
         let status = v.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16;
         let total_ms = v.get("total_ms").and_then(|s| s.as_u64()).unwrap_or(0);
+        // 与写入端对齐：既看类型化布尔字段（degenerate/empty_response）也看
+        // flags 数组（含 refusal）——此前只查 flags 且漏掉 refusal
         let bad_quality = v
             .get("quality")
-            .and_then(|q| q.get("flags"))
-            .and_then(|f| f.as_array())
-            .map(|flags| {
-                flags.iter().filter_map(|f| f.as_str()).any(|f| {
-                    f == "degenerate" || f == "empty_stop" || f == "no_choices"
-                })
+            .map(|q| {
+                let degenerate = q.get("degenerate").and_then(|b| b.as_bool()).unwrap_or(false);
+                let empty = q.get("empty_response").and_then(|b| b.as_bool()).unwrap_or(false);
+                let flags_bad = q
+                    .get("flags")
+                    .and_then(|f| f.as_array())
+                    .map(|flags| {
+                        flags.iter().filter_map(|f| f.as_str()).any(|f| {
+                            f == "degenerate" || f == "empty_stop" || f == "no_choices" || f == "refusal"
+                        })
+                    })
+                    .unwrap_or(false);
+                degenerate || empty || flags_bad
             })
             .unwrap_or(false);
         rows.push(EvRow {
@@ -148,10 +156,10 @@ fn strategy_bias(
 ) -> HashMap<String, f32> {
     let mut rewards: Vec<(String, f32)> = Vec::new();
     for (id, seq) in outcomes {
+        // 与运行时同构（review 2026-10-23）：telemetry_snapshot 喂给 outcome_reward
+        // 的是全量 recent 样本环——回放不再截断到 30 条
         let recent: Vec<evolve_core::types::ReqSample> = seq
             .iter()
-            .rev()
-            .take(BIAS_RECENT)
             .map(|(ok, ms)| evolve_core::types::ReqSample {
                 ts: 0,
                 ttft_ms: 0,
@@ -220,10 +228,12 @@ fn score_strategy(
             }
         }
         let Some((top, _)) = best else { continue };
+        let Some((o, p)) = opt.zip(pess) else { continue };
+        // 干预计数与评分同分母（2026-10-23 review）：此前 top1 无 proxy 的行
+        // 只进 intervened 不进 scored，比率被系统性抬高
         if *top != r.chosen {
             intervened += 1;
         }
-        let Some((o, p)) = opt.zip(pess) else { continue };
         // top1 无 proxy（样本不足）时取中性 0.5，与 oracle 同集计分
         let sq = proxy.get(top).copied().unwrap_or(0.5);
         total_q += sq;
@@ -344,14 +354,16 @@ fn apply_judge_scores(
     ask: &dyn Fn(&str, &str) -> Option<f32>,
     samples: usize,
 ) -> JudgeOutcome {
-    // 采样：带 resp_digest 的事件均匀取前 N 条（避免全量调用成本）
-    let digest_idx: Vec<usize> = rows
+    // 采样：带 resp_digest 的事件均匀跨窗取 N 条（步长抽样，避免全量调用成本
+    // 也不偏头部——此前 take(N) 只取窗口最早的事件，2026-10-23 review）
+    let all: Vec<usize> = rows
         .iter()
         .enumerate()
         .filter(|(_, r)| r.resp_digest.is_some())
         .map(|(i, _)| i)
-        .take(samples)
         .collect();
+    let step = all.len().div_ceil(samples.max(1)).max(1);
+    let digest_idx: Vec<usize> = all.into_iter().step_by(step).collect();
     let mut out = JudgeOutcome::default();
     let mut agree = 0u32;
     for i in digest_idx {

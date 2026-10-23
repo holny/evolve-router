@@ -119,6 +119,7 @@ fn rel_window(
 /// ① 两阶段奖励归一化（BayesianRouter App.B）：
 /// 先基线中心化（v − 滚动均值），再按 20/80 分位距缩放，钳制到 [0,1]。
 /// 序列恒定（分位距 ≈ 0，无区分度）或样本 < 8 时返回中性 0.5。
+#[cfg(test)]
 fn normalize_signal(hist: &[f32], v: f32) -> f32 {
     if hist.len() < 8 {
         return 0.5;
@@ -152,12 +153,23 @@ pub fn outcome_reward(
     }
     let ok_hist: Vec<f32> = recent.iter().map(|r| if r.ok { 1.0 } else { 0.0 }).collect();
     let lat_hist: Vec<f32> = recent.iter().map(|r| (r.total_ms.max(1) as f32).ln()).collect();
+    // 分位数预计算（review 2026-10-23）：此前每条样本调一次 normalize_signal，
+    // 每次都 clone+sort 全量历史 → O(n²logn)；数学口径不变，排序只做一次
+    let mut lat_sorted = lat_hist.clone();
+    lat_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let lat_q = |p: usize| lat_sorted[(lat_sorted.len() - 1) * p / 100];
+    let lat_mean = lat_hist.iter().sum::<f32>() / lat_hist.len() as f32;
+    let lat_iqr = lat_q(80) - lat_q(20);
     let rewards: Vec<f32> = recent
         .iter()
         .enumerate()
         .map(|(i, _s)| {
             // 成功率信号：原始 0/1（逐条贡献即窗口 ok 率）；延迟信号保留 IQR 归一化
-            let s_lat = normalize_signal(&lat_hist, lat_hist[i]);
+            let s_lat = if !lat_iqr.is_finite() || lat_iqr < 1e-6 {
+                0.5
+            } else {
+                ((lat_hist[i] - lat_mean) / lat_iqr).clamp(0.0, 1.0)
+            };
             params.ok_weight * ok_hist[i] + params.lat_weight() * (1.0 - s_lat)
         })
         .collect();
@@ -362,9 +374,17 @@ impl Flywheel {
                 // 快路径：事件基本按时间到达 → 直接命中尾部桶
                 Some(b) if b.hour_start_ms == hour_start => b,
                 _ => {
-                    buckets.retain(|b| b.hour_start_ms >= hour_start.saturating_sub(HOURLY_RETAIN_MS));
-                    buckets.push(HourBucket { hour_start_ms: hour_start, ..Default::default() });
-                    buckets.last_mut().expect("bucket just pushed")
+                    // 时间回退（NTP 步进/旧事件重放）：不能盲目尾插破坏升序——
+                    // 先找既有桶，找不到按序插入（2026-10-23 review）
+                    match buckets.iter_mut().find(|b| b.hour_start_ms == hour_start) {
+                        Some(b) => b,
+                        None => {
+                            buckets.retain(|b| b.hour_start_ms >= hour_start.saturating_sub(HOURLY_RETAIN_MS));
+                            let pos = buckets.partition_point(|b| b.hour_start_ms < hour_start);
+                            buckets.insert(pos, HourBucket { hour_start_ms: hour_start, ..Default::default() });
+                            &mut buckets[pos]
+                        }
+                    }
                 }
             };
             b.requests += 1;

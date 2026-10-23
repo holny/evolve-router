@@ -11,6 +11,8 @@ members = [
 [workspace.package]
 version = "0.3.3"
 edition = "2024"
+# edition 2024 需要 Rust >= 1.85（review 2026-10-23：此前未声明 MSRV）
+rust-version = "1.85"
 license = "MIT"
 repository = "https://github.com/holny/evolve-router"
 
@@ -27,6 +29,7 @@ thiserror = "2"
 anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
+http = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }

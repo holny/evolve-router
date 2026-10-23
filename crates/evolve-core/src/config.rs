@@ -322,9 +322,15 @@ impl Default for StrategyCfg {
 
 /// 把配置序列化成规范 JSONC 文本（带说明头）。迁移旧 TOML、导出 provider 清单共用。
 pub fn to_jsonc(cfg: &FileConfig) -> String {
-    let mut body = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".into());
-    // 内联 key 的字段能省则省，避免污染文件
-    body = body.replace("\n  \"api_key\": null,", "");
+    // 内联 key 的字段能省则省：null api_key 出现在任意嵌套层（models[]/providers[]/
+    // slots[]，缩进 4+ 空格）——按 trim 后前缀过滤，不能匹配固定缩进（review 2026-10-23）
+    let body = serde_json::to_string_pretty(cfg).unwrap_or_else(|_| "{}".into());
+    let mut text = body
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("\"api_key\": null,"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
     let header = r#"// EvolveRouter configuration (canonical: evo-router-config.jsonc)
 // data dir: ~/.evo-router/  ·  docs: https://github.com/holny/evolve-router
 //
@@ -390,13 +396,17 @@ pub fn write_config(path: &Path, cfg: &FileConfig) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        // 配置内含明文 api_key——0600 失败必须可见，不能静默世界可读
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(path = %path.display(), error = %e, "failed to chmod 600 config (contains plaintext keys)");
+        }
     }
     Ok(())
 }
 
 /// 一次性迁移：读到旧名配置 → 写出规范名（旧文件保留为 .migrated）
-pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path::PathBuf> {    let dir = found.parent()?;
+pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path::PathBuf> {
+    let dir = found.parent()?;
     let target = dir.join(DEFAULT_CONFIG_NAME);
     if found == target || target.exists() {
         return None;
@@ -413,7 +423,10 @@ pub fn migrate_to_canonical(cfg: &FileConfig, found: &Path) -> Option<std::path:
         "{}migrated",
         found.extension().map(|e| format!("{}.", e.to_string_lossy())).unwrap_or_default()
     ));
-    let _ = std::fs::rename(found, &backup);
+    if let Err(e) = std::fs::rename(found, &backup) {
+        tracing::warn!(from = %found.display(), to = %backup.display(), error = %e,
+            "failed to rename legacy config to .migrated backup (legacy file left in place)");
+    }
     tracing::info!(
         from = %found.display(),
         to = %target.display(),

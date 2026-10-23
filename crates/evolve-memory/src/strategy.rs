@@ -28,10 +28,22 @@ impl StrategyParams {
         1.0 - self.ok_weight
     }
 
-    /// 校验并钳制到安全区间：飞轮只能微调，参数越界一律拉回
+    /// 校验并钳制到安全区间：飞轮只能微调，参数越界一律拉回。
+    /// NaN 防御：`f32::clamp` 对 NaN 原样返回（TOML 接受 nan/inf 字面量），
+    /// 非有限值一律拉回默认安全值。
     pub fn sanitized(mut self) -> Self {
-        self.ok_weight = self.ok_weight.clamp(0.3, 0.95);
-        self.bias_gain = self.bias_gain.clamp(0.1, 1.0);
+        if !self.ok_weight.is_finite() || self.ok_weight < 0.3 {
+            self.ok_weight = 0.3;
+        }
+        if self.ok_weight > 0.95 {
+            self.ok_weight = 0.95;
+        }
+        if !self.bias_gain.is_finite() || self.bias_gain < 0.1 {
+            self.bias_gain = 0.1;
+        }
+        if self.bias_gain > 1.0 {
+            self.bias_gain = 1.0;
+        }
         self
     }
 }

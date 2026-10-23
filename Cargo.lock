@@ -346,11 +346,8 @@ name = "evolve-core"
 version = "0.3.3"
 dependencies = [
  "anyhow",
- "hex",
  "serde",
  "serde_json",
- "sha2",
- "thiserror",
  "toml",
  "tracing",
 ]

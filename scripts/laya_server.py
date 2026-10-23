@@ -17,6 +17,8 @@ Gateway config (~/.evo-router/evo-router.toml) — the single place slots are re
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -112,19 +114,18 @@ def pick_checkpoint(req: JudgeRequest) -> str:
     total = max(len(text), 1)
     if req.lang_hint == "auto" and cjk / total > 0.15:
         return "multilingual"
-    if req.lang_hint in CHECKPOINT_FOR_LANG.values():
+    # lang_hint 合法值 = 检查点名（keys），不是语言名（values）——旧实现查 values
+    # 会把 "english" 当检查点返回（review 2026-10-23）
+    if req.lang_hint in CHECKPOINT_FOR_LANG:
         return req.lang_hint
     return "typed-decisions"
 
 
 @app.post("/v1/judge")
 def judge(req: JudgeRequest) -> dict:
-    import json as _json
-
     router = get_router()
     checkpoint = pick_checkpoint(req)
     result = router.predict(req.state, QUESTIONS, model=checkpoint)
-    answers = result["answers"]
     answers = result["answers"]
 
     domain_raw = answers["task_domain"]["choice"]

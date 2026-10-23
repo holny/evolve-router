@@ -131,13 +131,16 @@ public final class GatewayProcess: ObservableObject {
     /// 面板、外部脚本起网关），`owned=false` 时 stop() 是 no-op。按进程名找到
     /// `evo-router serve` 发 SIGTERM（等 2s 排空，与网关自身的 drain 一致），
     /// 仍存活才 SIGKILL。找不到/已退出都是 no-op。
+    /// ⚠ pgrep pattern 必须是完整可辨识串：`-f "evo-router serve"` 是子串匹配，
+    /// 会误杀 `tail -f .../evo-router serve.log` 之类无关进程（review 2026-10-23；
+    /// 与进程清理纪律一致——先 pgrep 只看目标，再动手）
     /// ⚠ 必须 async：此前是同步 usleep 循环，@MainActor 下最多阻塞主线程 8s
     /// （2026-10-19 实证：点 Quit 全程冻结）。
     public func stopGatewayWithSigterm() async {
         userStopped = true
         let out = Process()
         out.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        out.arguments = ["-f", "evo-router serve"]
+        out.arguments = ["-f", "EvolveRouter\\.app/Contents/MacOS/evo-router serve|(^|/)evo-router serve$"]
         let pipe = Pipe()
         out.standardOutput = pipe
         out.standardError = Pipe()

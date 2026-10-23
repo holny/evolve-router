@@ -186,7 +186,9 @@ pub fn classify_failure(status: u16, body_snippet: &str, retry_after_ms: Option<
             let until = parse_reset_epoch_ms(body_snippet, now())
                 .or_else(|| retry_after_ms.map(|ms| now() + ms));
             if no_credit.iter().any(|k| lower.contains(k)) {
-                Failure { kind: HealthKind::PaymentRequired, message: "no credit".into(), until_epoch_ms: None }
+                // 上游给出重置时刻（reset-at/Retry-After）时同样精确冷却——
+                // 此前丢弃 until 让欠费户吃满默认探测节奏
+                Failure { kind: HealthKind::PaymentRequired, message: "no credit".into(), until_epoch_ms: until }
             } else if quota.iter().any(|k| lower.contains(k)) {
                 // 窗口标签（用户裁决：哪个门限超了要可判定——5h/weekly/monthly）；
                 // 上游告知重置时间时精确冷却；否则固定 5 分钟探测节奏。
@@ -394,9 +396,9 @@ pub fn parse_reset_epoch_ms(body: &str, now_ms: u64) -> Option<u64> {
                 }
             }
             // 时区尾巴：+0800 / +08:00 / Z / UTC → 0；其余（含 CST）→ +08 近似
+            // （tz_rest 取自日期锚点之后，出现的 '-' 必属时区，无需位置守卫）
             let tz_rest = rest.to_lowercase();
-            let offset_s: i64 = if let Some(p) = tz_rest.find('+').or_else(|| tz_rest.find('-').filter(|_| i > 0)) {
-                let _ = p;
+            let offset_s: i64 = if tz_rest.contains('+') || tz_rest.contains('-') {
                 let tz: String = tz_rest
                     .chars()
                     .skip_while(|c| *c != '+' && *c != '-')

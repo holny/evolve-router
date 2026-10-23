@@ -12,7 +12,9 @@ public struct PanelView: View {
     /// ⚠ MenuBarExtra 里系统 confirmationDialog 的按钮 action 不触发（实测
     /// 2026-10-17，与 .help() 同族失效；Quit 曾因此永远退不出）→ 确认流程
     /// 用面板内嵌行实现，Apple 对话框一律不用
-    @State private var pendingAction: (() -> Void)?
+    /// 带按钮标识（review 2026-10-23）：此前 Stop 与 Restart 共用一个武装位，
+    /// 武装 Stop 后再点 Restart 会执行到 Stop
+    @State private var pendingAction: (id: String, action: () -> Void)?
     /// Quit 已受理（排空在走）：按钮变禁用态给反馈，防"点了没反应"再点
     @State private var quitting = false
     /// Restart 已受理（停+拉起 ~10s）：按钮禁用防重复点
@@ -809,7 +811,7 @@ public struct PanelView: View {
                 textChip(label: restarting ? t("restarting") : t("restart"),
                          tint: restarting ? .secondary : .accentColor, help: t("restart_help"),
                          disabled: restarting) {
-                    confirmIfInflight {
+                    confirmIfInflight("restart") {
                         restarting = true
                         Task {
                             await restartGateway()
@@ -877,7 +879,7 @@ public struct PanelView: View {
     /// 停止/启动 胶囊：healthy → 红调（停止），否则 accent（启动）
     private var gatewayChip: some View {
         Button {
-            confirmIfInflight { Task { await toggleGateway() } }
+            confirmIfInflight("toggle") { Task { await toggleGateway() } }
         } label: {
             HStack(spacing: 5) {
                 if state.starting {
@@ -909,11 +911,12 @@ public struct PanelView: View {
     /// 品牌徽章 = 官方 v5 彩盘（与菜单栏/桌面图标同源）
     @MainActor
     private var brandBadge: some View {
-        let img = NSImage(contentsOf:
-            Bundle.module.url(forResource: "tray-icon-color@2x", withExtension: "png")!
-        ) ?? NSImage()
-        img.size = NSSize(width: 28, height: 28)
-        return Image(nsImage: img).frame(width: 28, height: 28)
+        // 资源缺失回退空图（不炸）：与 TrayIcon.load 的 ?? NSImage() 同口径
+        let img = Bundle.module.url(forResource: "tray-icon-color@2x", withExtension: "png")
+            .flatMap { NSImage(contentsOf: $0) } ?? NSImage()
+        var sized = img
+        sized.size = NSSize(width: 28, height: 28)
+        return Image(nsImage: sized).frame(width: 28, height: 28)
     }
 
     // MARK: - 小件
@@ -1030,13 +1033,18 @@ public struct PanelView: View {
 
     /// 有在飞请求时的确认（重启会**排空**它们，但用户应当知情；60s 上限后强退）
     /// 确认条已亮时再点同一按钮 = 直接执行（第二击即确认，不用挪手去找橙色按钮）
-    private func confirmIfInflight(_ action: @escaping () -> Void) {
+    /// 在飞确认：同一按钮第二击 = 执行；换按钮 = 改武装到新按钮
+    private func confirmIfInflight(_ id: String, _ action: @escaping () -> Void) {
         if state.inflight > 0 {
             if let armed = pendingAction {
-                pendingAction = nil
-                armed()
+                if armed.id == id {
+                    pendingAction = nil
+                    armed.action()
+                } else {
+                    pendingAction = (id, action)
+                }
             } else {
-                pendingAction = action
+                pendingAction = (id, action)
             }
         } else {
             action()
@@ -1061,7 +1069,7 @@ public struct PanelView: View {
             }
             Spacer(minLength: 0)
             Button {
-                let a = pendingAction; pendingAction = nil; a?()
+                if let p = pendingAction { pendingAction = nil; p.action() }
             } label: {
                 Text(t("inflight_confirm_go"))
                     .font(.system(size: 10, weight: .semibold))
@@ -1115,7 +1123,15 @@ public struct PanelView: View {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/zsh")
         p.arguments = ["-c", "launchctl \(action) gui/\(uid)/\(Config.trayLabel)"]
-        try? p.run()
+        do {
+            try p.run()
+            p.waitUntilExit()
+            if p.terminationStatus != 0 {
+                NSLog("evolve-tray: launchctl \(action) failed status=\(p.terminationStatus)")
+            }
+        } catch {
+            NSLog("evolve-tray: launchctl \(action) spawn error: \(error)")
+        }
     }
 
     private func quitAll() {

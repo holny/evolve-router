@@ -5,13 +5,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=./target/debug/evolveroute
+BIN=./target/debug/evo-router
 N=${N:-100}
 MOCK_PORT=9101
-GW_PORT=8787
+GW_PORT=${GW_PORT:-8799}  # 默认避开 8787：误起在用户在跑的生产网关端口上会把测量对准错误实例
 
-pkill -f "evolveroute mock-upstream" 2>/dev/null || true
-pkill -f "evo-router serve" 2>/dev/null || true
+pkill -f "target/debug/evo-router mock-upstream" 2>/dev/null || true
+pkill -f "target/debug/evo-router serve" 2>/dev/null || true
 sleep 0.2
 
 nohup $BIN mock-upstream --port $MOCK_PORT >/tmp/bench-mock.log 2>&1 &

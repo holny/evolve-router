@@ -18,8 +18,6 @@ struct EvolveRouterApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    static let shared = AppDelegate()
-
     let state = AppState()
     /// 图标轻模型：pulse/失败色只打菜单栏小图，不再唤醒面板视图图
     let icon = IconModel()
@@ -60,12 +58,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 500_000_000)
             }
         }
-        // 启动即拉起网关（幂等；外部实例探测内置）
-        bootTask = Task {
-            await GatewayProcess.shared.ensureRunning()
-        }
-        // 启动预热：跑一次完整 pollData 并直接发布，养熟 published，
-        // 避免首次点击面板时“空白首帧 → flush → 重排 + 窗口变高”的卡顿。
+        // 启动即拉起网关（幂等；外部实例探测内置）+ 预热一次完整 pollData
+        // 直接发布养熟 published，避免首次点击面板时"空白首帧 → flush →
+        // 重排 + 窗口变高"的卡顿。（review 2026-10-23：此前两次赋值 bootTask，
+        // 第一个 Task 成为孤儿——重复 ensureRunning 且不可取消）
         bootTask = Task {
             await GatewayProcess.shared.ensureRunning()
             await state.bootstrapPublishedOnce()
