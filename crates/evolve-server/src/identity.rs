@@ -4,7 +4,7 @@
 //! - codex: `originator` header (codex_cli_rs…) + `session_id` header (uuid)
 //! - claude code: UA `claude-cli/x.y.z` + body `metadata.user_id` tail after `_session_`
 //! - opencode: UA `opencode/x.y.z` + `x-opencode-session-id`（v2.0.3x 原生）
-//!   / `x-bocomcode-session`（bocomcode fork）；均缺时退前缀链重建
+//!   （部分定制客户端会改名该头，一并识别）；均缺时退前缀链重建
 //! - pi: UA `pi/…` (no stable session header → hash fallback)
 use axum::http::HeaderMap;
 use serde_json::Value;
@@ -52,7 +52,7 @@ pub fn agent_identity(headers: &HeaderMap, agent_header: &str) -> String {
 
 /// Session id from custom/known headers, then claude code's body metadata.
 /// opencode 头族（2026-10-23 实证）：v2.0.3x 原生发 `x-opencode-session-id`
-/// （带 -id 后缀）；bocomcode fork 改名为 `x-bocomcode-session`。此前网关只认
+/// （带 -id 后缀）；部分定制客户端会将该头改名——三种写法一并识别。此前网关只认
 /// `x-opencode-session`（不带 -id）→ 0/1708 条命中，全部退化成内容哈希兜底。
 pub fn session_identity(
     headers: &HeaderMap,
@@ -65,7 +65,7 @@ pub fn session_identity(
     if let Some(v) = header_of(headers, "session_id").filter(|v| !v.is_empty()) {
         return Some(v);
     }
-    // opencode 头族：v2.0.3x 原生 / bocomcode fork 改名 / 旧版原生
+    // opencode 头族：v2.0.3x 原生 / 定制改名 / 旧版原生
     for name in ["x-opencode-session-id", "x-bocomcode-session", "x-opencode-session"] {
         if let Some(v) = header_of(headers, name).filter(|v| !v.is_empty()) {
             return Some(v);
@@ -223,7 +223,7 @@ mod tests {
     }
 
     /// opencode 头族（2026-10-23 实证）：v2.0.3x 发 `x-opencode-session-id`、
-    /// bocomcode fork 发 `x-bocomcode-session`——此前只认 `x-opencode-session`
+    /// 定制改名头（x-*-session 族）照常识别——此前只认 `x-opencode-session`
     /// 导致 0/1708 条命中
     #[test]
     fn opencode_session_header_family() {

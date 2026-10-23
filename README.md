@@ -345,7 +345,7 @@ evo-router service install                                  # LaunchAgent: start
 
 Every response also carries `x-ev-model`, `x-ev-reason`, `x-ev-decision-id`, `x-ev-est-tokens`, `x-ev-sticky` and `x-ev-skipped` headers; `x-ev-session` and `x-ev-policy` steer stickiness and profile per request, `x-ev-no-cache` bypasses the completion cache.
 
-**Inbound session identity (zero-plugin)**: the gateway reads what your agent already sends — opencode's native `x-opencode-session-id` (v2.0.3x) / `x-bocomcode-session` (fork) / legacy `x-opencode-session`, codex's `session_id`, claude-code's `metadata.user_id` session tail, or any `x-session-id`. Agents that send nothing are still grouped correctly: LLM conversations are append-only (each turn's message array is a prefix of the next turn's), so the gateway reconstructs the session by prefix-chain matching — one stable session id across turns without any client change. History compaction rewrites the past, honestly starting a fresh group.
+**Inbound session identity (zero-plugin)**: the gateway reads what your agent already sends — opencode's native `x-opencode-session-id` (v2.0.3x; custom forks may rename this header — all variants are recognized) / legacy `x-opencode-session`, codex's `session_id`, claude-code's `metadata.user_id` session tail, or any `x-session-id`. Agents that send nothing are still grouped correctly: LLM conversations are append-only (each turn's message array is a prefix of the next turn's), so the gateway reconstructs the session by prefix-chain matching — one stable session id across turns without any client change. History compaction rewrites the past, honestly starting a fresh group.
 
 ## Why not another proxy
 

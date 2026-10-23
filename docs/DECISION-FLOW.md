@@ -17,7 +17,6 @@ Agent ──► 网关入口 ──► 身份提取 ──► 预处理 ──�
 | `x-ev-session` | 1 | 用户插件 |
 | `session_id`（codex）| 2 | Codex |
 | `x-opencode-session-id` | 2 | **opencode v2.0.3x 原生** |
-| `x-bocomcode-session` | 2 | **bocomcode fork**（源自 x-opencode-session-id） |
 | `x-opencode-session` | 2 | opencode 旧版 |
 | `metadata.user_id` `_session_` 段 | 3 | claude-code |
 | `x-session-id` / `x-session` | 4 | 通用 |
