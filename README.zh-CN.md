@@ -343,6 +343,8 @@ evo-router service install                                  # LaunchAgent：star
 
 所有响应都带 `x-ev-model`、`x-ev-reason`、`x-ev-decision-id`、`x-ev-est-tokens`、`x-ev-sticky`、`x-ev-skipped` 头；`x-ev-session` / `x-ev-policy` 可按请求指定会话与档位，`x-ev-no-cache` 绕过完成缓存。
 
+**入站会话识别（零插件）**：网关直接读 agent 已在发的头——opencode 原生 `x-opencode-session-id`（v2.0.3x）/ `x-bocomcode-session`（fork）/ 旧版 `x-opencode-session`、codex 的 `session_id`、claude-code `metadata.user_id` 的会话尾段、通用 `x-session-id`。什么都不发的 agent 也能正确分组：LLM 对话是追加式的（上一轮消息数组是下一轮的前缀），网关用**前缀链匹配**重建会话——不改客户端就得到跨轮稳定的会话 id。历史压缩（compaction）改写过去，诚实开新组。
+
 ## 为什么不用别的 proxy
 
 | | EvolveRouter | LiteLLM / OpenRouter | RouteLLM |
@@ -352,7 +354,7 @@ evo-router service install                                  # LaunchAgent：star
 | **订阅经济** | 方案积分系数、档位额度（5h/周/月）、配额三层保护（降权 → 断粘性 → 硬滤） | 只做成本统计 | – |
 | **失败处理** | key 池 → provider/端点熔断 → 胜出队列 → 链外兜底 | 重试 | – |
 | **协议** | OpenAI ↔ Anthropic 双向翻译，含流式 | 偏 OpenAI | OpenAI |
-| **多 Agent** | 原生识别 opencode / codex / claude-code / pi / openclaw / hermes / dsh，会话级粘性 | 通用 | 通用 |
+| **多 Agent** | 原生识别 opencode / codex / claude-code / pi / openclaw / hermes / dsh；不装插件也有真实会话分组（前缀链重建），会话级粘性 | 通用 | 通用 |
 | **部署** | 单 Rust 二进制（~7 MB），零依赖，无 Docker 无 DB | Python + DB | Python |
 
 ## 内置方案

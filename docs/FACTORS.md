@@ -121,11 +121,16 @@
 | hy3 | 0.65 | 0.72 | 0.60 | 0.72 |
 | ark-code-latest | 0.82 | 0.90 | 0.75 | 0.90 |
 
-**来源优先级**：
-1. 用户 TOML `tiers = { coding = 0.9, ... }` 显式声明
-2. 全局 MODEL_TIERS 表（最长名优先匹配，glm-5.3-flash 不会被 glm-5.3 吞）
-3. benchmarks 学习覆盖（未接线，预留）
-4. discovery 猜测值（opencode config reasoning 标志 + 硬编码 0.6）
+**来源优先级**（2026-10-23 重构后，按置信度降序；来源记在 `TiersSource`，蒸馏锚定带宽按此分级）：
+1. 用户 TOML `tiers = { coding = 0.9, ... }` 显式声明（`tiers_explicit`——任何自动机制永不覆盖）
+2. provider `/models` **官方能力字段**（OpenRouter 风格 supported_parameters/模态/reasoning）→ `Provider`
+3. models.dev 参考仓库能力字段 + **基模相似匹配**（canon 剥 `-free`/`-preview` 等后缀后继承基模卡）→ `Reference`
+4. **命名先验**（后缀语义：flash/turbo/lite 提速略降能力、pro/max/ultra 旗舰、think 推理、vl/omni 视觉、coder 代码）→ `Heuristic`
+5. 全局 `MODEL_TIERS` 表（plans.rs，最长名优先匹配，glm-5.3-flash 不会被 glm-5.3 吞）
+6. discovery 猜测值（opencode config reasoning 标志 + 硬编码 0.6）
+7. 无信号 → default 卡（0.5/0.5/0/0.5）→ `Flat`
+
+**蒸馏锚定带宽按来源置信度分级**（`anchor_band`）：Provider ±0.30 锚最紧 / Reference ±0.45 / Heuristic ±0.60 / Flat ±0.90 基本放开——初始评估越可信锚得越紧，先验/无信号卡多给实测蒸馏自由度。首次蒸馏固化来源与声明值，带宽跨周期稳定；旧蒸馏卡（无来源字段）按 Flat 处理。benchmarks 学习覆盖为预留位。
 
 ## 5. 分层窗口融合（rel 求解）
 
