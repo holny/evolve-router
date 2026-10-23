@@ -80,6 +80,11 @@ pub struct ProviderGateState {
     /// 该故障的下次探测时刻（独立于配额探测调度）
     pub issue_probe_at_ms: u64,
     pub issue_probe_failures: u32,
+    /// 本次探测被领取的时刻（租约起点，2026-10-23 实证）：probe 结果丢失时
+    /// `probing` 会永久为 true → pick 永远跳过 → provider 卡死在降级态
+    /// （实证：网络闪断后 3 个 provider next_probe_ms=0 却 8 分钟无人探）。
+    /// 租约超时（60s，> 探针 10s 超时）后允许重新领取。
+    pub issue_picked_at_ms: u64,
 }
 
 impl ProviderGateState {
@@ -283,11 +288,17 @@ impl QuotaLedger {
     }
 
     /// 探测调度：挑一个到期（且未在探测中）的降级 provider；`probing` 去重。
+    /// probing 带租约（60s）：领取后超时未见结果 → 视为泄漏，允许重新领取
+    /// （探针自身 10s 超时，60s 内必有结果；超出即 result 丢失，不能永久占坑）。
     pub fn provider_issue_pick_probe(&self, now: u64) -> Option<String> {
+        const PICK_LEASE_MS: u64 = 60 * 1000;
         let Ok(mut m) = self.provider_gate.lock() else { return None };
         let mut best: Option<(u64, String)> = None;
         for (k, e) in m.iter() {
-            if e.issue.is_none() || e.probing || now < e.issue_probe_at_ms {
+            if e.issue.is_none() || now < e.issue_probe_at_ms {
+                continue;
+            }
+            if e.probing && now.saturating_sub(e.issue_picked_at_ms) < PICK_LEASE_MS {
                 continue;
             }
             if best.as_ref().map(|(t, _)| e.issue_probe_at_ms < *t).unwrap_or(true) {
@@ -297,6 +308,7 @@ impl QuotaLedger {
         let (t, k) = best?;
         if let Some(e) = m.get_mut(&k) {
             e.probing = true;
+            e.issue_picked_at_ms = now;
             e.issue_probe_at_ms = t;
         }
         Some(k)
@@ -944,5 +956,26 @@ mod quota_observe_failure_tests {
         assert_eq!(weekly.reset_epoch_ms, Some(1736380800 * 1000));
         let monthly = ws.iter().find(|w| w.scope == "monthly").expect("monthly");
         assert_eq!(monthly.limit, Some(50000));
+    }
+
+    /// 探测租约（2026-10-23 实证）：probe 结果丢失时 probing 永久 true 会把
+    /// provider 卡死在降级态——租约超时后必须允许重新领取
+    #[test]
+    fn issue_probe_lease_expires_and_reissues() {
+        let q = QuotaLedger::default();
+        let now = 1_000_000_000u64;
+        // 降级 + due（issue_probe_at_ms 在过去），模拟"领取后 result 丢失"
+        {
+            let mut m = q.provider_gate.lock().unwrap();
+            let e = m.entry("p".to_string()).or_default();
+            e.issue = Some(ProviderIssue::Network);
+            e.issue_probe_at_ms = now - 60_000;
+            e.probing = true;
+            e.issue_picked_at_ms = now - 300_000; // 租约早已超时
+        }
+        // 租约超时 → 重新可领取
+        assert_eq!(q.provider_issue_pick_probe(now).as_deref(), Some("p"));
+        // 刚领取（租约内）→ 不重复发放
+        assert_eq!(q.provider_issue_pick_probe(now + 1000), None);
     }
 }
