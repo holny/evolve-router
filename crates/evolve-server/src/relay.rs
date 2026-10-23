@@ -822,9 +822,38 @@ pub async fn chat_completions(
                 });
             }
             // 会话级拉黑（2026-10）：400 且非配额/鉴权/上下文/不支持类 →
+            // 1210 类"只收纯文本"拒收（2026-10-23 实证：zhipuai glm-5.3
+            // `code 1210 messages.content.type 参数非法，取值范围 ['text']`）：
+            // 能力卡声称支持视觉但端点实测拒收非文本 → 能力自修正
+            //（vision → 0，内存态，重启后由首个 400 重学习）：后续请求
+            // ①历史图片预剥离（strip 条件读 tiers.vision）②真视觉请求被
+            // 视觉闸正确排除。本会话不再隔离——修正后纯文本历史仍可用。
+            let text_only_rejection = status.as_u16() == 400
+                && (snippet.contains("1210")
+                    || (snippet.contains("content.type") && snippet.contains("'text'")));
+            if text_only_rejection {
+                let mut models = st.engine.catalog_snapshot();
+                let mut flipped = false;
+                if let Some(m) = models.iter_mut().find(|m| m.id == *cand)
+                    && m.tiers.vision >= evolve_core::thresholds::VISION
+                {
+                    m.tiers.vision = 0.0;
+                    flipped = true;
+                }
+                if flipped {
+                    st.engine.replace_catalog(models);
+                    tracing::warn!(model = %cand, "capability self-correction: endpoint rejects non-text content — vision tier zeroed (pre-strip + vision-gate)");
+                    st.events.record(json!({
+                        "kind": "capability_corrected", "model": cand,
+                        "field": "vision", "to": 0.0, "source": "upstream text-only 400",
+                    }));
+                }
+            }
             // 属"请求形状"问题（典型 deepseek `reasoning_content` 必须回传），
             // 该会话历史与这个模型不兼容 → 本会话拉黑 30min，别再反复白试。
+            // （1210 纯文本拒收不隔离：能力已自修正，见上）
             if status.as_u16() == 400
+                && !text_only_rejection
                 && !matches!(
                     failure.kind,
                     HealthKind::QuotaExhausted
@@ -1305,6 +1334,24 @@ pub async fn chat_completions(
                 "code": "context_length_exceeded",
                 "evolve_max_input_tokens": budget,
                 "evolve_est_tokens": ctx_est,
+            }
+        })
+        .to_string()
+        .into_bytes();
+        (StatusCode::BAD_REQUEST, Bytes::from(body))
+    } else if decision.judgment.needs_vision > evolve_core::thresholds::VISION
+        && !st.engine.catalog_snapshot().iter().any(|m| {
+            m.has_credential() && m.tiers.vision >= evolve_core::thresholds::VISION
+        }) {
+        // 请求带图但全池没有任何可用多模态模型 → 显式可行动报错
+        // （用户裁决 2026-10-23："返回报错说候选模型不支持多模态识别"），
+        // 不发语焉不详的全灭——客户端该做的是去图重试或配置多模态模型
+        let body = json!({
+            "error": {
+                "message": "request contains image input, but no vision-capable model is currently available in the pool — 候选模型不支持多模态识别（remove images and retry with text only, or restore/configure a multimodal model）",
+                "type": "invalid_request_error",
+                "code": "no_vision_model_available",
+                "evolve_est_tokens": est,
             }
         })
         .to_string()
