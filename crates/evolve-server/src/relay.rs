@@ -85,7 +85,7 @@ pub async fn chat_completions(
         stream_done: false,
         truncated: Vec::new(),
     });
-    let session_key = session_key_of(&st, &headers, &parsed);
+    let session_key = session_key_of(&st, &agent_hdr, &headers, &parsed);
     // 在飞登记：先记"(routing)/会话"，选出模型后再更新（面板重启提示可读）
     live.describe("", &session_key, &agent_hdr);
     crate::request_inspect::with_entry(&inspect, |g| {
@@ -1875,20 +1875,31 @@ fn tools_signature(parsed: &Value) -> u64 {
     u64::from_be_bytes(hash[0..8].try_into().unwrap())
 }
 
-fn session_key_of(st: &AppState, headers: &HeaderMap, parsed: &Value) -> String {
+fn session_key_of(st: &AppState, agent: &str, headers: &HeaderMap, parsed: &Value) -> String {
     if let Some(v) = crate::identity::session_identity(headers, parsed, &st.config.telemetry.session_header) {
         return v;
     }
-    let mut hasher = Sha256::new();
-    if let Some(msgs) = parsed.get("messages").and_then(|v| v.as_array()) {
-        if let Some(first) = msgs.first() {
-            hasher.update(first.to_string().as_bytes());
+    let fallback = {
+        let mut hasher = Sha256::new();
+        if let Some(msgs) = parsed.get("messages").and_then(|v| v.as_array()) {
+            if let Some(first) = msgs.first() {
+                hasher.update(first.to_string().as_bytes());
+            }
         }
-        if let Some(sys) = msgs.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system")) {
+        if let Some(sys) = parsed.get("system").or_else(|| {
+            parsed.get("messages").and_then(|v| v.as_array())
+                .and_then(|msgs| msgs.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("system")))
+        }) {
             hasher.update(sys.to_string().as_bytes());
         }
+        format!("h{}", hex::encode(&hasher.finalize()[..8]))
+    };
+    // 前缀链重建（零插件）：同一会话每轮携带全量历史，上一轮 messages 是
+    // 本轮前缀——命中即跨轮稳定同一会话键（compaction 断链视为新会话）
+    match parsed.get("messages").and_then(|v| v.as_array()) {
+        Some(msgs) if !msgs.is_empty() => crate::identity::chain_session(agent, msgs, &fallback),
+        _ => fallback,
     }
-    format!("h{}", hex::encode(&hasher.finalize()[..8]))
 }
 
 fn append_decision_headers(h: &mut axum::http::HeaderMap, decision: &Decision, est: u64) {

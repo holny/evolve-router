@@ -16,10 +16,13 @@ Agent ──► 网关入口 ──► 身份提取 ──► 预处理 ──�
 | `user-agent` 映射 | 3 | claude-cli→claude-code, codex-cli→codex, opencode-cli→opencode |
 | `x-ev-session` | 1 | 用户插件 |
 | `session_id`（codex）| 2 | Codex |
-| `x-opencode-session` | 1 | **opencode 原生**（官方协议要求） |
+| `x-opencode-session-id` | 2 | **opencode v2.0.3x 原生** |
+| `x-bocomcode-session` | 2 | **bocomcode fork**（源自 x-opencode-session-id） |
+| `x-opencode-session` | 2 | opencode 旧版 |
 | `metadata.user_id` `_session_` 段 | 3 | claude-code |
 | `x-session-id` / `x-session` | 4 | 通用 |
-| 消息首段 SHA256 截断 | 兜底 | 任何 |
+| 会话前缀链重建 | 5 | 零插件兜底：同会话每轮全量历史追加式，上一轮 messages 是本轮前缀 |
+| 消息首段 SHA256 截断 | 6 | 任何（链未命中时播种） |
 
 ### ② 预处理（~15ms）
 

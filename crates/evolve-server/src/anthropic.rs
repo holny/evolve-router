@@ -33,7 +33,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
         Err(resp) => return resp,
     };
 
-    let session_key = session_key_of(&st, &headers, &parsed);
+    let session_key = session_key_of(&st, &agent_hdr, &headers, &parsed);
     live.describe("", &session_key, &agent_hdr);
     let sticky_key = format!("{}\u{1f}{}", agent_hdr, session_key);
     let header_policy = headers
@@ -725,19 +725,27 @@ fn mr_error(status: StatusCode, msg: &str) -> Response {
         .into_response()
 }
 
-fn session_key_of(st: &AppState, headers: &HeaderMap, parsed: &Value) -> String {
+fn session_key_of(st: &AppState, agent: &str, headers: &HeaderMap, parsed: &Value) -> String {
     if let Some(v) = crate::identity::session_identity(headers, parsed, &st.config.telemetry.session_header) {
         return v;
     }
-    let mut hasher = Sha256::new();
-    if let Some(system) = parsed.get("system") {
-        hasher.update(system.to_string().as_bytes());
-    }
-    if let Some(msgs) = parsed.get("messages").and_then(|v| v.as_array())
-        && let Some(first) = msgs.first() {
-            hasher.update(first.to_string().as_bytes());
+    let fallback = {
+        let mut hasher = Sha256::new();
+        if let Some(system) = parsed.get("system") {
+            hasher.update(system.to_string().as_bytes());
         }
-    format!("h{}", hex::encode(&hasher.finalize()[..8]))
+        if let Some(msgs) = parsed.get("messages").and_then(|v| v.as_array())
+            && let Some(first) = msgs.first() {
+                hasher.update(first.to_string().as_bytes());
+            }
+        format!("h{}", hex::encode(&hasher.finalize()[..8]))
+    };
+    // 前缀链重建（零插件兜底）：同一会话每轮携带全量历史，上一轮 messages
+    // 是本轮前缀——命中即跨轮稳定同一会话键（compaction 断链视为新会话）
+    match parsed.get("messages").and_then(|v| v.as_array()) {
+        Some(msgs) if !msgs.is_empty() => crate::identity::chain_session(agent, msgs, &fallback),
+        _ => fallback,
+    }
 }
 
 /// 本轮是否工具流程延续（Anthropic Messages 形态：末条 user 带 tool_result part）。
