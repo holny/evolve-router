@@ -42,22 +42,28 @@ public struct PanelView: View {
         // 此前确认条排在滚动内容末尾，固定高度下被推出可视区 → 有在飞时点
         // Restart/Quit "点了没反应"（确认条根本看不见）。
         VStack(spacing: 10) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 10) {
-                    header
-                    decisionBanner
-                    metricsCard
-                    if !state.providers.isEmpty {
-                        // Providers 行的 tokens/速率/TTFT 也是窗口口径 → 切换中同样置灰
-                        providersCard
-                            .opacity(state.windowLoading ? 0.5 : 1)
-                    }
-                    if !state.recent.isEmpty { decisionsCard }
+            // ⚠ 无外层滚动（2026-10-23 用户反馈：面板头跟着内容一起滑 = 外滚被
+            // 激活，观感即"整面板滑动窗口"）。定高内容区块（header/metrics/
+            // providers）依次排列，Recent 卡用 maxHeight: .infinity 弹性吸收
+            // 全部余量/变化——内滚消化列表行数变化，banner/确认条出现时挤缩
+            // 的也是 Recent，其余区块永远不动。
+            VStack(spacing: 10) {
+                header
+                decisionBanner
+                metricsCard
+                if !state.providers.isEmpty {
+                    // Providers 行的 tokens/速率/TTFT 也是窗口口径 → 切换中同样置灰
+                    providersCard
+                        .opacity(state.windowLoading ? 0.5 : 1)
                 }
-                .padding(.horizontal, 14)
-                .padding(.top, 14)
-                .padding(.bottom, 4)
+                if !state.recent.isEmpty {
+                    decisionsCard
+                        .frame(maxHeight: .infinity, alignment: .top)
+                }
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 14)
+            .padding(.bottom, 4)
             controls
                 .padding(.horizontal, 14)
             if pendingAction != nil {
@@ -437,7 +443,9 @@ public struct PanelView: View {
                 }
                 }
             }
-            .frame(height: 148)
+            // 高度弹性（2026-10-23）：Recent 卡是面板的"吸收余量"区块——
+            // 卡体被 maxHeight:.infinity 给到多少，内滚就拿多少；不再定高
+            // .frame(height: 148)
             // 标签示例说明放在**卡内**、列表下方（用户裁决 2026-10-17：
             // 与 Model 列表下的模型标签图例同构，各自归各自卡片，不占面板底部一行）
             requestTagLegend
