@@ -26,7 +26,8 @@ fi
 echo "  packaged gateway version: $GOT  ✓"
 
 echo "[3/6] Swift 壳双芯构建 + 组装 .app..."
-( cd apps/tray && swift build -c release --triple arm64-apple-macosx >/dev/null 2>&1 || true )
+# 双架构同等失败即停（静默吞错会让 lipo 阶段才炸，难定位）
+( cd apps/tray && swift build -c release --triple arm64-apple-macosx )
 ( cd apps/tray && swift build -c release --triple x86_64-apple-macosx )
 lipo -create apps/tray/.build/arm64-apple-macosx/release/evolve-router-tray apps/tray/.build/x86_64-apple-macosx/release/evolve-router-tray -output apps/tray/build/evolve-router-tray-universal
 SWIFT_UNI="apps/tray/build/evolve-router-tray-universal"
