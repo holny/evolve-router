@@ -66,11 +66,12 @@ public struct PanelView: View {
             }
         }
         .padding(.bottom, 14)
-        // 高度对齐内容自然高度（686 ≈ 头部40+指标55+providers215+recent242+
-        // controls62+间距边距64）：定高了测量才 O(1)，但高度必须贴着内容——
-        // 多了在钉底按钮上方露缝（723 实测多 ~37pt），少了滚动。decisionBanner
-        // 出现的少见态由外层滚动兜底。
-        .frame(width: 336, height: 686)
+        // 高度对齐内容自然高度：定高了测量才 O(1)，但高度必须贴着内容——
+        // 多了在钉底按钮上方露缝，少了外层滚动被激活（2026-10-23 实测：providers
+        // 内滚 172 + recent 186 时代总高超出视口 ~50pt → 整面板滑动；收 148/148
+        // 后内容 ≈ 636，定高 640 贴合）。decisionBanner（降级横幅 ~40pt）出现的
+        // 少见态由外层滚动兜底。
+        .frame(width: 336, height: 640)
         // 面板开合门控（2026-10-19）：关闭期间 AppState 只养快照（零发布），
         // 打开瞬间 flush + 立即拉一轮最新——菜单栏图标不再被隐藏面板的
         // 每秒全量重测量拖死；预览/截图模式（previewSeed）不打扰种子数据
@@ -202,8 +203,11 @@ public struct PanelView: View {
         return t == "-" ? "" : t
     }
 
-    /// Providers / Model 列表的滚动窗口高度（三行制后每行约 48pt → 这里约 3.5 行）
-    private let providersScrollH: CGFloat = 172
+    /// Providers / Model 列表的滚动窗口高度（三行制后每行约 48pt → 这里约 3 行）。
+    /// 172 时头部+指标+双卡+图例总高超出滚动视口 ~50pt，外层滚动被激活成
+    /// "整面板滑动"（2026-10-23 实测）——收到 148 让总高回到视口内，
+    /// 外层滚动只留给降级横幅等少见态兜底
+    private let providersScrollH: CGFloat = 148
 
     /// 配额百分比文案：**估算来源**加 `~` 前缀（与 web 同口径）。
     /// 不用 "quota: estimated/headers" 这类行话标签——数字自己表达可信度，
@@ -433,7 +437,7 @@ public struct PanelView: View {
                 }
                 }
             }
-            .frame(height: 186)
+            .frame(height: 148)
             // 标签示例说明放在**卡内**、列表下方（用户裁决 2026-10-17：
             // 与 Model 列表下的模型标签图例同构，各自归各自卡片，不占面板底部一行）
             requestTagLegend
