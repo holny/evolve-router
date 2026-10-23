@@ -66,7 +66,7 @@ pub fn session_identity(
         return Some(v);
     }
     // opencode 头族：v2.0.3x 原生 / 定制改名 / 旧版原生
-    for name in ["x-opencode-session-id", "x-bocomcode-session", "x-opencode-session"] {
+    for name in ["x-opencode-session-id", "x-opencode-session"] {
         if let Some(v) = header_of(headers, name).filter(|v| !v.is_empty()) {
             return Some(v);
         }
@@ -229,8 +229,6 @@ mod tests {
     fn opencode_session_header_family() {
         let v2 = h(&[("x-opencode-session-id", "ses_abc123")]);
         assert_eq!(session_identity(&v2, &json!({}), "x-ev-session"), Some("ses_abc123".into()));
-        let fork = h(&[("x-bocomcode-session", "ses_xyz789")]);
-        assert_eq!(session_identity(&fork, &json!({}), "x-ev-session"), Some("ses_xyz789".into()));
         let legacy = h(&[("x-opencode-session", "ses_old")]);
         assert_eq!(session_identity(&legacy, &json!({}), "x-ev-session"), Some("ses_old".into()));
         // 自定义头优先级最高
