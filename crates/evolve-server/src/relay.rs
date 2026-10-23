@@ -361,6 +361,21 @@ pub async fn chat_completions(
             tracing::info!(models = ?ctx_retry, "context-gated models appended as last-resort");
             attempts.extend(ctx_retry);
         }
+        // 链耗尽续跑（2026-10-23 实证：top-3 全灭时 zhipu glm-5.3-flash 排在
+        // 榜单 3 名开外从未被试到，而同池直连它是 200）：评分榜的后续候选按序
+        // 补进尝试列表，总尝试数封顶 12——故障转移走完榜单，而不是止步前三。
+        {
+            const ATTEMPT_BUDGET: usize = 12;
+            let ranked = decision.scored.iter().map(|sc| &sc.model_id).collect::<Vec<_>>();
+            for id in ranked {
+                if attempts.len() >= ATTEMPT_BUDGET {
+                    break;
+                }
+                if !attempts.contains(&id) {
+                    attempts.push(id.clone());
+                }
+            }
+        }
     }
 
     let mut skipped: Vec<String> = Vec::new();
