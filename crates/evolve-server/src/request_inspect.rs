@@ -134,12 +134,28 @@ pub(crate) fn cap_body(raw: &[u8], cap: usize, truncated: &mut Vec<String>, what
         );
     }
     truncated.push(what.to_string());
-    let cut = &text[..cap];
+    // ⚠ 必须按字符边界切：请求体多为中文（3 字节 UTF-8），裸 `&text[..cap]`
+    // 边界落在多字节字符中间即 panic——panic 炸掉 handler 任务，hyper 不回任何
+    // 响应直接断连，客户端只见 UND_ERR_SOCKET "other side closed"、网关日志零痕迹
+    // （2026-10-24 实证：pi 巡检会话连续 10 次秒断 + 网关 77 次 panic）
+    let cut = &text[..floor_char_boundary(&text, cap)];
     let cut = serde_json::from_str::<serde_json::Value>(cut)
         .ok()
         .and_then(|v| serde_json::to_string_pretty(&v).ok())
         .unwrap_or_else(|| cut.to_string());
     Some(format!("{cut}\n\n…[truncated, total {} bytes]…", raw.len()))
+}
+
+/// 返回 ≤ max 的最大字符边界下标（stable Rust 无 floor_char_boundary，手写）
+fn floor_char_boundary(s: &str, max: usize) -> usize {
+    if max >= s.len() {
+        return s.len();
+    }
+    let mut i = max;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// 流式分片捕获：头 64KB 全留，其后只留最新 128KB 尾部
@@ -163,7 +179,8 @@ pub fn capture_stream_chunk(entry: &Arc<Mutex<InspectEntry>>, chunk: &[u8]) {
             tail.push_str(&String::from_utf8_lossy(chunk));
             let overflow = tail.len().saturating_sub(TAIL_CAP);
             if overflow > 0 {
-                *tail = tail[overflow..].to_string();
+                // 字符边界对齐后切（同 cap_body：裸切多字节字符会 panic 断连）
+                *tail = tail[floor_char_boundary(tail, overflow)..].to_string();
                 if !g.truncated.iter().any(|t| t == "stream_tail") {
                     g.truncated.push("stream_tail".into());
                 }
@@ -224,4 +241,85 @@ pub async fn api_inspect_detail(
     };
     let g = entry.lock().unwrap_or_else(|p| p.into_inner());
     (axum::Json(serde_json::to_value(&*g).unwrap_or_default())).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 中文请求体截断必须落在字符边界（裸切曾 panic 断连，2026-10-24）
+    #[test]
+    fn cap_body_cjk_truncation_does_not_panic() {
+        // 3 字节/字 × 足量 → cap=1000 必落在多字节字符中间
+        let body = "汉".repeat(1000).into_bytes();
+        assert!(body.len() > 1000);
+        let mut truncated = Vec::new();
+        let out = cap_body(&body, 1000, &mut truncated, "client_body");
+        assert!(truncated.contains(&"client_body".to_string()));
+        let out = out.expect("truncated body must still be captured");
+        assert!(out.contains("…[truncated, total 3000 bytes]…"));
+    }
+
+    /// cap 恰好落在字符边界时行为不变
+    #[test]
+    fn cap_body_ascii_cap_passthrough() {
+        let body = b"abcdefgh".to_vec();
+        let mut truncated = Vec::new();
+        let out = cap_body(&body, 4, &mut truncated, "client_body").expect("captured");
+        assert!(out.starts_with("abcd\n\n…[truncated, total 8 bytes]…"));
+    }
+
+    /// 流式尾部环形截断遇多字节字符不得 panic，且残余仍是合法 UTF-8
+    #[test]
+    fn stream_tail_trim_respects_char_boundary() {
+        let entry = crate::request_inspect::begin(crate::request_inspect::InspectEntry {
+            decision_id: "t".into(),
+            session: "t".into(),
+            agent: String::new(),
+            model: String::new(),
+            ts_ms: 0,
+            status: 0,
+            total_ms: None,
+            stream: true,
+            redacted: false,
+            client_headers: None,
+            client_body: None,
+            client_body_bytes: 0,
+            upstream_url: None,
+            upstream_headers: None,
+            upstream_body: None,
+            upstream_same: false,
+            translated: false,
+            resp_status: None,
+            resp_headers: None,
+            resp_body: None,
+            stream_head: None,
+            stream_tail: None,
+            stream_bytes: 0,
+            stream_done: false,
+            truncated: Vec::new(),
+        });
+        // 头部灌满 HEAD_CAP，再持续喂 3 字节/字的中文章节，迫使尾部反复环形截断
+        let head = "a".repeat(STREAM_HEAD_CAP);
+        capture_stream_chunk(&entry, head.as_bytes());
+        let chunk = "流".repeat(64 * 1024);
+        for _ in 0..4 {
+            capture_stream_chunk(&entry, chunk.as_bytes());
+        }
+        let g = entry.lock().unwrap();
+        let tail = g.stream_tail.as_ref().expect("tail captured");
+        assert!(tail.len() <= STREAM_TAIL_CAP + 3, "tail within cap (+1 char)");
+        assert!(tail.chars().all(|c| c == '流'), "no torn characters");
+    }
+
+    #[test]
+    fn floor_char_boundary_basics() {
+        let s = "ab汉cd";
+        assert_eq!(floor_char_boundary(s, 0), 0);
+        assert_eq!(floor_char_boundary(s, 2), 2); // '汉' 前
+        assert_eq!(floor_char_boundary(s, 3), 2); // 落在 '汉' 中间 → 回退
+        assert_eq!(floor_char_boundary(s, 4), 2);
+        assert_eq!(floor_char_boundary(s, 5), 5); // '汉' 后
+        assert_eq!(floor_char_boundary(s, 999), s.len());
+    }
 }
