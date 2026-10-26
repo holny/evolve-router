@@ -1,5 +1,67 @@
 import Foundation
 
+/// 子进程日志写入器（**非隔离**，内部串行队列自持句柄）——GatewayProcess 是
+/// @MainActor，日志操作若挂在其方法上、从队列 sync 回 MainActor 会死锁
+/// （2026-10-26 实证：spawn 卡死在 logQueue.sync，网关永不拉起）。
+/// 所有调用方（MainActor / readabilityHandler 后台线程）都安全。
+final class ChildLogWriter {
+    private let queue = DispatchQueue(label: "ai.evolve-router.gateway-log")
+    private var handle: FileHandle?
+    private let url: URL
+    private let rotateBytes: UInt64
+
+    init(url: URL, rotateBytes: UInt64 = 32 * 1024 * 1024) {
+        self.url = url
+        self.rotateBytes = rotateBytes
+    }
+
+    /// 打开（追加模式）；文件不存在则创建
+    func open() {
+        queue.sync {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            handle = FileHandle(forWritingAtPath: url.path)
+            handle?.seekToEndOfFile()
+        }
+    }
+
+    /// 超过 rotateBytes → 关句柄 → rename 为 .1（覆盖旧 .1，只保留最近一份）
+    /// → 重开新文件继续写。子进程无需感知（pipe 由调用方消费）
+    func rotateIfNeeded() {
+        queue.sync {
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size])
+                as? UInt64 ?? 0
+            guard size >= rotateBytes else { return }
+            handle?.closeFile()
+            handle = nil
+            let rotated = url.path + ".1"
+            if FileManager.default.fileExists(atPath: rotated) {
+                try? FileManager.default.removeItem(atPath: rotated)
+            }
+            try? FileManager.default.moveItem(atPath: url.path, toPath: rotated)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            handle = FileHandle(forWritingAtPath: url.path)
+            handle?.seekToEndOfFile()
+        }
+    }
+
+    func write(_ data: Data) {
+        queue.async { [weak self] in
+            self?.handle?.write(data)
+        }
+    }
+
+    func close() {
+        queue.sync {
+            handle?.closeFile()
+            handle = nil
+        }
+    }
+}
+
 /// 网关子进程管理：spawn Contents/MacOS/evo-router serve，SIGTERM 优雅停机，
 /// 3s 后升级 SIGKILL。外部实例探测：已 healthy 时不 spawn，避免双网关竞态。
 @MainActor
@@ -17,6 +79,14 @@ public final class GatewayProcess: ObservableObject {
     private var child: Process?
     private var spawnInFlight = false
     private var externalUntil: Date?
+    // 子进程日志：pipe → ChildLogWriter（非隔离、内部串行队列自持有句柄），
+    // 轮转 = 关句柄 → rename 为 .1 → 重开——rename 式轮转只有持句柄者能做对
+    // （外部 launchd/tray 持句柄时 rename 会把新写入引进 .1）。实测事故：
+    // 无轮转的 gateway-child.log 涨到 807MB（2026-10-26）。
+    // ⚠ writer 必须非隔离：MainActor 上 sync 进它的队列会死锁（互相等）
+    private var logWriter: ChildLogWriter?
+    private var logPipe: Pipe?
+    private var logRotateTimer: Timer?
 
     /// Start 按钮清除用户 Stop 意图（自愈恢复）
     public func clearUserStopped() {
@@ -65,21 +135,31 @@ public final class GatewayProcess: ObservableObject {
         // 若继承到 ~/Documents / ~/Desktop 之类的工作目录，网关探测"相对 cwd 的
         // 候选配置名"就会让 macOS 反复弹"想访问文稿文件夹中的文件"（实测）
         p.currentDirectoryURL = Config.dataDirURL
-        let log = FileHandle(forWritingAtPath: Config.gatewayLogURL.path) ?? {
-            FileManager.default.createFile(atPath: Config.gatewayLogURL.path, contents: nil)
-            return FileHandle(forWritingAtPath: Config.gatewayLogURL.path)
-        }()
-        if let log {
-            _ = try? FileManager.default
-                .attributesOfItem(atPath: Config.gatewayLogURL.path)
-            log.seekToEndOfFile()
-            p.standardOutput = log
-            p.standardError = log
+        // 日志：启动先轮转一次（上一进程留下的超大日志），pipe 接收子进程
+        // stderr/stdout，由 ChildLogWriter 串行写入并持有句柄（轮转的唯一
+        // 正确位置）
+        let writer = ChildLogWriter(url: Config.gatewayLogURL)
+        writer.rotateIfNeeded()
+        writer.open()
+        logWriter = writer
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        logPipe = pipe
+        pipe.fileHandleForReading.readabilityHandler = { [weak writer] fh in
+            let data = fh.availableData
+            guard !data.isEmpty else {
+                fh.readabilityHandler = nil
+                return
+            }
+            writer?.write(data)
         }
+        startLogRotateTimer(writer)
         do {
             try p.run()
         } catch {
             tracingFallback("spawn failed: \(error)")
+            stopLogPipeline()
             return false
         }
         // 防双开兜底：已有存活子进程时立刻终止新 spawn 的副本（并发窗口残留）
@@ -109,9 +189,28 @@ public final class GatewayProcess: ObservableObject {
         }
     }
 
+    // MARK: - 子进程日志轮转
+
+    private func startLogRotateTimer(_ writer: ChildLogWriter) {
+        logRotateTimer?.invalidate()
+        // 主 runloop 触发；rotateIfNeeded 内部 sync 进 writer 队列（writer
+        // 非隔离、不回主线程 → 无死锁）
+        logRotateTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { _ in
+            writer.rotateIfNeeded()
+        }
+    }
+
+    private func stopLogPipeline() {
+        logPipe?.fileHandleForReading.readabilityHandler = nil
+        logPipe = nil
+        logRotateTimer?.invalidate()
+        logRotateTimer = nil
+    }
+
     /// 优雅停止：SIGTERM → 等 3s → SIGKILL；返回是否由本 app 管理并已停。
     public func stop() async {
         userStopped = true
+        stopLogPipeline()
         guard owned, child?.isRunning == true, let proc = child else { return }
         proc.terminate()
         for _ in 0..<30 {
