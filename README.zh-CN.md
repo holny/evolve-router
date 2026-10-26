@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#开发"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="#开发"><img src="https://img.shields.io/badge/tests-314%20passing-brightgreen.svg" alt="Tests"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
 </p>
 
@@ -338,10 +338,17 @@ curl -sX POST localhost:8787/api/reload                     # 立即应用 decis
 curl -sX POST localhost:8787/api/config/export              # 把 provider 清单落进配置文件
 evo-router doctor                                           # 配置 + 目录 + 凭据体检
 evo-router backtest                                         # 策略参数 A/B 回放（PGR 裁决）
+evo-router backtest --gate-sweep 0.25,0.35,0.45             # confidence_gate 灵敏度扫描（探索门控回放）
+evo-router backtest --gate-replay 0.25,0.35,0.45            # gate 反事实 A/B：逐档质量 proxy + PGR
+evo-router bench-load --concurrency 1,2,4,8 --requests 16   # 负载基准：吞吐 / 单用户速度 / TTFT 三曲线
 evo-router service install                                  # LaunchAgent：start / stop / restart / status
 ```
 
 所有响应都带 `x-ev-model`、`x-ev-reason`、`x-ev-decision-id`、`x-ev-est-tokens`、`x-ev-sticky`、`x-ev-skipped` 头；`x-ev-session` / `x-ev-policy` 可按请求指定会话与档位，`x-ev-no-cache` 绕过完成缓存。
+
+**负载基准**（`bench-load`）：对运行中的网关做并发扫描，输出吞吐–单用户速度权衡曲线（TokenRouter 式服务效率评价范式），附 TTFT p50/p95、质量级联与兜底换手计数。计数口径：输出 token 优先取上游 `usage`（缺失时按正文长度 ÷ 4 估算）；**流中出现顶层 `error` 帧即判失败**——网关截断注入帧与上游错误帧的 HTTP 状态已发出无法更改，error 帧是客户端侧唯一失败信号；并发按有效值上报（受请求数封顶）。落盘 `result.csv` + `summary.json`，`--slo` 标出仍满足单用户速度要求的最大并发档。与隐藏的 `mock-upstream` 子命令组合可做无真实上游的端到端演练；个别 provider 对 `stream_options` 回 400 时改用 `--no-stream`。
+
+**阈值标定**（`backtest --gate-sweep` / `--gate-replay`）：不手拍 `confidence_gate`——在真实事件上回放。`--gate-sweep` 按候选值确定性重算探索门控（灵敏度预览）；`--gate-replay` 进一步做反事实 chosen 模拟——区制感知：候选 gate 封锁的事件精确还原为公式 top1（Thompson 采样只改写选择、不改记录的公式序），双向允许的事件用实际结果作无偏样本，封锁→放开区随机不可算、诚实排除。逐档输出质量 proxy（0.7·成功率 + 0.3·速度归一，与飞轮同式）、PGR、封锁档改写率（多少封锁决策会翻回公式 top1，分母只含封锁档计分事件）与采纳提示（随机排除占比 ≥20% 时拒绝下结论）；任何变更仍须以新流量通过标准 A/B 裁决。
 
 **入站会话识别（零插件）**：网关直接读 agent 已在发的头——opencode 原生 `x-opencode-session-id`（v2.0.3x）/ 旧版 `x-opencode-session`、codex 的 `session_id`、claude-code `metadata.user_id` 的会话尾段、通用 `x-session-id`。什么都不发的 agent 也能正确分组：LLM 对话是追加式的（上一轮消息数组是下一轮的前缀），网关用**前缀链匹配**重建会话——不改客户端就得到跨轮稳定的会话 id。历史压缩（compaction）改写过去，诚实开新组。
 
@@ -375,7 +382,7 @@ evo-router service install                                  # LaunchAgent：star
 
 ```bash
 cargo build --release
-cargo test          # 225 个测试，在仓库根目录跑
+cargo test          # 314 个测试，在仓库根目录跑
 cargo clippy        # 零警告策略
 ```
 

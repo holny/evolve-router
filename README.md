@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#development"><img src="https://img.shields.io/badge/tests-259%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="#development"><img src="https://img.shields.io/badge/tests-314%20passing-brightgreen.svg" alt="Tests"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
 </p>
 
@@ -340,10 +340,17 @@ curl -sX POST localhost:8787/api/reload                     # apply decision/pro
 curl -sX POST localhost:8787/api/config/export              # materialise the provider list into the config
 evo-router doctor                                           # config + catalog + credentials sanity check
 evo-router backtest                                         # A/B replay of strategy params on real events (PGR verdict)
+evo-router backtest --gate-sweep 0.25,0.35,0.45             # confidence_gate sensitivity sweep (exploration-gate replay)
+evo-router backtest --gate-replay 0.25,0.35,0.45            # counterfactual gate A/B: quality proxy + PGR per gate
+evo-router bench-load --concurrency 1,2,4,8 --requests 16   # load benchmark: throughput / per-user speed / TTFT curves
 evo-router service install                                  # LaunchAgent: start / stop / restart / status
 ```
 
 Every response also carries `x-ev-model`, `x-ev-reason`, `x-ev-decision-id`, `x-ev-est-tokens`, `x-ev-sticky` and `x-ev-skipped` headers; `x-ev-session` and `x-ev-policy` steer stickiness and profile per request, `x-ev-no-cache` bypasses the completion cache.
+
+**Load benchmark** (`bench-load`): sweeps concurrency levels against the running gateway and reports the throughput–per-user-speed trade-off (à la TokenRouter's serving-efficiency curves), with TTFT p50/p95, quality-cascade and fallback counts. Counting rules: output tokens prefer upstream `usage` (falls back to content length ÷ 4); a request counts as ok only if the stream carries **no top-level `error` frame** — so gateway-injected truncation errors and upstream errors are counted as failures even though their HTTP status was already 200; concurrency is reported at the effective level (capped by request count). Writes `result.csv` + `summary.json`; `--slo` flags the largest concurrency level that still meets a per-user speed target. Pair with the hidden `mock-upstream` subcommand for an end-to-end dry run without real providers; if a provider rejects `stream_options` with a 400, rerun with `--no-stream`.
+
+**Threshold calibration** (`backtest --gate-sweep` / `--gate-replay`): instead of hand-picking `confidence_gate`, replay real events. `--gate-sweep` recomputes the exploration gate deterministically per candidate value (a sensitivity preview); `--gate-replay` goes further and simulates the counterfactual chosen per gate — regime-aware: blocked-at-candidate-gate events replay exactly as formula top1 (Thompson sampling only perturbs the pick, never the recorded scoreboard order), both-allowed events reuse the actual outcome as an unbiased sample, and block→unblock transitions are excluded as irreducibly random. Per gate it reports quality proxy (0.7 · success rate + 0.3 · normalized speed, same formula as the flywheel), PGR, the blocked-regime rewrite rate (how many blocked decisions would flip back to formula top1, denominator = blocked scored events), and an adoption hint that refuses to conclude when stochastic exclusions exceed 20%; any change must still pass the standard A/B replay on fresh traffic.
 
 **Inbound session identity (zero-plugin)**: the gateway reads what your agent already sends — opencode's native `x-opencode-session-id` (v2.0.3x) / legacy `x-opencode-session`, codex's `session_id`, claude-code's `metadata.user_id` session tail, or any `x-session-id`. Agents that send nothing are still grouped correctly: LLM conversations are append-only (each turn's message array is a prefix of the next turn's), so the gateway reconstructs the session by prefix-chain matching — one stable session id across turns without any client change. History compaction rewrites the past, honestly starting a fresh group.
 
@@ -404,7 +411,7 @@ Each model groups every platform/plan offer: unit price (¥/M), peak vs off-peak
 
 ```bash
 cargo build --release
-cargo test          # 225 tests, run from the workspace root
+cargo test          # 314 tests, run from the workspace root
 cargo clippy        # zero-warning policy
 ```
 
