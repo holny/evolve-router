@@ -1005,9 +1005,11 @@ public struct PanelView: View {
 
     /// 模型标签的图例（capability/price）——放在 Model 列表**下面**（用户裁决 2026-10-17）
     /// 优先级控制：色点（当前档位）+ ▲▼ 微型步进。与 Web dashboard 写同一
-    /// /api/priority、读同一 /api/model-tags——双入口同源同步
+    /// /api/priority、读同一 /api/model-tags——双入口同源同步。
+    /// external 网关（面板未持有的实例）保持只读姿态，控制整体禁用
     private func prioControl(_ m: ModelRow) -> some View {
         let level = state.modelTagMap[m.id]?.priority ?? 0
+        let writable = !state.external
         return HStack(spacing: 2) {
             Circle()
                 .fill(Self.prioColor(level))
@@ -1022,8 +1024,8 @@ public struct PanelView: View {
                         .frame(width: 9, height: 6)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(level >= 3 ? .clear : .secondary)
-                .disabled(level >= 3)
+                .foregroundStyle(!writable || level >= 3 ? .clear : .secondary)
+                .disabled(!writable || level >= 3)
                 Button {
                     state.setPriority(model: m.id, level: max(-3, level - 1))
                 } label: {
@@ -1032,10 +1034,10 @@ public struct PanelView: View {
                         .frame(width: 9, height: 6)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(level <= -3 ? .clear : .secondary)
-                .disabled(level <= -3)
+                .foregroundStyle(!writable || level <= -3 ? .clear : .secondary)
+                .disabled(!writable || level <= -3)
             }
-            .help(t("prio_help"))
+            .help(writable ? t("prio_help") : t("external"))
         }
     }
 

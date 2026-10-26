@@ -1584,7 +1584,11 @@ pub fn save_overrides(data_dir: &str, o: &Overrides) {
     if let Ok(t) = serde_json::to_string_pretty(o) {
         let path = overrides_path(data_dir);
         evolve_core::config::ensure_parent(&path);
-        let _ = std::fs::write(path, t);
+        // 落盘失败必须可见（磁盘满/权限）——静默丢失会让面板"设置成功"
+        // 的假象维持到下一次重启重放
+        if let Err(e) = std::fs::write(path, t) {
+            tracing::error!("failed to persist overrides.json: {e}");
+        }
     }
 }
 

@@ -873,9 +873,30 @@ public final class AppState: ObservableObject {
     /// （响应 demoted 非空）给一条数秒可见的提示
     public func setPriority(model: String, level: Int) {
         guard (-3...3).contains(level) else { return }
+        // 乐观落地：连点立刻按最新档位叠加（否则两次点击读到同一 stale 档位，
+        // 三连 ▲ 只到 1）；写失败由下一轮 pollData 回读纠偏
+        if let tag = modelTagMap[model] {
+            var tm = modelTagMap
+            tm[model] = ModelTagInfo(capability: tag.capability, priceTier: tag.priceTier,
+                                     unusableReason: tag.unusableReason, priority: level)
+            put(\.modelTagMap, \.modelTagMap, tm)
+        }
         Task {
-            if case (200, let data)? = try? await post("/api/priority", body: ["model": model, "level": level]),
-               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let (status, data) = (try? await post("/api/priority", body: ["model": model, "level": level]))
+                ?? (0, Data())
+            if status != 200 {
+                // 400 响应体带 {"error":{"message":…}}：透出行内提示（8s 自动清除）
+                let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { $0["error"] as? [String: Any] }
+                    .flatMap { $0["message"] as? String } ?? "gateway unreachable (\(status))"
+                upd(\.priorityNotice, "⚠︎ " + msg)
+                Task {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                    upd(\.priorityNotice, nil)
+                }
+                return
+            }
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let demoted = obj["demoted"] as? [[String: Any]],
                !demoted.isEmpty {
                 let names = demoted.compactMap { $0["model"] as? String }.joined(separator: ", ")

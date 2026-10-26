@@ -787,70 +787,72 @@ pub async fn api_priority_set(
     let Some(model) = body.get("model").and_then(|m| m.as_str()).map(|s| s.to_string()) else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
     };
-    let Some(level) = body.get("level").and_then(|l| l.as_i64()).map(|l| l as i8) else {
+    let Some(level_i64) = body.get("level").and_then(|l| l.as_i64()) else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "level (integer -3..3) is required"}}))).into_response();
     };
-    if !(-3..=3).contains(&level) {
+    // 先按 i64 校验范围再收窄——`as i8` 截断会把 259 环绕成 3 混进合法档
+    if !(-3..=3).contains(&level_i64) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "level must be within -3..3"}}))).into_response();
     }
-    if !(-3..=3).contains(&level) {
-        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "level must be within -3..3"}}))).into_response();
-    }
+    let level = level_i64 as i8;
     // 幽灵条目防御：目录里不存在的模型不落盘（模型已删除/拼错的 id 一律拒绝）
     let snap = st.engine.catalog_snapshot();
     let Some(record) = snap.iter().find(|m| m.id == model).cloned() else {
         return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": format!("model {model} is not in the catalog")}}))).into_response();
     };
-    // 同 provider 旧 Pinned 降档（level==3 时执行；level 以外的值不触碰他人）
-    let mut demoted: Vec<Value> = Vec::new();
-    if level == 3 {
-        demoted = demote_other_provider_pins(&st.engine, &snap, &model);
-    }
-    st.engine.set_priority_override(&model, if level == 0 { None } else { Some(level) });
+    let provider = record.provider.clone();
+    let same_provider: Vec<String> = snap
+        .iter()
+        .filter(|m| m.provider == provider && m.id != model)
+        .map(|m| m.id.clone())
+        .collect();
     let dir = &st.config.data.dir;
-    crate::state::update_overrides(dir, |ov| {
+    // 降档判定 + 目标写入都在串行锁内（持久层原子保证 Pinned 唯一性）；
+    // engine overlay 在锁外跟随持久层
+    let demoted = crate::state::update_overrides(dir, |ov| {
+        let mut demoted: Vec<Value> = Vec::new();
+        if level == 3 {
+            demoted = demote_other_pins(&mut ov.priorities, &model, &same_provider);
+        }
         if level == 0 {
             ov.priorities.remove(&model);
         } else {
             ov.priorities.insert(model.clone(), level);
         }
-        // 旧 Pinned 降档同样落盘（重启重放才一致）
-        for d in &demoted {
-            if let (Some(id), Some(to)) = (d.get("model").and_then(|v| v.as_str()), d.get("to").and_then(|v| v.as_i64())) {
-                ov.priorities.insert(id.to_string(), to as i8);
-            }
-        }
+        demoted
     });
+    // 引擎热态跟随（含被降档者）
+    st.engine.set_priority_override(&model, if level == 0 { None } else { Some(level) });
+    for d in &demoted {
+        if let Some(id) = d.get("model").and_then(|v| v.as_str()) {
+            st.engine.set_priority_override(id, Some(2));
+        }
+    }
     (axum::Json(json!({
         "status": "ok",
         "model": model,
-        "provider": record.provider,
+        "provider": provider,
         "level": level,
         "demoted": demoted,
     }))).into_response()
 }
 
-/// 同 provider 旧 Pinned 降档（Pinned 唯一性，用户裁决）：返回降档清单。
-/// provider 判定用目录里的 provider 字段（与组合视图同口径）；只有恰好为
-/// +3 的同 provider 模型降为 +2。model 不在目录（已被删）时不降任何人。
-fn demote_other_provider_pins(
-    engine: &evolve_core::engine::Engine,
-    snap: &[evolve_core::types::ModelRecord],
+/// 同 provider 旧 Pinned 降档（Pinned 唯一性，用户裁决）：就地修改 priorities，
+/// 返回降档清单。只有恰好为 +3 的同 provider 模型降为 +2。
+fn demote_other_pins(
+    priorities: &mut std::collections::HashMap<String, i8>,
     model: &str,
+    same_provider: &[String],
 ) -> Vec<serde_json::Value> {
-    let Some(provider) = snap.iter().find(|m| m.id == model).map(|m| m.provider.clone()) else {
-        return Vec::new();
-    };
-    let others: Vec<String> = snap
-        .iter()
-        .filter(|m| m.provider == provider && m.id != model)
-        .map(|m| m.id.clone())
-        .collect();
     let mut demoted = Vec::new();
-    for (id, cur) in engine.priority_overrides() {
-        if cur == 3 && others.contains(&id) {
-            engine.set_priority_override(&id, Some(2));
+    for (id, cur) in priorities.iter() {
+        if *cur == 3 && id != model && same_provider.contains(id) {
             demoted.push(json!({"model": id, "from": 3, "to": 2}));
+        }
+    }
+    for d in &demoted {
+        if let Some(id) = d.get("model").and_then(|v| v.as_str()) {
+            priorities.insert(id.to_string(), 2);
         }
     }
     demoted
@@ -3823,65 +3825,42 @@ mod price_tier_tie_tests {
 
 #[cfg(test)]
 mod priority_tests {
-    use super::demote_other_provider_pins;
-    use evolve_core::engine::Engine;
-    use evolve_core::types::ModelRecord;
+    use super::demote_other_pins;
+    use std::collections::HashMap;
 
-    fn rec(id: &str, provider: &str) -> ModelRecord {
-        ModelRecord { id: id.into(), provider: provider.into(), ..Default::default() }
+    fn pins(entries: &[(&str, i8)]) -> HashMap<String, i8> {
+        entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 
-    fn engine() -> Engine {
-        Engine::new(
-            evolve_core::catalog::Catalog::from_records(vec![
-                rec("zhipu-glm", "zhipu"),
-                rec("zhipu-flash", "zhipu"),
-                rec("minimax-ab", "minimax"),
-            ]),
-            evolve_core::config::PolicyCfg::default(),
-            Box::new(evolve_core::heuristic::HeuristicJudge),
-        )
-    }
-
-    fn snap() -> Vec<ModelRecord> {
-        vec![
-            rec("zhipu-glm", "zhipu"),
-            rec("zhipu-flash", "zhipu"),
-            rec("minimax-ab", "minimax"),
-        ]
+    fn same_provider(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|s| s.to_string()).collect()
     }
 
     /// 设置 zhipu-glm 为 Pinned 时，同 provider 的旧 Pinned（zhipu-flash）
     /// 自动降为 Highest(+2)；跨 provider 的 minimax-ab 不受影响
     #[test]
     fn demote_hits_only_same_provider_pins() {
-        let e = engine();
-        e.set_priority_override("zhipu-flash", Some(3));
-        e.set_priority_override("minimax-ab", Some(3));
-        let demoted = demote_other_provider_pins(&e, &snap(), "zhipu-glm");
+        let mut p = pins(&[("zhipu-flash", 3), ("minimax-ab", 3)]);
+        let demoted = demote_other_pins(&mut p, "zhipu-glm", &same_provider(&["zhipu-flash"]));
         assert_eq!(demoted.len(), 1, "{demoted:?}");
-        assert_eq!(e.priority_of("zhipu-flash"), 2, "same-provider pin must drop to +2");
-        assert_eq!(e.priority_of("minimax-ab"), 3, "other providers must be untouched");
-        assert_eq!(e.priority_of("zhipu-glm"), 0, "the newly pinned model is set by the caller afterwards");
+        assert_eq!(p.get("zhipu-flash"), Some(&2), "same-provider pin must drop to +2");
+        assert_eq!(p.get("minimax-ab"), Some(&3), "other providers must be untouched");
+        assert!(!p.contains_key("zhipu-glm"), "the newly pinned model is set by the caller afterwards");
     }
 
     /// 唯一性是"恰好为 +3 才降"：已是 +2 的同 provider 模型不动
     #[test]
     fn demote_leaves_lower_levels_alone() {
-        let e = engine();
-        e.set_priority_override("zhipu-flash", Some(2));
-        let demoted = demote_other_provider_pins(&e, &snap(), "zhipu-glm");
-        assert!(demoted.is_empty());
-        assert_eq!(e.priority_of("zhipu-flash"), 2);
+        let mut p = pins(&[("zhipu-flash", 2)]);
+        assert!(demote_other_pins(&mut p, "zhipu-glm", &same_provider(&["zhipu-flash"])).is_empty());
+        assert_eq!(p.get("zhipu-flash"), Some(&2));
     }
 
-    /// 模型不在目录（已删除）时不降任何人——找不到 provider 归属就放弃
+    /// 自身不在降档之列（重复设置同一 Pinned 是 no-op）
     #[test]
-    fn demote_skips_unknown_model() {
-        let e = engine();
-        e.set_priority_override("zhipu-flash", Some(3));
-        let demoted = demote_other_provider_pins(&e, &snap(), "ghost-model");
-        assert!(demoted.is_empty());
-        assert_eq!(e.priority_of("zhipu-flash"), 3);
+    fn demote_excludes_self() {
+        let mut p = pins(&[("zhipu-glm", 3)]);
+        assert!(demote_other_pins(&mut p, "zhipu-glm", &same_provider(&["zhipu-flash"])).is_empty());
+        assert_eq!(p.get("zhipu-glm"), Some(&3));
     }
 }

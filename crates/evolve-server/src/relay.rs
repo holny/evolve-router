@@ -297,10 +297,8 @@ pub async fn chat_completions(
             // 用户 Off 裁决在目录清扫兜底里依然成立（2026-10-26 实证：全候选
             // 冷却的绝境里 Off 模型曾被 sweep 捞回 tried 链）——预占 seen，
             // sweep_candidates 直接跳过；全部被 Off 时清扫为空 = 宁可失败
-            for (id, lvl) in st.engine.priority_overrides() {
-                if lvl <= -3 {
-                    seen.insert(id);
-                }
+            for id in off_priority_exclusions(&st.engine.priority_overrides()) {
+                seen.insert(id);
             }
             let cat = st.engine.catalog_snapshot();
             let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
@@ -1697,6 +1695,16 @@ pub(crate) fn sweep_candidates(
 /// 胜出队列（用户裁决 2026-10）：最终决策的 chain 去重后为主序列，不足
 /// `queue_max` 时按评分序（降序）补位；总量以 `queue_max` 封顶。队列整体
 /// 失败或为空才走队列外的 sweep 段（见调用点）。
+/// 用户 Off(-3) 的模型 id 集——目录清扫兜底的排除集（绝境也不捞回，
+/// 2026-10-26 实证：全候选冷却时 Off 模型曾被 sweep 复活进 tried 链）
+pub(crate) fn off_priority_exclusions(priorities: &std::collections::HashMap<String, i8>) -> Vec<String> {
+    priorities
+        .iter()
+        .filter(|(_, l)| **l <= -3)
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 pub(crate) fn winner_queue(
     chain: &[String],
     scores: &std::collections::BTreeMap<String, f32>,
@@ -2359,5 +2367,28 @@ mod auto_alias_tests {
         assert!(fallback_eligible(502));
         assert!(!fallback_eligible(200));
         assert!(!fallback_eligible(204));
+    }
+}
+
+#[cfg(test)]
+mod off_exclusion_tests {
+    use super::off_priority_exclusions;
+
+    /// 目录清扫兜底的 Off 排除集：-3 与更低全部排除，其余档位放行
+    #[test]
+    fn collects_only_off_levels() {
+        let p: std::collections::HashMap<String, i8> = [
+            ("off1".into(), -3),
+            ("lowest".into(), -2),
+            ("neutral".into(), 0),
+            ("higher".into(), 1),
+            ("pinned".into(), 3),
+        ]
+        .into_iter()
+        .collect();
+        let mut out = off_priority_exclusions(&p);
+        out.sort();
+        assert_eq!(out, vec!["off1".to_string()]);
+        assert!(off_priority_exclusions(&Default::default()).is_empty());
     }
 }
