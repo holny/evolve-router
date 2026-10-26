@@ -294,6 +294,14 @@ pub async fn chat_completions(
             // 的不试（无凭据模型与主链同权照试——本地上游可免鉴权）。
             let mut seen: std::collections::HashSet<String> = list.iter().cloned().collect();
             let sweep_from = list.len();
+            // 用户 Off 裁决在目录清扫兜底里依然成立（2026-10-26 实证：全候选
+            // 冷却的绝境里 Off 模型曾被 sweep 捞回 tried 链）——预占 seen，
+            // sweep_candidates 直接跳过；全部被 Off 时清扫为空 = 宁可失败
+            for (id, lvl) in st.engine.priority_overrides() {
+                if lvl <= -3 {
+                    seen.insert(id);
+                }
+            }
             let cat = st.engine.catalog_snapshot();
             let self_addr = format!("{}:{}", st.config.server.host, st.config.server.port);
             // 兜底候选（2026-10 修复）：旧实现是**盲取"目录前 6 个"**（不看窗口/

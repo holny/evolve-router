@@ -216,6 +216,11 @@ table.mx tr.win td { color:var(--green); }
 .wf-pre { background:#58a6ff; } .wf-dec { background:#d29922; }
 .wf-first { background:#3fb950; } .wf-stream { background:#8957e5; }
 .wf-legend { display:flex; gap:10px; font-size:10px; color:var(--dim); margin-top:3px; flex-wrap:wrap; }
+/* 模型优先级：色点（档位标记）+ ▲▼ 微型步进钮——列表下方图例见 prio legend */
+.pdot { width:8px; height:8px; border-radius:50%; display:inline-block; flex:none; }
+.pdot-off { background:transparent; border:1.5px solid var(--dim); opacity:.65; }
+.pstep { display:inline-flex; flex-direction:column; line-height:1; flex:none; }
+.pbtn { font-size:8px; padding:0 3px; min-width:16px; line-height:1.1; }
 .wf-dot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:3px; vertical-align:middle; }
 .wtabs { display:flex; gap:4px; margin-bottom:8px; flex-wrap:wrap; }
 .wtab { border:1px solid var(--border); border-radius:10px; padding:2px 11px; font-size:11px; color:var(--dim); cursor:pointer; transition:all .12s; }
@@ -496,6 +501,20 @@ const T = {
     _t:{zh:'主显 L3 语义回路（上一轮工具调用被会话执行确认 matched/total，已折入可靠性）；括号内为 L4 插件显式反馈（需装 opencode 插件回传）', en:'L3 semantic loop primary (previous-turn tool calls confirmed executed by session, folded into reliability); L4 plugin feedback in parens (needs opencode plugin)', ko:'L3 시맨틱 루프 기본(세션에서 실행 확인된 도구 호출, 신뢰성에 반영); 괄호 안 L4 플러그인 피드백', ja:'L3 セマンティックループ優先（セッションで実行確認されたツール呼び出し、信頼性に反映）; 括弧内は L4 プラグインフィードバック', es:'bucle semántico L3 primario (llamadas confirmadas por la sesión, integrado en fiabilidad); feedback L4 del plugin en paréntesis', fr:'boucle sémantique L3 en principal (outils confirmés par la session, intégré à la fiabilité); retour plugin L4 entre parenthèses'}},
   w_weight: {zh:'权重', en:'Weight', ko:'가중치', ja:'重み', es:'Peso', fr:'Poids',
     _t:{zh:'最终权重 = 用户 weight × 学习偏置，开方软化后乘入评分', en:'final weight = user weight × learned bias, sqrt-softened into score', ko:'최종 가중치 = 사용자 weight × 학습 편향, 제곱근 완화 후 점수에 곱', ja:'最終重み = ユーザーweight × 学習バイアス、平方根緩和してスコアに乗算', es:'peso final = peso usuario × sesgo, suavizado con raíz', fr:'poids final = poids utilisateur × biais, adouci par racine'}},
+  prio_m3:  {zh:'不启用', en:'Off', ko:'비활성', ja:'無効', es:'Apagado', fr:'Désactivé'},
+  prio_m2:  {zh:'低优先级', en:'Lowest', ko:'최하 우선', ja:'最低優先', es:'Prioridad mínima', fr:'Priorité minimale'},
+  prio_m1:  {zh:'较低优先级', en:'Lower', ko:'낮은 우선', ja:'低めの優先', es:'Prioridad baja', fr:'Priorité plus basse'},
+  prio_0:   {zh:'不干预', en:'Default', ko:'기본', ja:'デフォルト', es:'Neutral', fr:'Neutre'},
+  prio_p1:  {zh:'较高优先级', en:'Higher', ko:'높은 우선', ja:'高めの優先', es:'Prioridad alta', fr:'Priorité plus haute'},
+  prio_p2:  {zh:'高优先级', en:'Highest', ko:'최상 우선', ja:'最高優先', es:'Prioridad máxima', fr:'Priorité maximale'},
+  prio_p3:  {zh:'provider内必使用', en:'Pinned (per provider)', ko:'provider 필수', ja:'provider内必須', es:'Fijado (por proveedor)', fr:'Épinglé (par fournisseur)'},
+  prio_title: {zh:'模型优先级：用户裁决，全局最高优先——只有 provider 网络/配额/余额等不可抗拒力能越过它。Pinned 同 provider 唯一，旧 pin 自动降档',
+    en:'Model priority: your call, globally highest — only force majeure (provider network/quota/billing) can override it. Pinned is unique per provider; the previous pin auto-demotes',
+    ko:'모델 우선순위: 사용자 지정, 전역 최고 — provider 네트워크/쿼터/결제 등 불가항력만 이를 넘을 수 있음. Pinned는 provider당 하나, 기존 pin은 자동 강등',
+    ja:'モデル優先度：ユーザー指定、全体最優先——providerのネットワーク/クォータ/課金など不可抗力のみ上回る。Pinnedはprovider内で一意、旧pinは自動降格',
+    es:'Prioridad de modelo: tu decisión, la más alta global — solo fuerza mayor (red/cuota/facturación del proveedor) la supera. Fijado es único por proveedor; el pin anterior baja automáticamente',
+    fr:'Priorité de modèle : votre décision, la plus haute globalement — seule une force majeure (réseau/quota/facturation du fournisseur) la dépasse. Épinglé est unique par fournisseur ; le pin précédent rétrograde automatiquement'},
+  prio_demoted: {zh:'同 provider 原「必使用」已自动降为「高优先级」：{m}', en:'Previous pinned model(s) in the same provider auto-demoted to Highest: {m}', ko:'같은 provider의 기존 핀 모델이 자동으로 최상 우선으로 강등됨: {m}', ja:'同provider内の旧pinを自動的に最高優先へ降格しました: {m}', es:'Modelo(s) fijado(s) anterior(es) del mismo proveedor degradados a Prioridad máxima: {m}', fr:'Pin(s) précédent(s) du même fournisseur rétrogradé(s) à Priorité maximale : {m}'},
   p_sticky: {zh:'粘性复用', en:'sticky reuse', ko:'스티키 재사용', ja:'スティキー再利用', es:'reutilización sticky', fr:'réutilisation sticky'},
   p_sticky_hint: {zh:'粘性复用的全部条件（任一不满足即重新完整评估）：①上轮任务难度低(L1/L2) ②同会话连续 ③窗口装得下 ④服务健康 ⑤配额充足 ⑥量级双向2倍内 ⑦工具未变 ⑧轮次未耗尽(默认2轮)', en:'sticky reuse requires ALL of: previous task low-difficulty (L1/L2), same session, fits in window, service healthy, quota sufficient, size within 2x, same tools, turns remaining — otherwise full re-evaluation', ko:'스티키 재사용 전부 충족 시: 이전 작업 저난이도(L1/L2), 동일 세션, 윈도우 적합, 헬스, 쿼터, 크기 2배 내, 도구 동일, 잔여 턴 — 하나라도 불일치 시 전체 재평가', ja:'スティキー再利用の全条件（一つでも崩れると完全再評価）：前タスク低難度(L1/L2)、同一セッション、窓に収まる、ヘルス正常、クォータ十分、量級2倍内、ツール不変、残ターンあり', es:'la reutilización sticky exige TODO: tarea anterior de baja dificultad (L1/L2), misma sesión, cabe en ventana, servicio sano, cuota suficiente, tamaño dentro de 2x, mismas herramientas, turnos restantes — si no, reevaluación completa', fr:'la réutilisation sticky exige TOUT : tâche précédente de faible difficulté (L1/L2), même session, tient dans la fenêtre, service sain, quota suffisant, taille dans 2x, mêmes outils, tours restants — sinon réévaluation complète'},
   p_explore: {zh:'探索', en:'exploring', ko:'탐색', ja:'探索', es:'explorando', fr:'exploration'},
@@ -2106,6 +2125,23 @@ document.getElementById('pv-scan-btn').addEventListener('click', () => {
 });
 function renderPlans(){ renderProviders(); renderTags(); }
 async function loadTags(){ try { const j = await (await fetch('/api/model-tags')).json(); state.modelTags = j.models || []; renderTags(); } catch(_){} }
+const PRIO_COLORS = {'-3':'#6b7280','-2':'#8b5cf6','-1':'#3b82f6','0':'','1':'#14b8a6','2':'#f59e0b','3':'#22c55e'};
+function prioLabel(l){ return t('prio_' + (l < 0 ? 'm'+(-l) : l === 0 ? '0' : 'p'+l)); }
+function prioDot(l){
+  const c = PRIO_COLORS[String(l)];
+  if (!c) return '<span class="pdot pdot-off" title="'+esc(prioLabel(0))+'"></span>';
+  return '<span class="pdot" style="background:'+c+'" title="'+esc(prioLabel(l))+'"></span>';
+}
+function prioStepper(m){
+  const cur = m.priority || 0;
+  const up = Math.max(-3, Math.min(3, cur + 1)), dn = Math.max(-3, Math.min(3, cur - 1));
+  return '<span class="pstep">'
+    + '<button class="lang-btn pbtn" data-prio-model="'+esc(m.model)+'" data-prio-dir="1"'
+      + (up === cur ? ' disabled style="opacity:.3"' : ' title="'+esc(prioLabel(up))+'"') + '>▲</button>'
+    + '<button class="lang-btn pbtn" data-prio-model="'+esc(m.model)+'" data-prio-dir="-1"'
+      + (dn === cur ? ' disabled style="opacity:.3"' : ' title="'+esc(prioLabel(dn))+'"') + '>▼</button>'
+    + '</span>';
+}
 function renderTags(){
   const box = document.getElementById('tags-dist');
   const list = document.getElementById('tags-list');
@@ -2166,6 +2202,8 @@ function renderTags(){
     return '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:11px'+(dim?';opacity:.45':'')+'"'
       + (dim ? ' title="' + esc(urTxt) + '"' : '') + '>'
       + '<span style="flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.model)+'</span>'
+      + prioDot(m.priority)
+      + prioStepper(m)
       + (dim ? '<span class="pbadge" style="color:var(--red);border-color:var(--red)">'+esc(urTxt)+'</span>' : '')
       + (m.active
           ? '<span class="pbadge" style="color:var(--green);border-color:var(--green)" title="'+esc(t('act_on'))+'">'+esc(t('act_on'))+'</span>'
@@ -2177,6 +2215,25 @@ function renderTags(){
       + (m.active ? '<button class="lang-btn" data-act="'+esc(m.model)+'" data-act-on="0" style="font-size:10px;padding:0 6px">'+esc(t('act_disable'))+'</button>' : '')
       + '</div>';
   }).join('');
+  // 优先级图例（与其他标签颜色说明同区展示，减少行内占位）
+  list.innerHTML += '<div class="wf-legend" style="margin-top:6px" title="'+esc(t('prio_title'))+'">'
+    + [-3,-2,-1,0,1,2,3].map(l => '<span style="display:inline-flex;align-items:center;gap:3px">'+prioDot(l)+'<span>'+esc(prioLabel(l))+'</span></span>').join('')
+    + '</div>';
+  // ▲▼ 步进：clamp 到 -3..3；Pinned 唯一性由服务端保证（demoted 透传提示）
+  list.querySelectorAll('button[data-prio-model]').forEach(b => b.addEventListener('click', () => {
+    const model = b.dataset.prioModel;
+    const dir = parseInt(b.dataset.prioDir, 10);
+    const cur = (state.modelTags.find(x => x.model === model) || {}).priority || 0;
+    const level = Math.max(-3, Math.min(3, cur + dir));
+    if (level === cur) return;
+    fetch('/api/priority', {method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({model, level})}).then(r => r.json()).then(j => {
+        if (j.demoted && j.demoted.length) {
+          alert(t('prio_demoted').replace('{m}', j.demoted.map(d => d.model).join(', ')));
+        }
+        loadTags();
+      }).catch(() => {});
+  }));
   list.querySelectorAll('select[data-tag-model]').forEach(sel => sel.addEventListener('change', () => {
     const body = { model: sel.dataset.tagModel };
     body[sel.dataset.tagKind] = sel.value;

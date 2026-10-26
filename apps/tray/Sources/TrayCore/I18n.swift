@@ -65,6 +65,14 @@ let T: [String: String] = [
     "noKey": "no key",
     "free_hint": "free models: preferred by routing and not billed to plan quota",
     "degraded": "degraded",
+    "prio_m3": "Off",
+    "prio_m2": "Lowest",
+    "prio_m1": "Lower",
+    "prio_0": "Default",
+    "prio_p1": "Higher",
+    "prio_p2": "Highest",
+    "prio_p3": "Pinned (per provider)",
+    "prio_help": "Model priority — your call, globally highest. Only force majeure (provider network/quota/billing) overrides it. Pinned is unique per provider; the previous pin auto-demotes.",
 ]
 
 public func t(_ key: String) -> String {

@@ -4,6 +4,12 @@ use crate::scoring;
 use crate::types::*;
 use std::collections::{BTreeMap, HashMap};
 
+/// 用户优先级档位的加性带距：相邻档位在总分上的差距。取 100 远超公式
+/// 合成分的实际量级（约 0-5）与 Thompson 探索扰动（±3%）——跨档必是
+/// 档位定胜负，同档内公式分正常竞争；route_recommendation 加成（×1.15）
+/// 也无法跨越（15% of ~100 < 100）
+pub const PRIORITY_BAND_STEP: f32 = 100.0;
+
 /// 会话级判定缓存（2026-10-21）：同会话在 TTL 内、量级未跳变时**复用上一次判定**。
 /// Agent / 评审工具的连续调用任务不变，重判只是白付判定模型的秒级延迟
 /// （OCR 实证：258 次串行调用 × 3-4.5s 判定 = 累计远超单轮预算）。
@@ -83,6 +89,10 @@ pub struct Engine {
     weights_override: std::sync::RwLock<Option<PolicyWeights>>,
     /// 面板可调的用户权重覆盖（模型级），评分时覆盖目录 weight
     weight_overlay: std::sync::RwLock<HashMap<String, f32>>,
+    /// 用户优先级档位（-3 Off … +3 Pinned）：路由的最高优先干预——
+    /// 跨档以带距定胜负（PRIORITY_BAND_STEP），同档内公式照常竞争；
+    /// Off 从候选集剔除，Pinned 强制入池。持久化在 overrides.json，重启重放
+    priority_overlay: std::sync::RwLock<HashMap<String, i8>>,
     counter: std::sync::atomic::AtomicU64,
     /// 难度经验分位校准（目标 70/20/10）——判定器系统性偏移的归一器
     calibrator: crate::calibration::DifficultyCalibrator,
@@ -106,6 +116,7 @@ impl Engine {
             tiers_overlay: std::sync::RwLock::new(HashMap::new()),
             weights_override: std::sync::RwLock::new(None),
             weight_overlay: std::sync::RwLock::new(HashMap::new()),
+            priority_overlay: std::sync::RwLock::new(HashMap::new()),
             counter: std::sync::atomic::AtomicU64::new(0),
             calibrator: crate::calibration::DifficultyCalibrator::default(),
             calibration_enabled: true,
@@ -224,6 +235,34 @@ impl Engine {
         self.weight_overlay.read().ok().and_then(|o| o.get(id).copied())
     }
 
+    /// 设置/清除用户优先级档位（None = 回到不干预）；level 须在 -3..=3
+    pub fn set_priority_override(&self, id: &str, level: Option<i8>) {
+        if let Ok(mut o) = self.priority_overlay.write() {
+            match level {
+                Some(l) if (-3..=3).contains(&l) && l != 0 => {
+                    o.insert(id.to_string(), l);
+                }
+                _ => {
+                    o.remove(id);
+                }
+            }
+        }
+    }
+
+    /// 模型当前生效档位（无覆盖 = 0 不干预）
+    pub fn priority_of(&self, id: &str) -> i8 {
+        self.priority_overlay
+            .read()
+            .ok()
+            .and_then(|o| o.get(id).copied())
+            .unwrap_or(0)
+    }
+
+    /// 全量档位快照（API/展示用）
+    pub fn priority_overrides(&self) -> HashMap<String, i8> {
+        self.priority_overlay.read().map(|o| o.clone()).unwrap_or_default()
+    }
+
     /// 热替换 route advisor（None = 清空，例如槽位被移除）
     pub fn set_route_advisor(&self, advisor: Option<std::sync::Arc<dyn RouteAdvisor>>) {
         if let Ok(mut g) = self.route_advisor.write() {
@@ -286,7 +325,9 @@ impl Engine {
                         && model_available(input.health, &sticky.chosen, now)
                         && input.quota.get(&sticky.chosen).map(|r| *r >= est).unwrap_or(true)
                 })
-                .unwrap_or(false) && pressure_ok;
+                .unwrap_or(false) && pressure_ok
+                // 用户裁决 Off 的模型立即断粘——重评估走新档位，粘性不再掩护它
+                && self.priority_of(&sticky.chosen) > -3;
             // 量级闸门（2026-10-15 调整）：语义已由 continues_tools（工具延续）承担，
             // 这里只当**失控/换会话**保护——工具流程里 est 天然单调增长（工具输出越大越多），
             // 旧的 2 倍上限会把短消息的工具续跑全挡掉（est 5 → 14 就被判"量级暴增"）。
@@ -438,6 +479,15 @@ impl Engine {
                 .push(x.id.clone());
         }
         for m in &catalog_models {
+            // 用户优先级 Off（-3）：自动路由永不选中（显式指定不走此处）。
+            // 不入 FilteredOut 也无妨？——入列：链路视图要能解释"为什么不在候选里"
+            if self.priority_of(&m.id) <= -3 {
+                filtered.push(FilteredOut {
+                    model: m.id.clone(),
+                    cause: "user priority: Off (never routed; re-enable in Dashboard → 模型标签卡)".into(),
+                });
+                continue;
+            }
             // 按模型观测的 token/估算比值修正（成功样本中位数）：纯中文偏高、
             // 代码/JSON/工具输出偏低（实测大会话低估 1.5×）。这一步只影响**容量类**
             // 判定（上下文窗口 / 配额），不改变展示的原始估算。
@@ -508,7 +558,10 @@ impl Engine {
             // 其余多数是"不在组合"）。这类请求允许突破组合，从全目录取窗口满足者
             // （provider 健康、价位闸、配额闸仍然生效，不是无差别放开）
             let big_ctx = est > crate::thresholds::BIG_CTX_TOKENS;
-            if !input.active.is_empty() && !input.active.contains(&m.id) && !big_ctx {
+            // Pinned（+3）：provider 内必使用——只要过了前面的 provider 健康/配额等
+            // 不可抗拒力闸门，就无视活跃组合强制入池（与全目录的模型竞争）
+            let pinned = self.priority_of(&m.id) >= 3;
+            if !input.active.is_empty() && !input.active.contains(&m.id) && !big_ctx && !pinned {
                 filtered.push(FilteredOut {
                     model: m.id.clone(),
                     cause: "inactive (enable it in Dashboard → 模型标签卡；启用会顶掉最低分)".into(),
@@ -606,14 +659,17 @@ impl Engine {
             // down, fail fast so the caller backs off.
             let now_be = now_epoch_ms();
             let cat = self.catalog.read().map(|c| c.models.clone()).unwrap_or_default();
+            // 用户 Off 裁决在绝境里依然成立：best-effort 只救"没被手动停用"的
+            // 模型——全部 Off 时宁可失败（用户明确不启用 = 不可越过的红线）
             let best = cat
                 .iter()
                 .filter(|m| m.context_window.is_some())
+                .filter(|m| self.priority_of(&m.id) > -3)
                 .filter(|m| {
                     model_available(input.health, &m.id, now_be)
                 })
                 .max_by_key(|m| m.context_window.unwrap())
-                .or_else(|| cat.first());
+                .or_else(|| cat.iter().find(|m| self.priority_of(&m.id) > -3));
             let Some(best) = best else {
                 return self.finish(
                     "none".into(),
@@ -692,6 +748,11 @@ impl Engine {
                 let keep: Vec<ModelRecord> = candidates
                     .iter()
                     .filter(|m| {
+                        // Pinned（provider内必使用）：provider 已过健康/配额闸，
+                        // 价位层不让步于用户裁决——强制放行参与竞争
+                        if self.priority_of(&m.id) >= 3 {
+                            return true;
+                        }
                         let t = input.price_tier_of.get(&m.id).copied().unwrap_or(1);
                         if t <= max_tier {
                             return true;
@@ -828,6 +889,18 @@ impl Engine {
                 // 任务）。幅度刻意很小（PLAN_QUOTA_BONUS），明显更优的按量模型仍胜出。
                 let headroom = 1.0 - (pressure / soft.max(0.01)).clamp(0.0, 1.0);
                 s.score *= 1.0 + scoring::PLAN_QUOTA_BONUS * headroom;
+            }
+        }
+        // 用户优先级档位（全局最高优先）：加性带距（PRIORITY_BAND_STEP/档）
+        // 远超公式分差与 Thompson 扰动（±3%）——跨档档位定胜负，同档内公式
+        // 照常竞争。Off(-3) 已在候选过滤段剔除，此处只见 -2..+3
+        if let Ok(po) = self.priority_overlay.read()
+            && !po.is_empty()
+        {
+            for s in scores.iter_mut() {
+                if let Some(b) = po.get(&s.model_id) {
+                    s.score += PRIORITY_BAND_STEP * (*b as f32);
+                }
             }
         }
         scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
@@ -2037,3 +2110,160 @@ fn sample_gamma(shape: f32, rand: &mut impl FnMut() -> f64) -> f32 {
     }
 }
 
+
+#[cfg(test)]
+mod priority_tests {
+    use super::tests::{catalog3, det_policy, digest, input};
+    use super::*;
+    use std::collections::HashSet;
+
+    fn engine() -> Engine {
+        Engine::new(catalog3(), det_policy(), Box::new(crate::heuristic::HeuristicJudge))
+    }
+
+    /// Off（-3）：自动路由永不选中，filtered 必须解释原因；清除后恢复默认
+    #[test]
+    fn priority_off_removes_model_from_routing() {
+        let e = engine();
+        let d = digest("你好");
+        // 基线：默认公式选 mini（最便宜）
+        assert_eq!(e.decide(input("你好", 500, &d, None, &HealthMap::new())).chosen, "mini");
+        e.set_priority_override("mini", Some(-3));
+        let dec = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
+        assert_ne!(dec.chosen, "mini");
+        assert!(
+            dec.filtered.iter().any(|f| f.model == "mini" && f.cause.contains("Off")),
+            "filtered must explain the removal: {:?}",
+            dec.filtered.iter().map(|f| (&f.model, &f.cause)).collect::<Vec<_>>()
+        );
+        // 清除覆盖 → 恢复默认行为
+        e.set_priority_override("mini", None);
+        assert_eq!(e.decide(input("你好", 500, &d, None, &HealthMap::new())).chosen, "mini");
+        assert_eq!(e.priority_of("mini"), 0);
+    }
+
+    /// 任意正档位压过公式最优（全局最高优先）；同档内公式序照常决定
+    #[test]
+    fn priority_band_dominates_formula_within_and_across_bands() {
+        let e = engine();
+        let d = digest("你好");
+        // +1（Higher）即足以让最贵的 frontier 赢下默认 mini
+        e.set_priority_override("frontier", Some(1));
+        let dec = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
+        assert_eq!(dec.chosen, "frontier", "band +1 must dominate: {}", dec.reason);
+        // standard 与 frontier 同为 +1：同档内公式序恢复——standard 更便宜更快
+        e.set_priority_override("standard", Some(1));
+        let dec2 = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
+        assert_eq!(
+            dec2.scored.first().map(|s| s.model_id.as_str()),
+            Some("standard"),
+            "within the same band the formula order must decide: {:?}",
+            dec2.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
+        );
+        // 更高档位再次越过同档：frontier 提到 +2 → 回到第一
+        e.set_priority_override("frontier", Some(2));
+        let dec3 = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
+        assert_eq!(dec3.chosen, "frontier");
+    }
+
+    /// Pinned（+3）：无视活跃组合强制入池并赢下竞争
+    #[test]
+    fn pinned_forces_entry_into_candidate_pool() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let active: HashSet<String> = ["mini".to_string()].into_iter().collect();
+        // 基线：组合外模型被 inactive 挡掉
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.active = &active;
+        assert!(e.decide(inp).filtered.iter().any(|f| f.model == "frontier" && f.cause.starts_with("inactive")));
+        // pin 后：入池 + 胜出
+        e.set_priority_override("frontier", Some(3));
+        let mut inp2 = input("你好", 500, &d, None, &h);
+        inp2.active = &active;
+        let dec = e.decide(inp2);
+        assert_eq!(dec.chosen, "frontier", "pinned must bypass the portfolio: {}", dec.reason);
+        assert!(!dec.filtered.iter().any(|f| f.model == "frontier" && f.cause.starts_with("inactive")));
+    }
+
+    /// Pinned 绕过 S2 价位层硬闸（provider 已过健康/配额闸后不让价位让步于用户裁决）
+    #[test]
+    fn pinned_bypasses_price_tier_gate() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let tiers: HashMap<String, u8> = [
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        // 简单任务 max_tier=0：frontier 被价位闸挡下
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.price_tier_of = &tiers;
+        let dec = e.decide(inp);
+        assert!(
+            dec.filtered.iter().any(|f| f.model == "frontier" && f.cause.contains("price tier")),
+            "baseline must gate frontier by price tier: {:?}",
+            dec.filtered.iter().map(|f| (&f.model, &f.cause)).collect::<Vec<_>>()
+        );
+        // pin 后：强制放行并胜出
+        e.set_priority_override("frontier", Some(3));
+        let mut inp2 = input("你好", 500, &d, None, &h);
+        inp2.price_tier_of = &tiers;
+        assert_eq!(e.decide(inp2).chosen, "frontier");
+    }
+
+    /// 粘住的模型被设为 Off 时立即断粘（重评估走新档位）
+    #[test]
+    fn sticky_reuse_breaks_on_off() {
+        let e = engine();
+        let d = digest("你好");
+        let mk = || StickyState {
+            chosen: "mini".into(),
+            est_tokens_band: crate::tokens::tokens_band(600),
+            turns_left: 3,
+            tools_sig: 0,
+            domain: Domain::Chitchat,
+            difficulty: 0.5,
+            flags: JudgmentFlags::default(),
+            est_tokens: 600,
+        };
+        // 基线：粘性复用生效
+        assert!(e.decide(input("你好", 620, &d, Some(mk()), &HealthMap::new())).sticky);
+        // Off 后：断粘重评估，且不再选 mini
+        e.set_priority_override("mini", Some(-3));
+        let dec = e.decide(input("你好", 620, &d, Some(mk()), &HealthMap::new()));
+        assert!(!dec.sticky, "sticky must break when the model is Off: {}", dec.reason);
+        assert_ne!(dec.chosen, "mini");
+    }
+
+    /// 绝境 best-effort（全候选冷却 → 最大窗口兜底）也不得选用 Off 模型——
+    /// 用户"不启用"是红线，全灭时宁可失败（2026-10-26 实证：Off 模型曾被
+    /// best-effort 捞回 tried 链）
+    #[test]
+    fn best_effort_respects_off() {
+        let e = engine();
+        let d = digest("你好");
+        let mut h = HealthMap::new();
+        // 三个模型全部冷却 → 主候选链空 → 引擎走 best-effort 最大窗口兜底
+        for id in ["mini", "standard", "frontier"] {
+            h.insert(
+                id.to_string(),
+                crate::types::HealthEntry {
+                    kind: crate::types::HealthKind::Transient,
+                    message: "transport error".into(),
+                    until_epoch_ms: Some(u64::MAX),
+                    hits: 1,
+                    updated_at: 0,
+                },
+            );
+        }
+        // frontier 与 standard 都 Off：best-effort 只能落到未 Off 的 mini
+        e.set_priority_override("frontier", Some(-3));
+        e.set_priority_override("standard", Some(-3));
+        let dec = e.decide(input("你好", 500, &d, None, &h));
+        assert_eq!(dec.chosen, "mini", "best-effort must not pick an Off model: {}", dec.reason);
+    }
+}

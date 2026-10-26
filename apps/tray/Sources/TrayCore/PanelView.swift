@@ -482,7 +482,12 @@ public struct PanelView: View {
                 }
                 .frame(height: providersScrollH)
                 // model 的标签示例放在 models 下面（不在面板底部再占一行）
-                if state.statWindowToday { modelTagLegend }
+                if state.statWindowToday {
+                    VStack(alignment: .leading, spacing: 2) {
+                        modelTagLegend
+                        prioLegend
+                    }
+                }
             } else {
                 let provs = state.providers
                 ScrollView(.vertical, showsIndicators: true) {
@@ -547,6 +552,7 @@ public struct PanelView: View {
                     Text(m.id)
                         .font(.system(size: 11, weight: .medium))
                         .lineLimit(1)
+                    prioControl(m)
                     Spacer(minLength: 4)
                     // 报错状态（与 Provider 行同构：状态右对齐）：
                     // 不可用（no-key/removed） > 冷却中 > 失败率
@@ -997,6 +1003,77 @@ public struct PanelView: View {
     }
 
     /// 模型标签的图例（capability/price）——放在 Model 列表**下面**（用户裁决 2026-10-17）
+    /// 优先级控制：色点（当前档位）+ ▲▼ 微型步进。与 Web dashboard 写同一
+    /// /api/priority、读同一 /api/model-tags——双入口同源同步
+    private func prioControl(_ m: ModelRow) -> some View {
+        let level = state.modelTagMap[m.id]?.priority ?? 0
+        return HStack(spacing: 2) {
+            Circle()
+                .fill(Self.prioColor(level))
+                .frame(width: 6, height: 6)
+                .help(t("prio_" + Self.prioKeyName(level)))
+            VStack(spacing: 0) {
+                Button {
+                    state.setPriority(model: m.id, level: min(3, level + 1))
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 6, weight: .bold))
+                        .frame(width: 9, height: 6)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(level >= 3 ? .clear : .secondary)
+                .disabled(level >= 3)
+                Button {
+                    state.setPriority(model: m.id, level: max(-3, level - 1))
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 6, weight: .bold))
+                        .frame(width: 9, height: 6)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(level <= -3 ? .clear : .secondary)
+                .disabled(level <= -3)
+            }
+            .help(t("prio_help"))
+        }
+    }
+
+    static func prioColor(_ l: Int) -> Color {
+        switch l {
+        case -3: return Color.gray
+        case -2: return Color.purple
+        case -1: return Color.blue
+        case 1: return Color.teal
+        case 2: return Color.orange
+        case 3: return Color.green
+        default: return Color.secondary.opacity(0.35)  // 0 = 不干预（浅色空心感）
+        }
+    }
+
+    static func prioKeyName(_ l: Int) -> String {
+        l < 0 ? "m\(-l)" : (l == 0 ? "0" : "p\(l)")
+    }
+
+    /// 优先级图例：只列**当前有模型在用**的非默认档（省占位；无自定义时不显示）
+    private var prioLegend: some View {
+        let levels = Set(state.modelTagMap.values.map(\.priority)).filter { $0 != 0 }.sorted()
+        return Group {
+            if !levels.isEmpty {
+                HStack(spacing: 7) {
+                    ForEach(levels, id: \.self) { l in
+                        HStack(spacing: 3) {
+                            Circle().fill(Self.prioColor(l)).frame(width: 6, height: 6)
+                            Text(t("prio_" + Self.prioKeyName(l))).foregroundStyle(.tertiary)
+                        }
+                    }
+                }
+                .font(.system(size: 8.5))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            }
+        }
+    }
+
     private var modelTagLegend: some View {
         HStack(spacing: 7) {
             legendItem(Self.tagColorCap, "capability")

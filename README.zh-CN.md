@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-  <a href="#开发"><img src="https://img.shields.io/badge/tests-314%20passing-brightgreen.svg" alt="Tests"></a>
+  <a href="#开发"><img src="https://img.shields.io/badge/tests-324%20passing-brightgreen.svg" alt="Tests"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-stable-orange.svg" alt="Rust"></a>
 </p>
 
@@ -349,6 +349,8 @@ evo-router service install                                  # LaunchAgent：star
 **负载基准**（`bench-load`）：对运行中的网关做并发扫描，输出吞吐–单用户速度权衡曲线（TokenRouter 式服务效率评价范式），附 TTFT p50/p95、质量级联与兜底换手计数。计数口径：输出 token 优先取上游 `usage`（缺失时按正文长度 ÷ 4 估算）；**流中出现顶层 `error` 帧即判失败**——网关截断注入帧与上游错误帧的 HTTP 状态已发出无法更改，error 帧是客户端侧唯一失败信号；并发按有效值上报（受请求数封顶）。落盘 `result.csv` + `summary.json`，`--slo` 标出仍满足单用户速度要求的最大并发档。与隐藏的 `mock-upstream` 子命令组合可做无真实上游的端到端演练；个别 provider 对 `stream_options` 回 400 时改用 `--no-stream`。
 
 **阈值标定**（`backtest --gate-sweep` / `--gate-replay`）：不手拍 `confidence_gate`——在真实事件上回放。`--gate-sweep` 按候选值确定性重算探索门控（灵敏度预览）；`--gate-replay` 进一步做反事实 chosen 模拟——区制感知：候选 gate 封锁的事件精确还原为公式 top1（Thompson 采样只改写选择、不改记录的公式序），双向允许的事件用实际结果作无偏样本，封锁→放开区随机不可算、诚实排除。逐档输出质量 proxy（0.7·成功率 + 0.3·速度归一，与飞轮同式）、PGR、封锁档改写率（多少封锁决策会翻回公式 top1，分母只含封锁档计分事件）与采纳提示（随机排除占比 ≥20% 时拒绝下结论）；任何变更仍须以新流量通过标准 A/B 裁决。
+
+**模型优先级**（Dashboard → 模型标签卡，或菜单栏面板）：每个模型 7 档优先级——`不启用 → 低优先级 → 较低优先级 → 不干预 → 较高优先级 → 高优先级 → provider内必使用`——在模型名后用 ▲▼ 步进钮调节，色点标记档位，列表下方图例说明。优先级**全局最高**：`必使用` 的模型只要 provider 健康（无网络/配额/余额故障）就强制进入候选集（绕过活跃组合与价位闸）并赢下公式竞争——同 provider 唯一，旧 pin 自动降档；负档位只作末位兜底；`不启用` 的模型永不参与自动路由（显式指定仍可用）。只有不可抗拒力（provider 网络/配额/计费故障、窗口硬约束）能越过它。面板与 Web 写同一份 `overrides.json`，经它同步，重启依然生效。
 
 **入站会话识别（零插件）**：网关直接读 agent 已在发的头——opencode 原生 `x-opencode-session-id`（v2.0.3x）/ 旧版 `x-opencode-session`、codex 的 `session_id`、claude-code `metadata.user_id` 的会话尾段、通用 `x-session-id`。什么都不发的 agent 也能正确分组：LLM 对话是追加式的（上一轮消息数组是下一轮的前缀），网关用**前缀链匹配**重建会话——不改客户端就得到跨轮稳定的会话 id。历史压缩（compaction）改写过去，诚实开新组。
 

@@ -174,6 +174,9 @@ public struct ModelTagInfo: Equatable {
     public let priceTier: String
     /// nil = 可用；否则是服务端给的原因（no-key / deleted）
     public let unusableReason: String?
+    /// 用户优先级档位（-3 Off … +3 Pinned；0 = 不干预）——/api/model-tags 下发，
+    /// 与 Web dashboard 同源（overrides.json）
+    public let priority: Int
 }
 
 public struct ModelRow: Identifiable, Equatable {
@@ -538,7 +541,8 @@ public final class AppState: ObservableObject {
                         capability: (m["capability"] as? String) ?? "",
                         priceTier: (m["price_tier"] as? String) ?? "",
                         unusableReason: ((m["usable"] as? Bool) == false)
-                            ? ((m["unusable_reason"] as? String) ?? "unusable") : nil)
+                            ? ((m["unusable_reason"] as? String) ?? "unusable") : nil,
+                        priority: (m["priority"] as? Int) ?? 0)
                 }
                 put(\.modelTagMap, \.modelTagMap, tm)
             }
@@ -846,5 +850,29 @@ public final class AppState: ObservableObject {
         }
         let (data, resp) = try await URLSession.shared.data(from: url)
         return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
+    }
+
+    private func post(_ path: String, body: [String: Any]) async throws -> (Int, Data) {
+        guard let url = URL(string: Config.baseURL + path),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else {
+            throw URLError(.badURL)
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "content-type")
+        req.httpBody = payload
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
+    }
+
+    /// 设置模型优先级档位（-3 Off … +3 Pinned）。面板与 Web dashboard 共用
+    /// 服务端同一份 overrides.json——写完立即回读 model-tags，双入口同步；
+    /// 持久化在网关侧，重启重放生效
+    public func setPriority(model: String, level: Int) {
+        guard (-3...3).contains(level) else { return }
+        Task {
+            let _ = try? await post("/api/priority", body: ["model": model, "level": level])
+            await pollData()
+        }
     }
 }

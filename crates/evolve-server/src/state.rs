@@ -231,6 +231,10 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
     for (id, w) in &ov.models {
         engine.set_weight_override(id, Some(*w));
     }
+    // 用户优先级档位（-3 Off … +3 Pinned）——路由最高优先干预
+    for (id, lvl) in &ov.priorities {
+        engine.set_priority_override(id, Some(*lvl));
+    }
     if let Some(w) = ov.weights {
         engine.set_weights_override(Some(evolve_core::types::PolicyWeights {
             quality: w[0], speed: w[1], cost: w[2], stability: w[3], headroom: w[4],
@@ -1407,6 +1411,7 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/providers/reconcile", axum::routing::post(crate::meta::api_providers_reconcile))
         .route("/api/health/clear", axum::routing::post(crate::meta::api_health_clear))
         .route("/api/model-tags", axum::routing::get(crate::meta::api_model_tags_get).post(crate::meta::api_model_tags_post))
+        .route("/api/priority", axum::routing::post(crate::meta::api_priority_set))
         .route("/api/report", axum::routing::get(crate::meta::api_report))
         .route("/api/models/active", axum::routing::post(crate::meta::api_models_active))
         .route("/api/onboarding", axum::routing::get(crate::meta::api_onboarding))
@@ -1466,6 +1471,11 @@ pub struct Overrides {
     /// ——默认自动推导（tags::default_tags），此处仅存用户显式修改
     #[serde(default)]
     pub model_tags: HashMap<String, TagOverride>,
+    /// 用户优先级档位（2026-10）：model_id → -3(Off)…+3(Pinned)，0 = 不干预
+    /// 不存。路由最高优先干预：跨档带距定胜负（PRIORITY_BAND_STEP）；Pinned
+    /// 同 provider 唯一（重复设置时旧 pin 自动降为 +2，服务端保证）
+    #[serde(default)]
+    pub priorities: HashMap<String, i8>,
 }
 
 /// 活跃集覆盖
@@ -1560,5 +1570,38 @@ pub fn save_overrides(data_dir: &str, o: &Overrides) {
         let path = overrides_path(data_dir);
         evolve_core::config::ensure_parent(&path);
         let _ = std::fs::write(path, t);
+    }
+}
+
+#[cfg(test)]
+mod priority_persistence_tests {
+    use super::*;
+
+    /// priorities 随 overrides.json 持久化 + 重放：save → load 往返一致，
+    /// 热重放到 engine 后 priority_of 生效（重启生效语义）
+    #[test]
+    fn priorities_round_trip_through_overrides_json() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut ov = load_overrides(dir.to_str().unwrap());
+        ov.priorities.insert("zhipu-glm".into(), 3);
+        ov.priorities.insert("minimax-ab".into(), -3);
+        save_overrides(dir.to_str().unwrap(), &ov);
+
+        let back = load_overrides(dir.to_str().unwrap());
+        assert_eq!(back.priorities.get("zhipu-glm"), Some(&3));
+        assert_eq!(back.priorities.get("minimax-ab"), Some(&-3));
+
+        // 启动重放路径（state.rs 构建处同式）：写入 engine overlay 后热读一致
+        let e = evolve_core::engine::Engine::new(
+            evolve_core::catalog::Catalog::from_records(vec![]),
+            evolve_core::config::PolicyCfg::default(),
+            Box::new(evolve_core::heuristic::HeuristicJudge),
+        );
+        for (id, lvl) in &back.priorities {
+            e.set_priority_override(id, Some(*lvl));
+        }
+        assert_eq!(e.priority_of("zhipu-glm"), 3);
+        assert_eq!(e.priority_of("minimax-ab"), -3);
+        assert_eq!(e.priority_of("unset"), 0, "no override = neutral");
     }
 }
