@@ -769,9 +769,9 @@ pub async fn api_weight(
     let w = (w as f32).clamp(0.2, 3.0);
     st.engine.set_weight_override(&model, Some(w));
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    ov.models.insert(model.clone(), w);
-    crate::state::save_overrides(dir, &ov);
+    crate::state::update_overrides(dir, |ov| {
+        ov.models.insert(model.clone(), w);
+    });
     (axum::Json(json!({"status": "ok", "model": model, "weight": w}))).into_response()
 }
 
@@ -793,30 +793,38 @@ pub async fn api_priority_set(
     if !(-3..=3).contains(&level) {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "level must be within -3..3"}}))).into_response();
     }
+    if !(-3..=3).contains(&level) {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "level must be within -3..3"}}))).into_response();
+    }
+    // 幽灵条目防御：目录里不存在的模型不落盘（模型已删除/拼错的 id 一律拒绝）
+    let snap = st.engine.catalog_snapshot();
+    let Some(record) = snap.iter().find(|m| m.id == model).cloned() else {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": format!("model {model} is not in the catalog")}}))).into_response();
+    };
     // 同 provider 旧 Pinned 降档（level==3 时执行；level 以外的值不触碰他人）
     let mut demoted: Vec<Value> = Vec::new();
     if level == 3 {
-        let snap = st.engine.catalog_snapshot();
         demoted = demote_other_provider_pins(&st.engine, &snap, &model);
     }
     st.engine.set_priority_override(&model, if level == 0 { None } else { Some(level) });
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    if level == 0 {
-        ov.priorities.remove(&model);
-    } else {
-        ov.priorities.insert(model.clone(), level);
-    }
-    // 旧 Pinned 降档同样落盘（重启重放才一致）
-    for d in &demoted {
-        if let (Some(id), Some(to)) = (d.get("model").and_then(|v| v.as_str()), d.get("to").and_then(|v| v.as_i64())) {
-            ov.priorities.insert(id.to_string(), to as i8);
+    crate::state::update_overrides(dir, |ov| {
+        if level == 0 {
+            ov.priorities.remove(&model);
+        } else {
+            ov.priorities.insert(model.clone(), level);
         }
-    }
-    crate::state::save_overrides(dir, &ov);
+        // 旧 Pinned 降档同样落盘（重启重放才一致）
+        for d in &demoted {
+            if let (Some(id), Some(to)) = (d.get("model").and_then(|v| v.as_str()), d.get("to").and_then(|v| v.as_i64())) {
+                ov.priorities.insert(id.to_string(), to as i8);
+            }
+        }
+    });
     (axum::Json(json!({
         "status": "ok",
         "model": model,
+        "provider": record.provider,
         "level": level,
         "demoted": demoted,
     }))).into_response()
@@ -901,12 +909,12 @@ pub async fn api_policy_weights_set(
     }
     st.engine.set_weights_override(Some(w.clone()));
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    ov.weights = Some([
-        w.quality, w.speed, w.cost, w.stability, w.headroom,
-    ]);
     let normalized = w.normalized();
-    crate::state::save_overrides(dir, &ov);
+    crate::state::update_overrides(dir, |ov| {
+        ov.weights = Some([
+            w.quality, w.speed, w.cost, w.stability, w.headroom,
+        ]);
+    });
     (
         axum::Json(json!({
             "status": "ok",
@@ -2101,23 +2109,23 @@ pub async fn api_model_tags_post(
     let Some(model) = body.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
     };
-    let mut ov = crate::state::load_overrides(&dir);
     let reset = body.get("reset").and_then(|v| v.as_bool()).unwrap_or(false);
-    if reset {
-        ov.model_tags.remove(&model);
-    } else {
-        let e = ov.model_tags.entry(model.clone()).or_default();
-        if let Some(c) = body.get("capability").and_then(|v| v.as_str()) {
-            e.capability = if c.is_empty() { None } else { Some(c.to_string()) };
-        }
-        if let Some(p) = body.get("price_tier").and_then(|v| v.as_str()) {
-            e.price_tier = if p.is_empty() { None } else { Some(p.to_string()) };
-        }
-        if e.capability.is_none() && e.price_tier.is_none() {
+    crate::state::update_overrides(&dir, |ov| {
+        if reset {
             ov.model_tags.remove(&model);
+        } else {
+            let e = ov.model_tags.entry(model.clone()).or_default();
+            if let Some(c) = body.get("capability").and_then(|v| v.as_str()) {
+                e.capability = if c.is_empty() { None } else { Some(c.to_string()) };
+            }
+            if let Some(p) = body.get("price_tier").and_then(|v| v.as_str()) {
+                e.price_tier = if p.is_empty() { None } else { Some(p.to_string()) };
+            }
+            if e.capability.is_none() && e.price_tier.is_none() {
+                ov.model_tags.remove(&model);
+            }
         }
-    }
-    crate::state::save_overrides(&dir, &ov);
+    });
     (axum::Json(json!({"status": "ok", "model": model}))).into_response()
 }
 
@@ -2300,15 +2308,15 @@ pub async fn api_models_active(
     let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("enable");
     let dir = st.config.data.dir.clone();
     let (before, _) = active_models(&st); // 变更前快照
-    let mut ov = crate::state::load_overrides(&dir);
-    ov.active_models.include.retain(|m| m != &model);
-    ov.active_models.exclude.retain(|m| m != &model);
-    match action {
-        "enable" => ov.active_models.include.push(model.clone()),
-        "disable" => ov.active_models.exclude.push(model.clone()),
-        _ => {} // auto：回到默认排序
-    }
-    crate::state::save_overrides(&dir, &ov);
+    crate::state::update_overrides(&dir, |ov| {
+        ov.active_models.include.retain(|m| m != &model);
+        ov.active_models.exclude.retain(|m| m != &model);
+        match action {
+            "enable" => ov.active_models.include.push(model.clone()),
+            "disable" => ov.active_models.exclude.push(model.clone()),
+            _ => {} // auto：回到默认排序
+        }
+    });
     let (active, _ranked) = active_models(&st);
     // 真实被顶者 = 变更前有、变更后没有（不是"幸存者里最低分"——见评审 #4）
     let after: std::collections::HashSet<&String> = active.iter().collect();
@@ -2731,9 +2739,8 @@ pub async fn api_providers_set(
     let text = |k: &str| body.get(k).and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let num = |k: &str| body.get(k).and_then(|v| v.as_f64());
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
     let mut base_url_changed = false;
-    {
+    let (needs_fetch, fetch_base, fetch_key) = crate::state::update_overrides(dir, |ov| {
         let entry = ov.providers.entry(key.clone()).or_default();
         if let Some(u) = text("base_url") {
             base_url_changed = entry.base_url != u;
@@ -2765,22 +2772,16 @@ pub async fn api_providers_set(
         if let Some(v) = num("window_weekly") { entry.window_weekly = Some(v); }
         if let Some(v) = num("window_monthly") { entry.window_monthly = Some(v); }
         if let Some(v) = body.get("disabled").and_then(|v| v.as_bool()) { entry.disabled = v; }
-    }
-    crate::state::save_overrides(dir, &ov);
-    // baseUrl 新增/变更 → 立即拉取 /models
+        // baseUrl 新增/变更 → 立即拉取 /models（拉取在锁外，命中后二次落盘）
+        let needs_fetch = base_url_changed || entry.fetched_models.is_empty();
+        let base = format!("{}{}", entry.base_url.trim_end_matches('/'), "/models");
+        let key_auth = entry.api_key.clone();
+        (needs_fetch, base, key_auth)
+    });
     let mut fetched = 0;
-    let needs_fetch = base_url_changed
-        || ov.providers.get(&key).map(|e| e.fetched_models.is_empty()).unwrap_or(true);
     if needs_fetch {
-        let (base, api_key) = {
-            let e = ov.providers.get(&key);
-            (
-                format!("{}{}", e.map(|e| e.base_url.trim_end_matches('/')).unwrap_or(""), "/models"),
-                e.and_then(|e| e.api_key.clone()),
-            )
-        };
-        let mut req = st.http.get(&base);
-        if let Some(k) = &api_key { req = req.bearer_auth(k); }
+        let mut req = st.http.get(&fetch_base);
+        if let Some(k) = &fetch_key { req = req.bearer_auth(k); }
         if let Ok(resp) = req.timeout(std::time::Duration::from_secs(5)).send().await
             && let Ok(v) = resp.json::<Value>().await
         {
@@ -2791,8 +2792,10 @@ pub async fn api_providers_set(
                         .collect())
                     .unwrap_or_default();
                 fetched = ids.len();
-                if let Some(e) = ov.providers.get_mut(&key) { e.fetched_models = ids; }
-                crate::state::save_overrides(dir, &ov);
+                // fetch 结果二次原子落盘（第一次提交在锁内的编辑字段已落定）
+                crate::state::update_overrides(dir, |ov| {
+                    if let Some(e) = ov.providers.get_mut(&key) { e.fetched_models = ids; }
+                });
         }
     }
     (axum::Json(json!({"status": "ok", "key": key, "fetched_models": fetched}))).into_response()
@@ -3225,26 +3228,43 @@ pub async fn api_providers_delete(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "key is required"}}))).into_response();
     };
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    // 手动 provider：软删除（disabled，面板可恢复）
-    if let Some(e) = ov.providers.get_mut(&key) {
-        e.disabled = true;
-        crate::state::save_overrides(dir, &ov);
-        (axum::Json(json!({"status": "ok", "key": key, "disabled": true}))).into_response()
-    } else if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
-        // 发现 provider：按 base_url 持久化删除（定期扫描/重启不再加回）+ 热更新目录
-        let base_url = base_url.to_string();
-        if !ov.removed_base_urls.contains(&base_url) {
-            ov.removed_base_urls.push(base_url.clone());
-            crate::state::save_overrides(dir, &ov);
+    // 手动 provider：软删除（disabled，面板可恢复）；发现 provider：按 base_url
+    // 持久化删除（定期扫描/重启不再加回）+ 热更新目录
+    enum Removed {
+        Manual,
+        Discovered { base_url: String, models: Vec<evolve_core::types::ModelRecord> },
+        NotFound,
+    }
+    let outcome = crate::state::update_overrides(dir, |ov| {
+        if ov.providers.contains_key(&key) {
+            if let Some(e) = ov.providers.get_mut(&key) {
+                e.disabled = true;
+            }
+            Removed::Manual
+        } else if let Some(base_url) = body.get("base_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            let base_url = base_url.to_string();
+            if !ov.removed_base_urls.contains(&base_url) {
+                ov.removed_base_urls.push(base_url.clone());
+            }
+            let models = st.engine.catalog_snapshot();
+            Removed::Discovered { base_url, models }
+        } else {
+            Removed::NotFound
         }
-        let models = st.engine.catalog_snapshot();
-        let removed = models.iter().filter(|m| m.base_url == base_url).count();
-        st.engine.replace_catalog(models.into_iter().filter(|m| m.base_url != base_url).collect());
-        tracing::info!(key = %key, base_url = %base_url, removed, "discovered provider removed");
-        (axum::Json(json!({"status": "ok", "key": key, "removed_models": removed}))).into_response()
-    } else {
-        (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": "provider not found"}}))).into_response()
+    });
+    match outcome {
+        Removed::Manual => {
+            (axum::Json(json!({"status": "ok", "key": key, "disabled": true}))).into_response()
+        }
+        Removed::Discovered { base_url, models } => {
+            let removed = models.iter().filter(|m| m.base_url == base_url).count();
+            st.engine.replace_catalog(models.into_iter().filter(|m| m.base_url != base_url).collect());
+            tracing::info!(key = %key, base_url = %base_url, removed, "discovered provider removed");
+            (axum::Json(json!({"status": "ok", "key": key, "removed_models": removed}))).into_response()
+        }
+        Removed::NotFound => {
+            (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": "provider not found"}}))).into_response()
+        }
     }
 }
 
@@ -3257,9 +3277,9 @@ pub async fn api_providers_restore(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "base_url is required"}}))).into_response();
     };
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    ov.removed_base_urls.retain(|u| u != &base_url);
-    crate::state::save_overrides(dir, &ov);
+    crate::state::update_overrides(dir, |ov| {
+        ov.removed_base_urls.retain(|u| u != &base_url);
+    });
     st.rescan_discovery();
     (axum::Json(json!({"status": "ok", "base_url": base_url}))).into_response()
 }
@@ -3273,13 +3293,17 @@ pub async fn api_providers_refresh(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "key is required"}}))).into_response();
     };
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    let Some(entry) = ov.providers.get(&key) else {
+    let fetch_ctx = crate::state::update_overrides(dir, |ov| {
+        let Some(entry) = ov.providers.get(&key) else {
+            return None;
+        };
+        Some((format!("{}{}", entry.base_url.trim_end_matches('/'), "/models"), entry.api_key.clone()))
+    });
+    let Some((base, key_auth)) = fetch_ctx else {
         return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": "provider not found"}}))).into_response();
     };
-    let base = format!("{}{}", entry.base_url.trim_end_matches('/'), "/models");
     let mut req = st.http.get(&base);
-    if let Some(k) = &entry.api_key { req = req.bearer_auth(k); }
+    if let Some(k) = &key_auth { req = req.bearer_auth(k); }
     match req.timeout(std::time::Duration::from_secs(8)).send().await {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(v) = resp.json::<Value>().await {
@@ -3290,8 +3314,10 @@ pub async fn api_providers_refresh(
                         .collect())
                     .unwrap_or_default();
                 let count = ids.len();
-                if let Some(e) = ov.providers.get_mut(&key) { e.fetched_models = ids; }
-                crate::state::save_overrides(dir, &ov);
+                // fetch 结果二次原子落盘（不再跨 await 持有整个 ov）
+                crate::state::update_overrides(dir, |ov| {
+                    if let Some(e) = ov.providers.get_mut(&key) { e.fetched_models = ids; }
+                });
                 return (axum::Json(json!({"status": "ok", "fetched": count}))).into_response();
             }
         }
@@ -3441,19 +3467,22 @@ pub async fn api_plans_set(
     };
     let text = |k: &str| body.get(k).and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let dir = &st.config.data.dir;
-    let mut ov = crate::state::load_overrides(dir);
-    {
+    crate::state::update_overrides(dir, |ov| {
         let e = ov.plans.entry(key.clone()).or_default();
         for (k, slot) in [("tier", &mut e.tier), ("scheme", &mut e.scheme), ("windows", &mut e.windows)] {
             if let Some(v) = text(k) {
                 *slot = Some(v);
             }
         }
-    }
-    crate::state::save_overrides(dir, &ov);
+    });
+    let base_url = {
+        let ov = crate::state::effective_overrides(&st);
+        ov.providers.get(&key).map(|p| p.base_url.clone()).unwrap_or_default()
+    };
     // 档位变化 → 预算额度即时更新（registry 档位表驱动）
     // provider 名不一定等于套餐注册表 key（如 opencode-go-github → opencode-go），
     // 通过 base_url 匹配注册表找到正确的 plan_key
+    let ov = crate::state::effective_overrides(&st);
     let base_url = ov.providers.get(&key).map(|p| p.base_url.clone()).unwrap_or_default();
     let plan_key = evolve_core::plans::plan_for(&base_url)
         .map(|p| p.key.to_string())

@@ -298,6 +298,8 @@ public final class AppState: ObservableObject {
     @Published public var modelRows: [ModelRow] = []
     /// 模型实时打标（/api/model-tags；id → (capability, price_tier)）
     @Published public var modelTagMap: [String: ModelTagInfo] = [:]
+    /// 优先级变更的临时提示（同 provider 旧 Pinned 自动降档）——显示数秒自动清除
+    @Published public var priorityNotice: String?
     /// 模型级健康冷却（/api/health）：model → 冷却态（原因 + 是否账户级）
     @Published public var modelCooling: [String: ModelCoolState] = [:]
 
@@ -867,11 +869,22 @@ public final class AppState: ObservableObject {
 
     /// 设置模型优先级档位（-3 Off … +3 Pinned）。面板与 Web dashboard 共用
     /// 服务端同一份 overrides.json——写完立即回读 model-tags，双入口同步；
-    /// 持久化在网关侧，重启重放生效
+    /// 持久化在网关侧，重启重放生效。同 provider 旧 Pinned 被自动降档时
+    /// （响应 demoted 非空）给一条数秒可见的提示
     public func setPriority(model: String, level: Int) {
         guard (-3...3).contains(level) else { return }
         Task {
-            let _ = try? await post("/api/priority", body: ["model": model, "level": level])
+            if case (200, let data)? = try? await post("/api/priority", body: ["model": model, "level": level]),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let demoted = obj["demoted"] as? [[String: Any]],
+               !demoted.isEmpty {
+                let names = demoted.compactMap { $0["model"] as? String }.joined(separator: ", ")
+                upd(\.priorityNotice, String(format: t("prio_demoted"), names))
+                Task {
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                    upd(\.priorityNotice, nil)
+                }
+            }
             await pollData()
         }
     }

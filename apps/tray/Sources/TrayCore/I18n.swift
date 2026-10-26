@@ -73,6 +73,7 @@ let T: [String: String] = [
     "prio_p2": "Highest",
     "prio_p3": "Pinned (per provider)",
     "prio_help": "Model priority — your call, globally highest. Only force majeure (provider network/quota/billing) overrides it. Pinned is unique per provider; the previous pin auto-demotes.",
+    "prio_demoted": "Previous pinned model(s) in this provider auto-demoted to Highest: %@",
 ]
 
 public func t(_ key: String) -> String {

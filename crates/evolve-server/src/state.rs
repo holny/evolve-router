@@ -1558,6 +1558,21 @@ pub fn overrides_path(data_dir: &str) -> std::path::PathBuf {
     evolve_core::config::state_file(data_dir, "overrides.json")
 }
 
+/// overrides.json 读-改-写的**串行锁**：写端（权重/档位/标签/provider 编辑等
+/// 12 处）都是 load→mutate→save 整文件覆盖，并发时互相吞更新——所有读改写
+/// 必须走 [`update_overrides`]，禁止裸调 load_overrides+save_overrides 组合
+static OVERRIDES_IO: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 串行化的读-改-写：锁内 load → 执行闭包改动 → save；返回闭包的返回值。
+/// 闭包内不要做耗时/阻塞 IO（持锁）——只改 Overrides 字段
+pub fn update_overrides<T>(data_dir: &str, f: impl FnOnce(&mut Overrides) -> T) -> T {
+    let _g = OVERRIDES_IO.lock().unwrap_or_else(|p| p.into_inner());
+    let mut ov = load_overrides(data_dir);
+    let out = f(&mut ov);
+    save_overrides(data_dir, &ov);
+    out
+}
+
 pub fn load_overrides(data_dir: &str) -> Overrides {
     std::fs::read_to_string(overrides_path(data_dir))
         .ok()
@@ -1603,5 +1618,22 @@ mod priority_persistence_tests {
         assert_eq!(e.priority_of("zhipu-glm"), 3);
         assert_eq!(e.priority_of("minimax-ab"), -3);
         assert_eq!(e.priority_of("unset"), 0, "no override = neutral");
+    }
+
+    /// update_overrides 串行读-改-写：两次连续更新互不覆盖（此前裸
+    /// load+save 组合在并发写端下会整文件互相吞）
+    #[test]
+    fn update_overrides_serializes_read_modify_write() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        update_overrides(dir.to_str().unwrap(), |ov| {
+            ov.priorities.insert("a".into(), 3);
+        });
+        // 第二次更新必须看到第一次的结果（同一锁内 load）
+        update_overrides(dir.to_str().unwrap(), |ov| {
+            ov.priorities.insert("b".into(), -3);
+        });
+        let back = load_overrides(dir.to_str().unwrap());
+        assert_eq!(back.priorities.get("a"), Some(&3), "first update must survive the second");
+        assert_eq!(back.priorities.get("b"), Some(&-3));
     }
 }

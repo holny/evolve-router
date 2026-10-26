@@ -796,7 +796,12 @@ impl Engine {
         let floor = scoring::quality_floor(difficulty_eff);
         let mut eligible: Vec<ModelRecord> = Vec::new();
         for m in &candidates {
-            if scoring::quality(m, &j, difficulty_eff) >= floor {
+            // 用户裁决：正档位（+1 Higher 及以上）高于质量 floor——网关侧判定
+            // 不越过用户主动抬的优先级（弱模型被抬高是用户的主动选择，难任务
+            // 照用）；负档位/不干预保持 floor（质量底线仍保护未被抬高的路由）。
+            // 只有 provider 网络/配额/窗口等不可抗力能拦正档位模型
+            let band = self.priority_of(&m.id);
+            if band >= 1 || scoring::quality(m, &j, difficulty_eff) >= floor {
                 eligible.push(m.clone());
             }
         }
@@ -2239,6 +2244,55 @@ mod priority_tests {
         assert_ne!(dec.chosen, "mini");
     }
 
+    /// Pinned 高于质量 floor（用户裁决：档位 > 网关侧判定）：弱模型被 pin 后
+    /// 即使难任务也必须进入候选并赢下竞争——只有不可抗力（provider 网络/
+    /// 配额/窗口）能拦它。锚点：难度 2 → floor=0.733，mini quality≈0.43 被
+    /// 滤、frontier≈0.89 过（难度 3 时三者全灭会走"清空则回填"分支，锚不了）
+    #[test]
+    fn pinned_bypasses_quality_floor() {
+        struct HardJudge;
+        impl Judge for HardJudge {
+            fn judge(&self, _f: &RequestFeatures, _d: &DigestSignals, _h: &str) -> JudgmentSet {
+                JudgmentSet {
+                    domain: Domain::Code,
+                    domain_confidence: 0.99,
+                    difficulty: 2.0,
+                    difficulty_confidence: 0.99,
+                    is_trivial: 0.0,
+                    tool_heavy: 0.0,
+                    needs_vision: 0.0,
+                    high_stakes: 0.0,
+                    session_relevance: 1.0,
+                    session_depth: 0.0,
+                    route_recommendation: None,
+                    route_recommendation_confidence: 0.0,
+                    judge_source: JudgeSource::Test,
+                }
+            }
+        }
+        let mut e = Engine::new(catalog3(), det_policy(), Box::new(HardJudge));
+        // 关掉难度经验分位校准——否则恒定 2.0 会被归一化到低分位，floor 锚点失真
+        e.set_difficulty_calibration(false, [0.7, 0.2, 0.1]);
+        let d = digest("refactor the payment pipeline");
+        let h = HealthMap::new();
+        // 基线：mini 被 floor 滤掉，只有 frontier 入池
+        let dec = e.decide(input("refactor the payment pipeline", 20_000, &d, None, &h));
+        assert!(
+            !dec.scored.iter().any(|s| s.model_id == "mini"),
+            "baseline: mini must fail the quality floor: {:?}",
+            dec.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
+        );
+        // pin mini（+1 档）：floor 被绕过、band 加成让它直接赢下竞争
+        e.set_priority_override("mini", Some(1));
+        let dec2 = e.decide(input("refactor the payment pipeline", 20_000, &d, None, &h));
+        assert!(
+            dec2.scored.iter().any(|s| s.model_id == "mini"),
+            "pinned model must enter the pool past the floor: {:?}",
+            dec2.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
+        );
+        assert_eq!(dec2.chosen, "mini", "band +1 must beat band 0 (frontier): {}", dec2.reason);
+    }
+
     /// 绝境 best-effort（全候选冷却 → 最大窗口兜底）也不得选用 Off 模型——
     /// 用户"不启用"是红线，全灭时宁可失败（2026-10-26 实证：Off 模型曾被
     /// best-effort 捞回 tried 链）
@@ -2267,3 +2321,4 @@ mod priority_tests {
         assert_eq!(dec.chosen, "mini", "best-effort must not pick an Off model: {}", dec.reason);
     }
 }
+

@@ -486,6 +486,7 @@ public struct PanelView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         modelTagLegend
                         prioLegend
+                        prioNotice
                     }
                 }
             } else {
@@ -1070,6 +1071,19 @@ public struct PanelView: View {
                 .font(.system(size: 8.5))
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
+            }
+        }
+    }
+
+    /// 降档提示（同 provider 旧 Pinned 被自动降档时，数秒后自动清除）
+    private var prioNotice: some View {
+        Group {
+            if let n = state.priorityNotice {
+                Text(n)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
             }
         }
     }
