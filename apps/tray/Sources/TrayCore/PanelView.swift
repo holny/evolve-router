@@ -1039,16 +1039,17 @@ public struct PanelView: View {
         }
     }
 
-    /// 档位色阶（低→高 = 冷→暖单调）：灰 → 深蓝 → 天蓝 → 空心(不干预) →
-    /// 绿 → 橙 → 红。越暖 = 越高的优先级，Pinned 用最醒目的红
+    /// 档位色阶（低→高 = 冷→暖单调，避开橙红警示色）：灰 → 深蓝 → 天蓝 →
+    /// 空心(不干预) → 青 → 绿 → 亮黄绿。色相沿档位单调递进、亮度递增，
+    /// Pinned = 最亮的绿（"满格绿灯放行"），不与报错红/警告黄混淆
     static func prioColor(_ l: Int) -> Color {
         switch l {
         case -3: return Color.gray
         case -2: return Color.blue
         case -1: return Color.cyan
-        case 1: return Color.green
-        case 2: return Color.orange
-        case 3: return Color.red
+        case 1: return Color.teal
+        case 2: return Color.green
+        case 3: return Color(red: 0.52, green: 0.80, blue: 0.09)  // #84cc16 lime
         default: return Color.secondary.opacity(0.35)  // 0 = 不干预（浅色空心感）
         }
     }
@@ -1057,12 +1058,14 @@ public struct PanelView: View {
         l < 0 ? "m\(-l)" : (l == 0 ? "0" : "p\(l)")
     }
 
-    /// 优先级图例：只列**当前有模型在用**的非默认档（省占位；无自定义时不显示）
+    /// 优先级图例：只列**当前有模型在用**的非默认档（省占位；无自定义时不显示）。
+    /// 格式 = "Priority:" 前缀 + 多个色点标签，与 Web dashboard 同构
     private var prioLegend: some View {
         let levels = Set(state.modelTagMap.values.map(\.priority)).filter { $0 != 0 }.sorted()
         return Group {
             if !levels.isEmpty {
                 HStack(spacing: 7) {
+                    Text("Priority:").foregroundStyle(.tertiary)
                     ForEach(levels, id: \.self) { l in
                         HStack(spacing: 3) {
                             Circle().fill(Self.prioColor(l)).frame(width: 6, height: 6)

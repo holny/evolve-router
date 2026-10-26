@@ -515,6 +515,7 @@ const T = {
     es:'Prioridad de modelo: tu decisión, la más alta global — solo fuerza mayor (red/cuota/facturación del proveedor) la supera. Fijado es único por proveedor; el pin anterior baja automáticamente',
     fr:'Priorité de modèle : votre décision, la plus haute globalement — seule une force majeure (réseau/quota/facturation du fournisseur) la dépasse. Épinglé est unique par fournisseur ; le pin précédent rétrograde automatiquement'},
   prio_demoted: {zh:'同 provider 原「必使用」已自动降为「高优先级」：{m}', en:'Previous pinned model(s) in the same provider auto-demoted to Highest: {m}', ko:'같은 provider의 기존 핀 모델이 자동으로 최상 우선으로 강등됨: {m}', ja:'同provider内の旧pinを自動的に最高優先へ降格しました: {m}', es:'Modelo(s) fijado(s) anterior(es) del mismo proveedor degradados a Prioridad máxima: {m}', fr:'Pin(s) précédent(s) du même fournisseur rétrogradé(s) à Priorité maximale : {m}'},
+  prio_legend: {zh:'优先级', en:'Priority', ko:'우선순위', ja:'優先度', es:'Prioridad', fr:'Priorité'},
   p_sticky: {zh:'粘性复用', en:'sticky reuse', ko:'스티키 재사용', ja:'スティキー再利用', es:'reutilización sticky', fr:'réutilisation sticky'},
   p_sticky_hint: {zh:'粘性复用的全部条件（任一不满足即重新完整评估）：①上轮任务难度低(L1/L2) ②同会话连续 ③窗口装得下 ④服务健康 ⑤配额充足 ⑥量级双向2倍内 ⑦工具未变 ⑧轮次未耗尽(默认2轮)', en:'sticky reuse requires ALL of: previous task low-difficulty (L1/L2), same session, fits in window, service healthy, quota sufficient, size within 2x, same tools, turns remaining — otherwise full re-evaluation', ko:'스티키 재사용 전부 충족 시: 이전 작업 저난이도(L1/L2), 동일 세션, 윈도우 적합, 헬스, 쿼터, 크기 2배 내, 도구 동일, 잔여 턴 — 하나라도 불일치 시 전체 재평가', ja:'スティキー再利用の全条件（一つでも崩れると完全再評価）：前タスク低難度(L1/L2)、同一セッション、窓に収まる、ヘルス正常、クォータ十分、量級2倍内、ツール不変、残ターンあり', es:'la reutilización sticky exige TODO: tarea anterior de baja dificultad (L1/L2), misma sesión, cabe en ventana, servicio sano, cuota suficiente, tamaño dentro de 2x, mismas herramientas, turnos restantes — si no, reevaluación completa', fr:'la réutilisation sticky exige TOUT : tâche précédente de faible difficulté (L1/L2), même session, tient dans la fenêtre, service sain, quota suffisant, taille dans 2x, mêmes outils, tours restants — sinon réévaluation complète'},
   p_explore: {zh:'探索', en:'exploring', ko:'탐색', ja:'探索', es:'explorando', fr:'exploration'},
@@ -2125,7 +2126,7 @@ document.getElementById('pv-scan-btn').addEventListener('click', () => {
 });
 function renderPlans(){ renderProviders(); renderTags(); }
 async function loadTags(){ try { const j = await (await fetch('/api/model-tags')).json(); state.modelTags = j.models || []; renderTags(); } catch(_){} }
-const PRIO_COLORS = {'-3':'#6b7280','-2':'#2563eb','-1':'#38bdf8','0':'','1':'#22c55e','2':'#f59e0b','3':'#ef4444'};
+const PRIO_COLORS = {'-3':'#6b7280','-2':'#2563eb','-1':'#38bdf8','0':'','1':'#14b8a6','2':'#22c55e','3':'#84cc16'};
 function prioLabel(l){ return t('prio_' + (l < 0 ? 'm'+(-l) : l === 0 ? '0' : 'p'+l)); }
 function prioDot(l){
   const c = PRIO_COLORS[String(l)];
@@ -2217,6 +2218,7 @@ function renderTags(){
   }).join('');
   // 优先级图例（与其他标签颜色说明同区展示，减少行内占位）
   list.innerHTML += '<div class="wf-legend" style="margin-top:6px" title="'+esc(t('prio_title'))+'">'
+    + '<b style="color:var(--fg);font-weight:600">'+esc(t('prio_legend'))+'</b>'
     + [-3,-2,-1,0,1,2,3].map(l => '<span style="display:inline-flex;align-items:center;gap:3px">'+prioDot(l)+'<span>'+esc(prioLabel(l))+'</span></span>').join('')
     + '</div>';
   // ▲▼ 步进：clamp 到 -3..3；Pinned 唯一性由服务端保证（demoted 透传提示）
