@@ -1039,14 +1039,16 @@ public struct PanelView: View {
         }
     }
 
+    /// 档位色阶（低→高 = 冷→暖单调）：灰 → 深蓝 → 天蓝 → 空心(不干预) →
+    /// 绿 → 橙 → 红。越暖 = 越高的优先级，Pinned 用最醒目的红
     static func prioColor(_ l: Int) -> Color {
         switch l {
         case -3: return Color.gray
-        case -2: return Color.purple
-        case -1: return Color.blue
-        case 1: return Color.teal
+        case -2: return Color.blue
+        case -1: return Color.cyan
+        case 1: return Color.green
         case 2: return Color.orange
-        case 3: return Color.green
+        case 3: return Color.red
         default: return Color.secondary.opacity(0.35)  // 0 = 不干预（浅色空心感）
         }
     }

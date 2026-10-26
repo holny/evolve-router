@@ -2125,7 +2125,7 @@ document.getElementById('pv-scan-btn').addEventListener('click', () => {
 });
 function renderPlans(){ renderProviders(); renderTags(); }
 async function loadTags(){ try { const j = await (await fetch('/api/model-tags')).json(); state.modelTags = j.models || []; renderTags(); } catch(_){} }
-const PRIO_COLORS = {'-3':'#6b7280','-2':'#8b5cf6','-1':'#3b82f6','0':'','1':'#14b8a6','2':'#f59e0b','3':'#22c55e'};
+const PRIO_COLORS = {'-3':'#6b7280','-2':'#2563eb','-1':'#38bdf8','0':'','1':'#22c55e','2':'#f59e0b','3':'#ef4444'};
 function prioLabel(l){ return t('prio_' + (l < 0 ? 'm'+(-l) : l === 0 ? '0' : 'p'+l)); }
 function prioDot(l){
   const c = PRIO_COLORS[String(l)];
