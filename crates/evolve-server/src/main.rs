@@ -59,6 +59,49 @@ enum Cmd {
         /// resp_digest (requires telemetry.response_digest=true upstream)
         #[arg(long, default_value_t = 0)]
         judge_samples: usize,
+        /// ②a confidence_gate sensitivity sweep: comma-separated candidate
+        /// gate values (runs the sweep instead of the A/B replay)
+        #[arg(long)]
+        gate_sweep: Option<String>,
+        /// ②b confidence_gate counterfactual A/B simulation: comma-separated
+        /// candidate gate values, quality-proxy + PGR per gate (regime-aware;
+        /// mutually exclusive with --gate-sweep)
+        #[arg(long)]
+        gate_replay: Option<String>,
+    },
+    /// ⑧ Load-benchmark the running gateway: concurrency sweep → throughput /
+    /// per-user speed / TTFT (TokenRouter-style serving-efficiency curves)
+    BenchLoad {
+        /// Base URL of the running gateway (OpenAI-compatible)
+        #[arg(long, default_value = "http://127.0.0.1:8787")]
+        url: String,
+        /// Model field sent to the gateway ("auto" exercises the full routing chain)
+        #[arg(long, default_value = "auto")]
+        model: String,
+        /// Concurrency levels to sweep (comma-separated)
+        #[arg(long, value_delimiter = ',', default_value = "1,2,4,8")]
+        concurrency: Vec<u32>,
+        /// Total chat completions per concurrency level
+        #[arg(long, default_value_t = 8)]
+        requests: u32,
+        /// max_tokens per request
+        #[arg(long, default_value_t = 256)]
+        max_tokens: u32,
+        /// Non-streaming requests (default is streaming)
+        #[arg(long, default_value_t = false)]
+        no_stream: bool,
+        /// Per-user speed SLO (tok/s): levels below it are flagged MISS
+        #[arg(long, default_value_t = 0.0)]
+        slo: f64,
+        /// Prompts file, one prompt per line (defaults to a built-in task mix)
+        #[arg(long)]
+        prompts: Option<PathBuf>,
+        /// Output directory for result.csv / summary.json
+        #[arg(long, default_value = "bench_out")]
+        out: PathBuf,
+        /// Per-request timeout in seconds
+        #[arg(long, default_value_t = 180)]
+        timeout: u64,
     },
     /// Manage the LaunchAgent service (start/stop/restart/status/install)
     Service {
@@ -109,8 +152,48 @@ fn main() -> anyhow::Result<()> {
         Cmd::MockUpstream { port } => mock_upstream(port),
         Cmd::Stats { config } => stats(config),
         Cmd::Report { config, limit } => report(config, limit),
-        Cmd::Backtest { config, ok_weight_b, gain_b, limit, judge_samples } => {
-            backtest(config, ok_weight_b, gain_b, limit, judge_samples)
+        Cmd::Backtest { config, ok_weight_b, gain_b, limit, judge_samples, gate_sweep, gate_replay } => {
+            backtest(config, ok_weight_b, gain_b, limit, judge_samples, gate_sweep, gate_replay)
+        }
+        Cmd::BenchLoad {
+            url,
+            model,
+            concurrency,
+            requests,
+            max_tokens,
+            no_stream,
+            slo,
+            prompts,
+            out,
+            timeout,
+        } => {
+            let prompts = match prompts {
+                None => std::sync::Arc::new(evolve_server::benchload::default_prompts()),
+                Some(p) => {
+                    let s = std::fs::read_to_string(&p)
+                        .map_err(|e| anyhow::anyhow!("读取 prompts 文件失败: {e}"))?;
+                    let lines: Vec<String> = s
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        .map(String::from)
+                        .collect();
+                    anyhow::ensure!(!lines.is_empty(), "prompts 文件 {} 没有可用行", p.display());
+                    std::sync::Arc::new(lines)
+                }
+            };
+            bench_load(evolve_server::benchload::BenchOpts {
+                url,
+                model,
+                concurrency,
+                requests,
+                max_tokens,
+                stream: !no_stream,
+                slo,
+                prompts,
+                out,
+                timeout_s: timeout,
+            })
         }
         Cmd::Service { action, port } => {
             let p = service::resolve_port(port);
@@ -134,9 +217,30 @@ fn backtest(
     gain_b: f32,
     limit: usize,
     judge_samples: usize,
+    gate_sweep: Option<String>,
+    gate_replay: Option<String>,
 ) -> anyhow::Result<()> {
     let (cfg, _) = config::load_config(config_path.as_deref())?;
     let events = evolve_core::config::events_file(&cfg.data.dir, false);
+    // ②a/②b 互斥：灵敏度扫描（计数）与反事实模拟（质量）二选一
+    anyhow::ensure!(
+        gate_sweep.is_none() || gate_replay.is_none(),
+        "--gate-sweep 与 --gate-replay 互斥：前者是计数灵敏度，后者是质量反事实"
+    );
+    // ②b：confidence_gate 反事实 A/B 模拟模式（质量 proxy + PGR）
+    if let Some(gr) = gate_replay {
+        let gates = parse_gate_list(&gr)?;
+        let rows = evolve_memory::backtest::gate_replay(&events, &gates, limit)?;
+        evolve_memory::backtest::print_gate_replay(&rows);
+        return Ok(());
+    }
+    // ②a：confidence_gate 灵敏度扫描模式（与 A/B 回放二选一）
+    if let Some(gs) = gate_sweep {
+        let gates = parse_gate_list(&gs)?;
+        let rows = evolve_memory::backtest::gate_sweep(&events, &gates, limit)?;
+        evolve_memory::backtest::print_gate_sweep(&rows);
+        return Ok(());
+    }
     // review#3 修复：A 组 = 用户当前生效参数（config [strategy] 段，缺省回落
     // 编译默认）——否则用户采纳过自定义参数后，backtest 会拿编译默认当
     // "当前"，裁决结论失实
@@ -327,6 +431,28 @@ async fn mock_upstream_server(port: u16) -> anyhow::Result<()> {
 fn mock_upstream(port: u16) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(mock_upstream_server(port))
+}
+
+/// 解析逗号分隔的 gate 候选列表（--gate-sweep / --gate-replay 共用）
+fn parse_gate_list(s: &str) -> anyhow::Result<Vec<f32>> {
+    let gates: Vec<f32> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse::<f32>())
+        .collect::<Result<_, _>>()
+        .map_err(|e| anyhow::anyhow!("gate 列表解析失败（示例：0.25,0.35,0.45）: {e}"))?;
+    anyhow::ensure!(!gates.is_empty(), "gate 候选列表不能为空");
+    anyhow::ensure!(
+        gates.iter().all(|g| (0.0..=1.0).contains(g)),
+        "gate 候选值须在 [0,1] 内"
+    );
+    Ok(gates)
+}
+
+/// ⑧ 负载基准：对运行中的网关做并发扫描，产出吞吐/单用户速度/TTFT 三曲线
+fn bench_load(opts: evolve_server::benchload::BenchOpts) -> anyhow::Result<()> {
+    evolve_server::benchload::run(opts)
 }
 
 fn serve(config_path: Option<PathBuf>, port_override: Option<u16>) -> anyhow::Result<()> {

@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod benchload;
 pub mod config;
 pub mod decision_tags;
 pub mod identity;

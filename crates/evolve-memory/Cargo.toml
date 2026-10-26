@@ -11,3 +11,6 @@ evolve-core = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
