@@ -343,7 +343,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -354,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-decision"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "async-trait",
  "evolve-core",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "evolve-discovery"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "evolve-core",
@@ -383,19 +383,20 @@ dependencies = [
 
 [[package]]
 name = "evolve-memory"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "evolve-core",
  "http",
  "serde",
  "serde_json",
+ "tempfile",
  "tracing",
 ]
 
 [[package]]
 name = "evolve-server"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "axum",
