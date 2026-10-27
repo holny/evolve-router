@@ -560,17 +560,18 @@ fn models(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let catalog = Catalog::build_with_discovered(&cfg, discovered);
     println!("config: {}", path.as_deref().map(|p| p.display().to_string()).unwrap_or("<embedded default>".into()));
     println!(
-        "{:<22} {:<12} {:>10} {:>8} {:>8}  {:<10} note",
-        "id", "provider", "window", "in$/M", "out$/M", "source"
+        "{:<22} {:<12} {:>10} {:>8} {:>8}  {:<6} {:<10} note",
+        "id", "provider", "window", "in$/M", "out$/M", "plan", "source"
     );
     for m in &catalog.models {
         println!(
-            "{:<22} {:<12} {:>10} {:>8.2} {:>8.2}  {:<10} {}",
+            "{:<22} {:<12} {:>10} {:>8.2} {:>8.2}  {:<6} {:<10} {}",
             m.id,
             m.provider,
             m.context_window.map(|w| w.to_string()).unwrap_or_else(|| "unknown".into()),
             m.cost.map(|c| c.input).unwrap_or(-1.0),
             m.cost.map(|c| c.output).unwrap_or(-1.0),
+            if m.plan { "plan" } else { "-" },
             m.source.label(),
             m.source_note.clone().unwrap_or_default()
         );

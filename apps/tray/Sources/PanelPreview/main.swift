@@ -12,7 +12,7 @@ enum PanelPreview {
         state.successRate = 99
         state.tokensK = "780.4k"
         // 版本随仓库 Cargo.toml 走（发版前同步），截图别再挂着两年前的旧号
-        state.version = "0.3.6"
+        state.version = "0.3.7"
         // EV_PREVIEW_DIM=model → 直接看 Model 维度（标题/复数 tab/报错状态）
         if ProcessInfo.processInfo.environment["EV_PREVIEW_DIM"] == "model" {
             state.modelDim = true

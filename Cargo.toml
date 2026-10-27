@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.6"
+version = "0.3.7"
 edition = "2024"
 # edition 2024 需要 Rust >= 1.85（review 2026-10-23：此前未声明 MSRV）
 rust-version = "1.85"
