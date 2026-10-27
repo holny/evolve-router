@@ -354,13 +354,18 @@ impl Engine {
             let low_diff = sticky.difficulty <= 1.6;
             let tools_same = sticky.tools_sig == input.tools_sig;
             // S2：粘性复用同样受价格层硬闸约束（贵模型不得借粘性赖在简单任务上）
-            // ——Pinned(+3) 例外：它靠 S2 绕过入选，粘性闸门不把它抖出去
+            // ——Pinned(+3) 与月套餐家族例外：订阅内烧的是配额不是钱
             let tier_ok = if input.price_tier_of.is_empty() {
                 true
             } else {
                 let allowed: u8 = crate::thresholds::tier_index(sticky.difficulty) as u8;
+                let plan_family = self
+                    .catalog_read_model(&sticky.chosen)
+                    .map(|ref m| m.plan || crate::plans::plan_for(&m.base_url).is_some())
+                    .unwrap_or(false);
                 input.price_tier_of.get(&sticky.chosen).copied().unwrap_or(1) <= allowed
                     || self.priority_of(&sticky.chosen) >= 3
+                    || plan_family
             };
             if still_fits && size_ok && low_diff && tools_same && tier_ok && sticky.turns_left > 0 {
                 // zero external calls on the sticky fast path: reuse the
@@ -786,6 +791,13 @@ impl Engine {
                         if prio_of(&m.id) >= 3 {
                             return true;
                         }
+                        // 月套餐家族豁免价位闸（用户裁决 2026-10-27）：订阅内烧的
+                        // 是配额不是钱——配额由 plan_pressure 硬闸 + 软降权管理，
+                        // 价位闸只管按量计费的真金白银。套餐桶内的"相对贵"分位
+                        // （旗舰系数高）不构成按量语义的拦截理由
+                        if m.plan || crate::plans::plan_for(&m.base_url).is_some() {
+                            return true;
+                        }
                         let t = input.price_tier_of.get(&m.id).copied().unwrap_or(1);
                         if t <= max_tier {
                             return true;
@@ -1041,6 +1053,10 @@ impl Engine {
             let hit = scoring::cache_hit_rate(input.telemetry.get(prev));
             let tier_ok = |m: &ModelRecord| -> bool {
                 if input.price_tier_of.is_empty() {
+                    return true;
+                }
+                // 月套餐家族豁免（与 S2 同语义：订阅内烧配额不烧钱）
+                if m.plan || crate::plans::plan_for(&m.base_url).is_some() {
                     return true;
                 }
                 let allowed: u8 = crate::thresholds::tier_index(difficulty_eff) as u8;
@@ -2329,6 +2345,48 @@ mod priority_tests {
             dec2.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
         );
         assert_eq!(dec2.chosen, "mini", "band +1 must beat band 0 (frontier): {}", dec2.reason);
+    }
+
+    /// 月套餐家族（m.plan=true）豁免价位闸：订阅内烧的是配额不是钱——
+    /// premium 档的 plan 旗舰在低难度任务上也能进候选（配额由 plan_pressure 管）
+    #[test]
+    fn plan_subscription_bypasses_price_tier_gate() {
+        // catalog3 的三个模型 plan 默认 false（按量语义）：基线 frontier(premium)
+        // 被难度 0 的价位闸挡；翻成 plan=true 后豁免
+        let mut e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let tiers: HashMap<String, u8> = [
+            ("mini".to_string(), 0u8),
+            ("standard".to_string(), 1),
+            ("frontier".to_string(), 2),
+        ]
+        .into_iter()
+        .collect();
+        // 基线：frontier 被价位闸挡
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.price_tier_of = &tiers;
+        assert!(
+            e.decide(inp).filtered.iter().any(|f| f.model == "frontier" && f.cause.contains("price tier")),
+            "baseline: frontier must be gated"
+        );
+        // 把 frontier 声明为订阅模型（plan=true）→ 豁免价位闸
+        {
+            let mut recs = catalog3().models;
+            for m in recs.iter_mut() {
+                if m.id == "frontier" {
+                    m.plan = true;
+                }
+            }
+            e.replace_catalog(recs);
+        }
+        let mut inp2 = input("你好", 500, &d, None, &h);
+        inp2.price_tier_of = &tiers;
+        let dec = e.decide(inp2);
+        assert!(
+            !dec.filtered.iter().any(|f| f.model == "frontier" && f.cause.contains("price tier")),
+            "plan models must bypass the price-tier gate"
+        );
     }
 
     /// 绝境 best-effort（全候选冷却 → 最大窗口兜底）也不得选用 Off 模型——
