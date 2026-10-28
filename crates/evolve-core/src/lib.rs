@@ -11,6 +11,7 @@ pub mod provider_info;
 pub mod ratio;
 pub mod recency;
 pub mod scoring;
+pub mod scope;
 pub mod thresholds;
 pub mod tags;
 pub mod tokens;
