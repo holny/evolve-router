@@ -858,6 +858,116 @@ fn demote_other_pins(
     demoted
 }
 
+/// GET /api/routing-mode —— 当前路由路径模式（gateway | favorites）
+pub async fn api_routing_mode_get(State(st): State<AppState>) -> Response {
+    let mode = crate::state::effective_overrides(&st).routing_mode;
+    (axum::Json(json!({"mode": mode.as_str()}))).into_response()
+}
+
+/// PUT /api/routing-mode {"mode": "gateway"|"favorites"} —— 双路径热切换
+/// （overrides.json 持久化；即时生效，不打断进行中的粘性会话）
+pub async fn api_routing_mode_put(
+    State(st): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(mode_str) = body.get("mode").and_then(|v| v.as_str()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "mode is required"}}))).into_response();
+    };
+    let Some(mode) = crate::state::RoutingModeCfg::parse(mode_str) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "mode must be gateway or favorites"}}))).into_response();
+    };
+    let dir = st.config.data.dir.clone();
+    crate::state::update_overrides(&dir, |ov| ov.routing_mode = mode);
+    (axum::Json(json!({"status": "ok", "mode": mode.as_str()}))).into_response()
+}
+
+/// GET /api/models/favorite?provider=X —— 选择器数据源：该 provider 目录全量
+/// + 当前心选清单。yesterday_tokens / fail_pct / ttft_ms 为真实用量列
+/// （Task 4 接入昨日聚合前的占位：0 / null / null）。
+pub async fn api_models_favorite_get(
+    State(st): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(provider) = q.get("provider") else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "provider is required"}}))).into_response();
+    };
+    let snap = st.engine.catalog_snapshot();
+    let ov = crate::state::effective_overrides(&st);
+    let favorites = ov.favorites.get(provider).cloned().unwrap_or_default();
+    let assigned = tags_for_catalog(&st, &snap);
+    let mut models: Vec<Value> = snap
+        .iter()
+        .filter(|m| &m.provider == provider)
+        .map(|m| {
+            json!({
+                "model": m.id,
+                "price_tier": assigned.get(&m.id).map(|(_, p)| p.label()).unwrap_or("medium"),
+                "yesterday_tokens": 0,
+                "fail_pct": Value::Null,
+                "ttft_ms": Value::Null,
+                "favorite": favorites.contains(&m.id),
+            })
+        })
+        .collect();
+    models.sort_by(|a, b| a["model"].as_str().unwrap_or("").cmp(b["model"].as_str().unwrap_or("")));
+    (axum::Json(json!({"provider": provider, "favorites": favorites, "models": models}))).into_response()
+}
+
+/// POST /api/models/favorite {"provider","model","replace"?} —— 增设/换选心选。
+/// 槽位语义（用户裁决 2026-10-28）：≤3 服务端强制；已满必须带 replace 原位
+/// 替换（UI 的"点行即换选"天然携带）；幽灵 id 404（同 priority 的防御）。
+pub async fn api_models_favorite_post(
+    State(st): State<AppState>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> Response {
+    let Some(provider) = body.get("provider").and_then(|v| v.as_str()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "provider is required"}}))).into_response();
+    };
+    let Some(model) = body.get("model").and_then(|v| v.as_str()) else {
+        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
+    };
+    let replace = body.get("replace").and_then(|v| v.as_str());
+    // 幽灵 id 防御：模型必须在目录中且属于该 provider
+    let snap = st.engine.catalog_snapshot();
+    let known = snap
+        .iter()
+        .any(|m| m.id == model && m.provider == provider);
+    if !known {
+        return (StatusCode::NOT_FOUND, axum::Json(json!({"error": {"message": format!("model {model} is not in the catalog for provider {provider}")}}))).into_response();
+    }
+    let dir = st.config.data.dir.clone();
+    let provider = provider.to_string();
+    let model = model.to_string();
+    let result: Result<Vec<String>, (axum::http::StatusCode, String)> =
+        crate::state::update_overrides(&dir, |ov| {
+            let list = ov.favorites.entry(provider.clone()).or_default();
+            if list.iter().any(|x| x == &model) {
+                return Ok(list.clone()); // 幂等：已是心选
+            }
+            match replace {
+                Some(r) => match list.iter().position(|x| x == r) {
+                    Some(i) => {
+                        list[i] = model.clone();
+                        Ok(list.clone())
+                    }
+                    None => Err((axum::http::StatusCode::BAD_REQUEST, format!("replace target {r} is not a current favorite"))),
+                },
+                None => {
+                    if list.len() >= 3 {
+                        Err((axum::http::StatusCode::BAD_REQUEST, "3 favorites set — pass replace".to_string()))
+                    } else {
+                        list.push(model.clone());
+                        Ok(list.clone())
+                    }
+                }
+            }
+        });
+    match result {
+        Ok(favorites) => (axum::Json(json!({"status": "ok", "provider": provider, "favorites": favorites}))).into_response(),
+        Err((code, message)) => (code, axum::Json(json!({"error": {"message": message}}))).into_response(),
+    }
+}
+
 fn effective_weights(st: &AppState) -> evolve_core::types::PolicyWeights {
     st.engine.weights_override().unwrap_or_else(|| {
         evolve_core::types::PolicyProfile::parse(&st.config.policy.default)

@@ -1412,6 +1412,14 @@ pub fn build_router(state: AppState) -> axum::Router {
         .route("/api/health/clear", axum::routing::post(crate::meta::api_health_clear))
         .route("/api/model-tags", axum::routing::get(crate::meta::api_model_tags_get).post(crate::meta::api_model_tags_post))
         .route("/api/priority", axum::routing::post(crate::meta::api_priority_set))
+        .route(
+            "/api/routing-mode",
+            axum::routing::get(crate::meta::api_routing_mode_get).put(crate::meta::api_routing_mode_put),
+        )
+        .route(
+            "/api/models/favorite",
+            axum::routing::get(crate::meta::api_models_favorite_get).post(crate::meta::api_models_favorite_post),
+        )
         .route("/api/report", axum::routing::get(crate::meta::api_report))
         .route("/api/models/active", axum::routing::post(crate::meta::api_models_active))
         .route("/api/onboarding", axum::routing::get(crate::meta::api_onboarding))
@@ -1476,6 +1484,42 @@ pub struct Overrides {
     /// 同 provider 唯一（重复设置时旧 pin 自动降为 +2，服务端保证）
     #[serde(default)]
     pub priorities: HashMap<String, i8>,
+    /// 路由路径模式（2026-10-28 用户裁决）：gateway = 网关智能（现状组合），
+    /// favorites = 心选智能（用户圈定的心选范围）
+    #[serde(default)]
+    pub routing_mode: RoutingModeCfg,
+    /// 心选模型（2026-10-28）：provider → ≤3 个用户亲选 model id
+    /// （服务端容量强制；换选走 replace 原位替换）
+    #[serde(default)]
+    pub favorites: HashMap<String, Vec<String>>,
+}
+
+/// 路由路径模式（双路径开关，热切换）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutingModeCfg {
+    /// 网关智能：现有全自动路由（判定模型选路 + 组合活跃集）
+    #[default]
+    Gateway,
+    /// 心选智能：用户圈定的每 provider 心选范围
+    Favorites,
+}
+
+impl RoutingModeCfg {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Gateway => "gateway",
+            Self::Favorites => "favorites",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "gateway" => Some(Self::Gateway),
+            "favorites" => Some(Self::Favorites),
+            _ => None,
+        }
+    }
 }
 
 /// 活跃集覆盖
