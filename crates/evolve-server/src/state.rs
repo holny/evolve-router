@@ -1472,7 +1472,7 @@ pub struct Overrides {
     #[serde(default)]
     pub model_tags: HashMap<String, TagOverride>,
     /// 用户优先级档位（2026-10）：model_id → -3(Off)…+3(Pinned)，0 = 不干预
-    /// 不存。路由最高优先干预：跨档带距定胜负（PRIORITY_BAND_STEP）；Pinned
+    /// 不存。路由最高优先干预：跨档乘法因子定胜负（band_factor）；Pinned
     /// 同 provider 唯一（重复设置时旧 pin 自动降为 +2，服务端保证）
     #[serde(default)]
     pub priorities: HashMap<String, i8>,

@@ -5,10 +5,17 @@ use crate::types::*;
 use std::collections::{BTreeMap, HashMap};
 
 /// 用户优先级档位的加性带距：相邻档位在总分上的差距。取 100 远超公式
-/// 合成分的实际量级（约 0-5）与 Thompson 探索扰动（±3%）——跨档必是
-/// 档位定胜负，同档内公式分正常竞争；route_recommendation 加成（×1.15）
-/// 也无法跨越（15% of ~100 < 100）
-pub const PRIORITY_BAND_STEP: f32 = 100.0;
+/// 用户优先级档位的乘法因子（2026-10-28 用户裁决：取代旧"加性带距 100 碾压"）。
+/// 0 档 ×1.0；±1 = ×1.3/×0.7；±2 = ×1.6/×0.4；+3 = ×1.9（"必选"的核心语义是
+/// 豁免质量下限与范围过滤的入池保证，见 decide 的 band>=1 闸——分数竞争仍按
+/// 乘法因子）；−3 = Off，在候选过滤段剔除，不达此处。
+pub fn band_factor(level: i8) -> f32 {
+    match level {
+        l if l > 0 => 1.0 + 0.3 * l as f32,
+        l if l < 0 => (1.0 + 0.3 * l as f32).max(0.4),
+        _ => 1.0,
+    }
+}
 
 /// 会话级判定缓存（2026-10-21）：同会话在 TTL 内、量级未跳变时**复用上一次判定**。
 /// Agent / 评审工具的连续调用任务不变，重判只是白付判定模型的秒级延迟
@@ -90,7 +97,7 @@ pub struct Engine {
     /// 面板可调的用户权重覆盖（模型级），评分时覆盖目录 weight
     weight_overlay: std::sync::RwLock<HashMap<String, f32>>,
     /// 用户优先级档位（-3 Off … +3 Pinned）：路由的最高优先干预——
-    /// 跨档以带距定胜负（PRIORITY_BAND_STEP），同档内公式照常竞争；
+    /// 跨档以乘法因子定胜负（band_factor，2026-10-28 取代加性带距），同档内公式照常竞争；
     /// Off 从候选集剔除，Pinned 强制入池。持久化在 overrides.json，重启重放
     priority_overlay: std::sync::RwLock<HashMap<String, i8>>,
     counter: std::sync::atomic::AtomicU64,
@@ -941,13 +948,13 @@ impl Engine {
                 s.score *= 1.0 + scoring::PLAN_QUOTA_BONUS * headroom;
             }
         }
-        // 用户优先级档位（全局最高优先）：加性带距（PRIORITY_BAND_STEP/档）
-        // 远超公式分差与 Thompson 扰动（±3%）——跨档档位定胜负，同档内公式
-        // 照常竞争。Off(-3) 已在候选过滤段剔除，此处只见 -2..+3
+        // 用户优先级档位（全局最高优先）：乘法因子（band_factor，2026-10-28
+        // 用户裁决取代加性带距）——档位按百分比缩放总分，同档内公式照常竞争；
+        // Off(-3) 已在候选过滤段剔除，此处只见 -2..+3
         if !prio_map.is_empty() {
             for s in scores.iter_mut() {
                 if let Some(b) = prio_map.get(&s.model_id) {
-                    s.score += PRIORITY_BAND_STEP * (*b as f32);
+                    s.score *= band_factor(*b);
                 }
             }
         }
@@ -2201,28 +2208,54 @@ mod priority_tests {
         assert_eq!(e.priority_of("mini"), 0);
     }
 
-    /// 任意正档位压过公式最优（全局最高优先）；同档内公式序照常决定
+    /// 乘法档位（2026-10-28 用户裁决）：override 后分数 = 基线 × 档位因子
+    /// （0→1.0，+1→1.3，+2→1.6，+3→1.9，−1→0.7，−2→0.4；−3 在过滤段剔除不达此处）
     #[test]
-    fn priority_band_dominates_formula_within_and_across_bands() {
+    fn band_factor_multiplies_score() {
         let e = engine();
         let d = digest("你好");
-        // +1（Higher）即足以让最贵的 frontier 赢下默认 mini
+        let h = HealthMap::new();
+        let get = |dec: &Decision, id: &str| {
+            dec.scored.iter().find(|s| s.model_id == id).map(|s| s.score).unwrap_or(0.0)
+        };
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_mini = get(&base, "mini");
+        assert!(f_mini > 0.0, "baseline score must exist for mini");
+        for (level, factor) in [(1i8, 1.30f32), (2, 1.60), (3, 1.90), (-1, 0.70), (-2, 0.40)] {
+            e.set_priority_override("mini", Some(level));
+            let dec = e.decide(input("你好", 500, &d, None, &h));
+            e.set_priority_override("mini", None);
+            let s = get(&dec, "mini");
+            assert!(
+                (s - f_mini * factor).abs() / (f_mini * factor) < 1e-3,
+                "level {level} must multiply score by {factor}: got {s}, want {}",
+                f_mini * factor
+            );
+        }
+    }
+
+    /// 乘法语义 vs 旧加性碾压：+1 只在公式分差 < 30% 时翻越，> 30% 翻不动
+    #[test]
+    fn band_factor_beats_only_within_formula_gap() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let get = |dec: &Decision, id: &str| {
+            dec.scored.iter().find(|s| s.model_id == id).map(|s| s.score).unwrap_or(0.0)
+        };
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_frontier = get(&base, "frontier");
+        let best_other = get(&base, "mini").max(get(&base, "standard"));
         e.set_priority_override("frontier", Some(1));
-        let dec = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
-        assert_eq!(dec.chosen, "frontier", "band +1 must dominate: {}", dec.reason);
-        // standard 与 frontier 同为 +1：同档内公式序恢复——standard 更便宜更快
-        e.set_priority_override("standard", Some(1));
-        let dec2 = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
+        let dec = e.decide(input("你好", 500, &d, None, &h));
+        e.set_priority_override("frontier", None);
+        let frontier_wins = f_frontier * 1.30 > best_other;
         assert_eq!(
-            dec2.scored.first().map(|s| s.model_id.as_str()),
-            Some("standard"),
-            "within the same band the formula order must decide: {:?}",
-            dec2.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
+            dec.chosen == "frontier",
+            frontier_wins,
+            "+1 wins exactly when formula gap < 30%: f_frontier={f_frontier} best_other={best_other} chosen={}",
+            dec.chosen
         );
-        // 更高档位再次越过同档：frontier 提到 +2 → 回到第一
-        e.set_priority_override("frontier", Some(2));
-        let dec3 = e.decide(input("你好", 500, &d, None, &HealthMap::new()));
-        assert_eq!(dec3.chosen, "frontier");
     }
 
     /// Pinned（+3）：无视活跃组合强制入池并赢下竞争
