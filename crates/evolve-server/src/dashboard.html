@@ -2154,7 +2154,8 @@ async function loadTags(){ try { const j = await (await fetch('/api/model-tags')
 const SRC_COLORS = {fav:'#84cc16', top:'#3b82f6', new:'#a855f7', rec:'#14b8a6', free:'#94a3b8'};
 function srcPills(m){
   let out = '';
-  if (m.source && SRC_COLORS[m.source]) out += '<span class="pbadge" style="color:'+SRC_COLORS[m.source]+';border-color:'+SRC_COLORS[m.source]+'">'+esc(t('src_' + m.source))+'</span>';
+  const src = m.scope_source;
+  if (src && SRC_COLORS[src]) out += '<span class="pbadge" style="color:'+SRC_COLORS[src]+';border-color:'+SRC_COLORS[src]+'">'+esc(t('src_' + src))+'</span>';
   if (m.free) out += '<span class="pbadge" style="color:'+SRC_COLORS.free+';border-color:'+SRC_COLORS.free+'">'+esc(t('src_free'))+'</span>';
   return out;
 }
@@ -2184,14 +2185,23 @@ function renderSourceDist(){
   const box = document.getElementById('fav-dist');
   if (!box) return;
   if (state.routingMode !== 'favorites') { box.innerHTML = ''; return; }
-  const counts = {};
-  for (const m of (state.modelTags || [])) {
-    if (m.source && m.source !== 'none' && SRC_COLORS[m.source]) counts[m.source] = (counts[m.source] || 0) + 1;
-  }
-  box.innerHTML = Object.keys(counts).sort().map(k =>
-    '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px">'
-    + '<span class="pbadge" style="color:'+SRC_COLORS[k]+';border-color:'+SRC_COLORS[k]+'">'+esc(t('src_'+k))+'</span>'
-    + '<b>'+counts[k]+'</b></span>').join('');
+  // 按**每请求**的真实来源聚合（events 里本分支写入的 source 字段）——
+  // 只数当前范围构成的话，卡片永远看不出 70/10/20 的涌现与漂移（评审 I4）
+  fetch('/api/events?limit=200&kind=chat').then(r => r.json()).then(j => {
+    const counts = {};
+    for (const e of (Array.isArray(j) ? j : (j.events || []))) {
+      const src = e.source;
+      if (src && SRC_COLORS[src]) counts[src] = (counts[src] || 0) + 1;
+    }
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    box.innerHTML = total === 0
+      ? '<span class="dim2" style="font-size:11px">'+esc(t('fav_dist'))+' · 0</span>'
+      : Object.keys(counts).sort().map(k =>
+        '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px">'
+        + '<span class="pbadge" style="color:'+SRC_COLORS[k]+';border-color:'+SRC_COLORS[k]+'">'+esc(t('src_'+k))+'</span>'
+        + '<b>'+counts[k]+'</b><span class="dim2">'+Math.round(100*counts[k]/total)+'%</span></span>').join('')
+      + '<span class="dim2" style="font-size:10px">n='+total+'</span>';
+  }).catch(() => { box.innerHTML = ''; });
 }
 async function loadFavRows(p){
   try {

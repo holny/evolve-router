@@ -568,7 +568,7 @@ public final class AppState: ObservableObject {
                         unusableReason: ((m["usable"] as? Bool) == false)
                             ? ((m["unusable_reason"] as? String) ?? "unusable") : nil,
                         priority: (m["priority"] as? Int) ?? 0,
-                        source: m["source"] as? String,
+                        source: m["scope_source"] as? String,
                         isFree: (m["free"] as? Bool) ?? false)
                 }
                 put(\.modelTagMap, \.modelTagMap, tm)

@@ -863,12 +863,12 @@ impl Engine {
         let floor = scoring::quality_floor(difficulty_eff);
         let mut eligible: Vec<ModelRecord> = Vec::new();
         for m in &candidates {
-            // 用户裁决：正档位（+1 Higher 及以上）高于质量 floor——网关侧判定
-            // 不越过用户主动抬的优先级（弱模型被抬高是用户的主动选择，难任务
-            // 照用）；负档位/不干预保持 floor（质量底线仍保护未被抬高的路由）。
-            // 只有 provider 网络/配额/窗口等不可抗力能拦正档位模型
+            // 用户裁决（2026-10-28 乘法档位）：只有 +3 Pinned 豁免质量 floor——
+            // 必选 = 用户的显式意志（弱模型被 pin 是知情选择）；+1/+2 是分数
+            // 倾向（×1.3/×1.6），不再越过后勤判定。负档位/不干预保持 floor
+            //（质量底线仍保护未被抬高的路由，反目标：弱免费/弱抬档模型赢难题）。
             let band = prio_of(&m.id);
-            if band >= 1 || scoring::quality(m, &j, difficulty_eff) >= floor {
+            if band >= 3 || scoring::quality(m, &j, difficulty_eff) >= floor {
                 eligible.push(m.clone());
             }
         }
@@ -2369,10 +2369,11 @@ mod priority_tests {
         assert_ne!(dec.chosen, "mini");
     }
 
-    /// Pinned 高于质量 floor（用户裁决：档位 > 网关侧判定）：弱模型被 pin 后
-    /// 即使难任务也必须进入候选并赢下竞争——只有不可抗力（provider 网络/
-    /// 配额/窗口）能拦它。锚点：难度 2 → floor=0.733，mini quality≈0.43 被
-    /// 滤、frontier≈0.89 过（难度 3 时三者全灭会走"清空则回填"分支，锚不了）
+    /// 质量下限豁免收窄到 +3（2026-10-28 乘法档位用户裁决）：+1/+2 是分数
+    /// 倾向（×1.3/×1.6），不再越过 floor——难题上弱抬档模型不得挤掉强模型；
+    /// 只有 +3 Pinned（显式"必选"意志）入池豁免。锚点：难度 2 → floor=0.733，
+    /// mini quality≈0.43 被滤、frontier≈0.89 过（难度 3 时三者全灭会走"清空则
+    /// 回填"分支，锚不了）
     #[test]
     fn pinned_bypasses_quality_floor() {
         struct HardJudge;
@@ -2407,15 +2408,25 @@ mod priority_tests {
             "baseline: mini must fail the quality floor: {:?}",
             dec.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
         );
-        // pin mini（+1 档）：floor 被绕过、band 加成让它直接赢下竞争
+        // +1 档：不再豁免 floor（乘法档位是分数倾向，不是"必选"意志）
         e.set_priority_override("mini", Some(1));
         let dec2 = e.decide(input("refactor the payment pipeline", 20_000, &d, None, &h));
         assert!(
-            dec2.scored.iter().any(|s| s.model_id == "mini"),
-            "pinned model must enter the pool past the floor: {:?}",
+            !dec2.scored.iter().any(|s| s.model_id == "mini"),
+            "+1 must NOT bypass the quality floor: {:?}",
             dec2.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
         );
-        assert_eq!(dec2.chosen, "mini", "band +1 must beat band 0 (frontier): {}", dec2.reason);
+        assert_ne!(dec2.chosen, "mini", "weak +1 model must not win a floor-failing task");
+        // +3 Pinned：显式"必选"意志 → floor 被绕过、入池即赢
+        e.set_priority_override("mini", Some(3));
+        let dec3 = e.decide(input("refactor the payment pipeline", 20_000, &d, None, &h));
+        assert!(
+            dec3.scored.iter().any(|s| s.model_id == "mini"),
+            "pinned model must enter the pool past the floor: {:?}",
+            dec3.scored.iter().map(|s| (&s.model_id, s.score)).collect::<Vec<_>>()
+        );
+        assert_eq!(dec3.chosen, "mini", "band +3 must beat band 0 (frontier): {}", dec3.reason);
+        e.set_priority_override("mini", None);
     }
 
     /// 月套餐家族（m.plan=true）豁免价位闸：订阅内烧的是配额不是钱——
@@ -2708,9 +2719,9 @@ mod curated_tests {
         let h = HealthMap::new();
         // 会话粘在 mini 上、心选里只有 frontier：粘性照常复用，不被心选打断
         let fav_set = favs(&["frontier"]);
-let mut inp = input("你好", 620, &d, Some(sticky_on("mini")), &h);
+        let mut inp = input("你好", 620, &d, Some(sticky_on("mini")), &h);
         inp.curated = true;
-                inp.favorites = &fav_set;
+        inp.favorites = &fav_set;
         let dec = e.decide(inp);
         assert!(dec.sticky, "curated favorites must not break sticky sessions: {}", dec.reason);
         assert_eq!(dec.chosen, "mini");

@@ -2008,7 +2008,9 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
             "free": m.is_free(),
             "priority": priorities.get(&m.id).copied().unwrap_or(0),
             "active": active_set.contains(&m.id),
-            "source": scope_source.get(&m.id).map(|t| t.as_str()).unwrap_or("none"),
+            // 心选范围来源（fav/top/new/rec/none）。⚠ 不叫 "source"——该键已被
+            // 上面的 tags-provenance（user|auto）占用，曾双键覆盖（评审 I3）
+            "scope_source": scope_source.get(&m.id).map(|t| t.as_str()).unwrap_or("none"),
             "release_ts": evolve_core::recency::release_ts_of(m),
             "release_src": if m.release_ts.is_some() { "provider/models.dev" } else if evolve_core::recency::release_ts_from_id(&m.id).is_some() { "id" } else { "none" },
             "recency_score": score_of.get(m.id.as_str()).copied().unwrap_or(0),

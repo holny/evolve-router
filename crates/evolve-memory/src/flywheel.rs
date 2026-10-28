@@ -70,6 +70,11 @@ struct FlywheelInner {
     /// 0 = 尚无数据。随快照持久化——重启不重置（数据是累计口径）。
     #[serde(default)]
     since_ms: u64,
+    /// 逐模型累计完成 token（in+out，**永不修剪**）——心选路径 NEW 新手保护
+    /// 的衰减输入（2026-10-28）。小时桶只保留 3 天，用它会退化成"闲置 3 天
+    /// 重新享满 ×1.4"；此计数器才是 spec 的"累计完成 token"。随快照持久化。
+    #[serde(default)]
+    lifetime_tokens: HashMap<String, u64>,
     dirty: bool,
 }
 
@@ -405,6 +410,8 @@ impl Flywheel {
             b.gen_ms_sum += total.saturating_sub(ttft);
             b.tools_total += tools_total;
             b.tools_ok += tools_ok;
+            // 永续累计（不随小时桶修剪）——NEW 新手保护衰减输入（b 借用结束后）
+            *inner.lifetime_tokens.entry(chosen.to_string()).or_insert(0) += in_tok + out_tok;
         }
         inner.dirty = true;
     }
@@ -546,14 +553,21 @@ impl Flywheel {
         out
     }
 
-    /// 逐模型累计 token（in+out，全部小时桶求和）——NEW 新手保护衰减的输入
+    /// 逐模型**累计**完成 token（in+out，永不修剪）——NEW 新手保护衰减的输入
+    /// （2026-10-28 spec：衰减看累计里程，不看最近 3 天）。取 max(永续计数,
+    /// 小时桶求和)：升级过渡期旧历史只在小时桶里，取大者让衰减平滑衔接。
     pub fn tokens_total(&self) -> HashMap<String, u64> {
         let Ok(inner) = self.inner.lock() else { return HashMap::new() };
-        inner
-            .hourly
-            .iter()
-            .map(|(m, buckets)| (m.clone(), buckets.iter().map(|b| b.in_tok + b.out_tok).sum()))
-            .collect()
+        let mut out = inner.lifetime_tokens.clone();
+        for (m, buckets) in inner.hourly.iter() {
+            let sum: u64 = buckets.iter().map(|b| b.in_tok + b.out_tok).sum();
+            let slot = out.entry(m.clone()).or_insert(0);
+            if sum > *slot {
+                *slot = sum;
+            }
+        }
+        out.retain(|_, v| *v > 0);
+        out
     }
 
     pub fn save(&self) {
@@ -818,11 +832,9 @@ mod tokens_total_tests {
     use serde_json::json;
 
     #[test]
-    fn tokens_total_sums_all_buckets() {
-        let f = Flywheel::open_with(
-            &format!("{}/fw-toktotal-{}", std::env::temp_dir().to_string_lossy(), std::process::id()),
-            StrategyParams::default(),
-        );
+    fn tokens_total_sums_all_buckets_and_never_prunes() {
+        let dir = format!("{}/fw-toktotal-{}", std::env::temp_dir().to_string_lossy(), std::process::id());
+        let f = Flywheel::open_with(&dir, StrategyParams::default());
         let base = 1_793_200_000_000u64;
         f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":base,"ttft_ms":100,"total_ms":400,"prompt_tokens":100,"completion_tokens":50,"cached_tokens":0}));
         f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":base + 86_400_000,"ttft_ms":100,"total_ms":400,"prompt_tokens":10,"completion_tokens":5,"cached_tokens":0}));

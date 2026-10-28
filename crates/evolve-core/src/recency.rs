@@ -119,15 +119,16 @@ pub fn civil_day_start_utc_ms(y: i64, m: i64, d: i64) -> u64 {
     (days_from_civil(y, m, d) * 86_400) as u64 * 1000
 }
 
-/// 本地时区的今天日期（年, 月, 日）——经 localtime_r
-pub fn local_date_ymd(now_ms: u64) -> (i64, i64, i64) {
+/// 本地时区的今天日期（年, 月, 日）+ GMT 偏移秒——经 localtime_r
+pub fn local_date_ymd_gmtoff(now_ms: u64) -> ((i64, i64, i64), i64) {
     let secs = (now_ms / 1000) as i64;
     let mut tm = CTm {
         tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0, tm_mon: 0, tm_year: 0,
         tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: std::ptr::null(),
     };
     unsafe { localtime_r(&secs, &mut tm) };
-    ((tm.tm_year as i64) + 1900, (tm.tm_mon as i64) + 1, tm.tm_mday as i64)
+    let date = ((tm.tm_year as i64) + 1900, (tm.tm_mon as i64) + 1, tm.tm_mday as i64);
+    (date, tm.tm_gmtoff as i64)
 }
 
 fn days_in_month(y: i64, m: i64) -> i64 {
@@ -141,10 +142,18 @@ fn days_in_month(y: i64, m: i64) -> i64 {
     }
 }
 
-/// 本地日历"昨天"的 [起点, 终点) epoch ms（按民事日借位，非 24h 回退——DST 日亦正确）。
+/// 民事日期当日**本地**零点的 epoch ms：UTC 零点 − GMT 偏移
+/// （offset 为该时刻 tm_gmtoff；DST 切换日两个边界共用同一 offset，±1h 近似）
+pub fn local_midnight_utc_ms(y: i64, m: i64, d: i64, gmtoff_secs: i64) -> u64 {
+    (civil_day_start_utc_ms(y, m, d) as i64 - gmtoff_secs * 1000) as u64
+}
+
+/// 本地日历"昨天"的 [起点, 终点) epoch ms（按民事日借位，非 24h 回退——DST 日
+/// 亦正确；零点锚定本地时区：UTC+8 的"昨天"= 本地 00:00–24:00，而非 UTC 零点
+/// 平移（该 bug 曾让窗口落在本地 08:00–次日 08:00，早晨流量被记进"昨天"）。
 /// 终点 = 本地今天零点。
 pub fn local_yesterday_bounds_ms(now_ms: u64) -> (u64, u64) {
-    let (y, m, d) = local_date_ymd(now_ms);
+    let ((y, m, d), gmtoff) = local_date_ymd_gmtoff(now_ms);
     let (ny, nm, nd) = if d > 1 {
         (y, m, d - 1)
     } else if m > 1 {
@@ -152,7 +161,7 @@ pub fn local_yesterday_bounds_ms(now_ms: u64) -> (u64, u64) {
     } else {
         (y - 1, 12, 31)
     };
-    (civil_day_start_utc_ms(ny, nm, nd), civil_day_start_utc_ms(y, m, d))
+    (local_midnight_utc_ms(ny, nm, nd, gmtoff), local_midnight_utc_ms(y, m, d, gmtoff))
 }
 
 #[cfg(test)]
@@ -163,6 +172,22 @@ mod calendar_tests {
         assert_eq!(super::civil_day_start_utc_ms(1970, 1, 2), 86_400_000);
         assert_eq!(super::civil_day_start_utc_ms(2024, 1, 1), 1_704_067_200_000);
         assert_eq!(super::civil_day_start_utc_ms(2026, 10, 28), 1_793_145_600_000);
+    }
+
+    #[test]
+    fn local_midnight_anchors_to_timezone_offset() {
+        // UTC+8（Asia/Shanghai）：2026-10-28 本地零点 = UTC 零点 − 8h
+        assert_eq!(
+            super::local_midnight_utc_ms(2026, 10, 28, 8 * 3600),
+            1_793_145_600_000 - 8 * 3_600_000
+        );
+        // UTC−5（纽约冬令时）：本地零点 = UTC 零点 + 5h
+        assert_eq!(
+            super::local_midnight_utc_ms(2026, 10, 28, -5 * 3600),
+            1_793_145_600_000 + 5 * 3_600_000
+        );
+        // 零偏移 = UTC 零点本身
+        assert_eq!(super::local_midnight_utc_ms(2026, 10, 28, 0), 1_793_145_600_000);
     }
 
     #[test]
