@@ -218,6 +218,9 @@ pub async fn chat_completions(
                 }
             }
 
+            // Task 6 接真实心选输入（占位：非 curated、空集合）
+            let empty_favs = std::collections::HashSet::new();
+            let empty_tokens = std::collections::HashMap::new();
             let input = RoutingInput {
                 session_key: &session_key,
                 features,
@@ -237,6 +240,9 @@ pub async fn chat_completions(
                 token_ratio_backfill: &st.token_ratio_backfill,
                 est_observed,
                 active: &active_ids,
+                curated: false,
+                favorites: &empty_favs,
+                model_tokens_total: &empty_tokens,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);

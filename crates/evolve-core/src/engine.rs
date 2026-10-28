@@ -17,6 +17,14 @@ pub fn band_factor(level: i8) -> f32 {
     }
 }
 
+/// 心选路径的 FAV 软加成（2026-10-28 用户裁决：只做软偏好——显式档位优先，
+/// 不叠加；只乘分数，不改粘性接管/低置信留旧/缓存经济等读档位的比较点）
+pub const FAV_SOFT_BOOST: f32 = 1.30;
+/// NEW 新手保护幅度上限（curated 模式，随累计完成 token 线性衰减到 0）
+pub const NEW_DECAY_BOOST: f32 = 0.40;
+/// NEW 新手保护衰减里程：头 5 万完成 token 内从满加成线性衰减到 0
+pub const NEW_DECAY_TOKENS: f32 = 50_000.0;
+
 /// 会话级判定缓存（2026-10-21）：同会话在 TTL 内、量级未跳变时**复用上一次判定**。
 /// Agent / 评审工具的连续调用任务不变，重判只是白付判定模型的秒级延迟
 /// （OCR 实证：258 次串行调用 × 3-4.5s 判定 = 累计远超单轮预算）。
@@ -62,6 +70,13 @@ pub struct RoutingInput<'a> {
     /// 活跃集（用户裁决：最近发布/最近使用的前 50；空集 = 不启用过滤）——
     /// 非活跃模型不参与路由（Web 可手动开启，开启自动顶掉最低分者）
     pub active: &'a std::collections::HashSet<String>,
+    /// 心选模式开关（2026-10-28 双路径）：true = favorites 路径，启用
+    /// FAV 软加成与 NEW 新手保护（分数软偏好，不碰档位语义）
+    pub curated: bool,
+    /// 心选模型集合（curated 模式下无显式档位者获 FAV_SOFT_BOOST）
+    pub favorites: &'a std::collections::HashSet<String>,
+    /// 逐模型累计完成 token（curated 模式下 NEW 新手保护的衰减输入）
+    pub model_tokens_total: &'a std::collections::HashMap<String, u64>,
 }
 
 /// Linear blend of tier fields: conf 1.0 -> new, 0.0 -> base.
@@ -958,6 +973,22 @@ impl Engine {
                 }
             }
         }
+        // 心选路径专属加成（仅 curated；2026-10-28 用户裁决）：
+        // ① FAV 软偏好——无显式档位的心选模型 ×FAV_SOFT_BOOST（显式档位优先，不叠加）；
+        // ② NEW 新手保护——累计完成 token 头 NEW_DECAY_TOKENS 内线性衰减的新模型加成。
+        // 只乘分数：不进 priority_overlay、不触发 band>=1 的质量下限豁免、不影响粘性
+        if input.curated {
+            for s in scores.iter_mut() {
+                if !prio_map.contains_key(&s.model_id) && input.favorites.contains(&s.model_id) {
+                    s.score *= FAV_SOFT_BOOST;
+                }
+                let done = input.model_tokens_total.get(&s.model_id).copied().unwrap_or(0) as f32;
+                let decay = (1.0 - done / NEW_DECAY_TOKENS).clamp(0.0, 1.0);
+                if decay > 0.0 {
+                    s.score *= 1.0 + NEW_DECAY_BOOST * decay;
+                }
+            }
+        }
         scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         // A2 Fan-Out：优先消费 judge 合并返回的推荐（占位符 candidate_N →
@@ -1650,6 +1681,9 @@ mod tests {
             max_output_req: None,
             policy: None,
             sticky,
+            curated: false,
+            favorites: &EMPTY_FAVS,
+            model_tokens_total: &EMPTY_TOKENS,
             // 测试默认按"工具延续"构造（粘性用例）；专门验证新用户消息的用例
             // 用 input_with(...) 覆盖
             continues_tools: true,
@@ -1674,6 +1708,10 @@ mod tests {
         std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_ACTIVE: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);
+    pub(super) static EMPTY_FAVS: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
+    pub(super) static EMPTY_TOKENS: std::sync::LazyLock<HashMap<String, u64>> =
+        std::sync::LazyLock::new(HashMap::new);
     pub(crate) static EMPTY_PRESSURE: std::sync::LazyLock<HashMap<String, f32>> =
         std::sync::LazyLock::new(HashMap::new);
 
@@ -2521,5 +2559,160 @@ mod priority_takeover_tests {
         inp.continues_tools = false; // 新用户消息：不走粘性快路径，进完整评估
         let dec = e.decide(inp);
         assert_eq!(dec.chosen, "frontier", "low-confidence stickiness must not override a higher band: {}", dec.reason);
+    }
+}
+
+/// 心选路径专属加成（2026-10-28 用户裁决）：FAV 软偏好 ×1.30、NEW 新手保护
+/// ×1.4→×1.0 线性衰减——仅 curated 模式生效，且只动分数不碰档位语义
+/// （粘性接管/低置信留旧/缓存经济仍读显式档位：设心选不打断进行中会话）
+#[cfg(test)]
+mod curated_tests {
+    use super::tests::{digest, input, EMPTY_TOKENS};
+    use super::*;
+    use std::collections::HashSet;
+
+    fn engine() -> Engine {
+        Engine::new(tests::catalog3(), tests::det_policy(), Box::new(crate::heuristic::HeuristicJudge))
+    }
+
+    fn score_of(dec: &Decision, id: &str) -> f32 {
+        dec.scored.iter().find(|s| s.model_id == id).map(|s| s.score).unwrap_or(0.0)
+    }
+
+    fn favs(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn curated_fav_soft_boost_multiplies_score() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_mini = score_of(&base, "mini");
+        assert!(f_mini > 0.0);
+        // 隔离 FAV 加成：tokens 跑满（decay=0），排除 NEW 衰减的 ×1.4 交互
+        let mut tokens = EMPTY_TOKENS.clone();
+        tokens.insert("mini".to_string(), 50_000);
+        // curated=false：收藏不生效
+        let fav_set = favs(&["mini"]);
+        let mut inp_plain = input("你好", 500, &d, None, &h);
+        inp_plain.favorites = &fav_set;
+        inp_plain.model_tokens_total = &tokens;
+        assert!((score_of(&e.decide(inp_plain), "mini") - f_mini).abs() / f_mini < 1e-3);
+        // curated=true：×1.30
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.curated = true;
+        inp.favorites = &fav_set;
+        inp.model_tokens_total = &tokens;
+        let s = score_of(&e.decide(inp), "mini");
+        assert!((s - f_mini * 1.30).abs() / (f_mini * 1.30) < 1e-3, "fav soft boost ×1.30: {s} vs {}", f_mini * 1.30);
+    }
+
+    #[test]
+    fn curated_explicit_priority_replaces_fav_boost() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        // 非 curated 的显式 +1 基准
+        e.set_priority_override("mini", Some(1));
+        let plain_plus1 = e.decide(input("你好", 500, &d, None, &h));
+        let f_plain = score_of(&plain_plus1, "mini");
+        // curated + 心选 + 显式 +1：只有 band ×1.30，不得叠加成 ×1.69
+        // （tokens 跑满隔离 NEW 衰减交互）
+        let mut tokens = EMPTY_TOKENS.clone();
+        tokens.insert("mini".to_string(), 50_000);
+        let fav_set = favs(&["mini"]);
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.curated = true;
+        inp.favorites = &fav_set;
+        inp.model_tokens_total = &tokens;
+        let s = score_of(&e.decide(inp), "mini");
+        assert!((s - f_plain).abs() / f_plain < 1e-3, "explicit level must replace the soft boost (no ×1.30²): {s} vs {f_plain}");
+        e.set_priority_override("mini", None);
+    }
+
+    #[test]
+    fn curated_new_decay_bonuses_then_vanishes() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_mini = score_of(&base, "mini");
+        for (tokens, factor) in [(0u64, 1.40f32), (25_000, 1.20), (50_000, 1.00)] {
+            let mut map = EMPTY_TOKENS.clone();
+            map.insert("mini".to_string(), tokens);
+            let mut inp = input("你好", 500, &d, None, &h);
+            inp.curated = true;
+            inp.model_tokens_total = &map;
+            let s = score_of(&e.decide(inp), "mini");
+            assert!(
+                (s - f_mini * factor).abs() / (f_mini * factor) < 1e-3,
+                "tokens {tokens} must give ×{factor}: {s} vs {}",
+                f_mini * factor
+            );
+        }
+        // 非 curated：衰减不生效
+        let mut map = EMPTY_TOKENS.clone();
+        map.insert("mini".to_string(), 0);
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.model_tokens_total = &map;
+        assert!((score_of(&e.decide(inp), "mini") - f_mini).abs() / f_mini < 1e-3);
+    }
+
+    #[test]
+    fn curated_boosts_apply_exactly_once() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_mini = score_of(&base, "mini");
+        // 心选 + 跑满衰减（tokens=50_000 → decay=0）：恰好一次 ×1.30，不是 ×1.69
+        let mut map = EMPTY_TOKENS.clone();
+        map.insert("mini".to_string(), 50_000);
+        let fav_set = favs(&["mini"]);
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.curated = true;
+        inp.favorites = &fav_set;
+        inp.model_tokens_total = &map;
+        let s = score_of(&e.decide(inp), "mini");
+        assert!((s - f_mini * 1.30).abs() / (f_mini * 1.30) < 1e-3, "single ×1.30 only: {s}");
+        // 心选 + 零衰减（tokens=0）：×1.30 × ×1.40 各恰一次
+        let mut map0 = EMPTY_TOKENS.clone();
+        map0.insert("mini".to_string(), 0);
+        let fav_set0 = favs(&["mini"]);
+        let mut inp0 = input("你好", 500, &d, None, &h);
+        inp0.curated = true;
+        inp0.favorites = &fav_set0;
+        inp0.model_tokens_total = &map0;
+        let s0 = score_of(&e.decide(inp0), "mini");
+        assert!((s0 - f_mini * 1.30 * 1.40).abs() / (f_mini * 1.30 * 1.40) < 1e-3, "1.30×1.40 each once: {s0}");
+    }
+
+    #[test]
+    fn curated_sticky_continuation() {
+        fn sticky_on(id: &str) -> StickyState {
+            StickyState {
+                chosen: id.into(),
+                est_tokens_band: crate::tokens::tokens_band(600),
+                turns_left: 3,
+                tools_sig: 0,
+                domain: Domain::Chitchat,
+                difficulty: 0.5,
+                flags: JudgmentFlags::default(),
+                est_tokens: 600,
+            }
+        }
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        // 会话粘在 mini 上、心选里只有 frontier：粘性照常复用，不被心选打断
+        let fav_set = favs(&["frontier"]);
+let mut inp = input("你好", 620, &d, Some(sticky_on("mini")), &h);
+        inp.curated = true;
+                inp.favorites = &fav_set;
+        let dec = e.decide(inp);
+        assert!(dec.sticky, "curated favorites must not break sticky sessions: {}", dec.reason);
+        assert_eq!(dec.chosen, "mini");
     }
 }

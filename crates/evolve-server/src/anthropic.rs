@@ -71,6 +71,9 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             }
             let degraded: std::collections::HashSet<String> =
                 st.quota.provider_degraded().into_iter().collect();
+            // Task 6 接真实心选输入（占位：非 curated、空集合）
+            let empty_favs = std::collections::HashSet::new();
+            let empty_tokens = std::collections::HashMap::new();
             let input = RoutingInput {
                 session_key: &session_key,
                 features,
@@ -90,6 +93,9 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 token_ratio_backfill: &st.token_ratio_backfill,
                 est_observed: false,
                 active: &crate::meta::active_id_set(&st),
+                curated: false,
+                favorites: &empty_favs,
+                model_tokens_total: &empty_tokens,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
