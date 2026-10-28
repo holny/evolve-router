@@ -741,7 +741,7 @@ async fn portfolio_reports_slots_cells_and_free() {
     let ps = j["providers"].as_array().expect("providers array");
     assert!(!ps.is_empty(), "mock models must appear as providers");
     for p in ps {
-        for k in ["provider", "models", "slots", "slot_cap", "free", "pinned", "cells", "issue"] {
+        for k in ["provider", "models", "slots", "slot_cap", "free", "cells", "issue"] {
             assert!(p.get(k).is_some(), "/api/portfolio provider missing `{k}`");
         }
         let cells = p["cells"].as_array().unwrap();
@@ -765,7 +765,7 @@ async fn portfolio_reports_slots_cells_and_free() {
         );
     }
     for k in [
-        "providers", "selected", "selected_total", "models", "free", "free_selected", "pinned",
+        "providers", "selected", "selected_total", "models", "free", "free_selected",
     ] {
         assert!(j["totals"].get(k).is_some(), "totals missing `{k}`");
     }

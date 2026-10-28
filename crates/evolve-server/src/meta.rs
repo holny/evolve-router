@@ -2007,11 +2007,11 @@ pub async fn api_portfolio(State(st): State<AppState>) -> Response {
     // 目录快照只取一次（711 模型，别在每家 provider 上重复克隆）
     let snap_all = st.engine.catalog_snapshot();
     for (provider, list) in &per {
-        // ⚠ 名额只算**占名额**的（排除免费直通车与 pin）——否则会出现
+        // ⚠ 名额只算**占名额**的（排除免费直通车）——否则会出现
         // "slots 30 / cap 14"这种自相矛盾的展示（web 与面板同源，两边都会错）
         let slots = list
             .iter()
-            .filter(|i| selected.contains(i.id.as_str()) && !i.free && !i.pinned)
+            .filter(|i| selected.contains(i.id.as_str()) && !i.free)
             .count();
         // 模型/免费规模按**端点级**统计（与 Provider 管理卡同口径：同 base_url 的
         // 两个账号看到同一批模型）——避免"卡片 76 models / 组合 38 models"的数字冲突
@@ -2075,7 +2075,6 @@ pub async fn api_portfolio(State(st): State<AppState>) -> Response {
                 .iter()
                 .filter(|i| i.free && selected.contains(i.id.as_str()))
                 .count(),
-            "pinned": list.iter().filter(|i| i.pinned).count(),
             "issue": issue,
             "cells": cells,
         }));
@@ -2087,16 +2086,15 @@ pub async fn api_portfolio(State(st): State<AppState>) -> Response {
         "providers": providers,
         "totals": {
             "providers": per.len(),
-            // selected = **占名额**的选中数（与 cap 同口径）；selected_total 含免费/pin
+            // selected = **占名额**的选中数（与 cap 同口径）；selected_total 含免费
             "selected": items
                 .iter()
-                .filter(|i| selected.contains(i.id.as_str()) && !i.free && !i.pinned)
+                .filter(|i| selected.contains(i.id.as_str()) && !i.free)
                 .count(),
             "selected_total": active.len(),
             "models": items.len(),
             "free": free_total,
             "free_selected": items.iter().filter(|i| i.free && selected.contains(i.id.as_str())).count(),
-            "pinned": items.iter().filter(|i| i.pinned).count(),
         },
         "notes": {
             "cap_rule": format!("max(50, healthy_providers × 8) = {cap}"),
@@ -2504,14 +2502,13 @@ pub fn portfolio_selection(
         .collect();
     by_used.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
-    let ov = crate::state::effective_overrides(&st);
     // ── 组合选择（2026-10 用户裁决）：provider 名额 + 能力×价位矩阵覆盖 + 免费直通车 ──
     // 旧行为=单一全局池（新发布 20 + 近用 30）→ 一家新模型多就通吃，provider 故障
     // 即全军覆没。新行为按 provider 分配名额并在每家内补齐 9 格覆盖。
+    // （旧 enable/disable 手动覆盖已退役——2026-10-28 用户裁决：排除归 Off(-3)、
+    // 强制归 +3 Pinned/心选，路由范围由双路径决定）
     let tags = tags_for_catalog(st, &snap);
     let quotas = st.quota.best_remaining_by_models();
-    let excluded: std::collections::HashSet<&str> =
-        ov.active_models.exclude.iter().map(|s| s.as_str()).collect();
     let items: Vec<evolve_core::recency::PortfolioItem> = eligible
         .iter()
         .map(|m| {
@@ -2544,14 +2541,10 @@ pub fn portfolio_selection(
                 release_ts: evolve_core::recency::release_ts_of(m),
                 last_used_ms: last_used.get(&m.id).copied(),
                 quota_ratio,
-                pinned: ov.active_models.include.iter().any(|x| x == &m.id),
             }
         })
         .collect();
-    let active: Vec<String> = evolve_core::recency::select_portfolio(&items, now)
-        .into_iter()
-        .filter(|id| !excluded.contains(id.as_str()))
-        .collect();
+    let active: Vec<String> = evolve_core::recency::select_portfolio(&items, now).into_iter().collect();
     // 综合排名（供顶替预告与 UI 排序）：max(发布日期, 最近使用)
     let mut ranked: Vec<(String, u64)> = eligible
         .iter()
@@ -2569,38 +2562,6 @@ pub fn portfolio_selection(
         .collect();
     ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     (active, ranked, items)
-}
-
-/// POST /api/models/active {model, action: enable|disable|auto}
-pub async fn api_models_active(
-    State(st): State<AppState>,
-    axum::Json(body): axum::Json<serde_json::Value>,
-) -> Response {
-    let Some(model) = body.get("model").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
-        return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
-    };
-    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("enable");
-    let dir = st.config.data.dir.clone();
-    let (before, _) = active_models(&st); // 变更前快照
-    crate::state::update_overrides(&dir, |ov| {
-        ov.active_models.include.retain(|m| m != &model);
-        ov.active_models.exclude.retain(|m| m != &model);
-        match action {
-            "enable" => ov.active_models.include.push(model.clone()),
-            "disable" => ov.active_models.exclude.push(model.clone()),
-            _ => {} // auto：回到默认排序
-        }
-    });
-    let (active, _ranked) = active_models(&st);
-    // 真实被顶者 = 变更前有、变更后没有（不是"幸存者里最低分"——见评审 #4）
-    let after: std::collections::HashSet<&String> = active.iter().collect();
-    let victim = if action == "enable" {
-        before.iter().find(|m| !after.contains(m)).cloned()
-    } else {
-        None
-    };
-    (axum::Json(json!({"status": "ok", "model": model, "action": action,
-        "active_count": active.len(), "replaced": victim}))).into_response()
 }
 
 /// 不可用原因（None = 可用）：no-key / deleted / cooldown / quota-gated

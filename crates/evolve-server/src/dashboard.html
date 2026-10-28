@@ -686,10 +686,7 @@ const T = {
   ur_gated:{zh:'配额闸门', en:'quota gated', ko:'쿼터 차단', ja:'クォータ遮断', es:'cuota bloqueada', fr:'quota bloqué'},
   ur_cooling:{zh:'冷却中', en:'cooling', ko:'쿨링', ja:'クーリング', es:'enfriando', fr:'en refroidissement'},
   act_basis:{zh:'路由组合（可路由）：{a} / {n} · 名额 = max(50, 健康 provider × 8)，单 provider ≤25%；每家内先补齐 能力×价位 9 格，免费模型必选且不占名额', en:'routing portfolio (routable): {a} / {n} · cap = max(50, healthy providers × 8), each provider ≤25%; per provider it fills the capability×price cells first; free models are always in and do not consume slots', ko:'라우팅 포트폴리오: {a}/{n}', ja:'ルーティング・ポートフォリオ：{a}/{n}', es:'portafolio de enrutado: {a}/{n}', fr:'portefeuille de routage : {a}/{n}'},
-  act_on:{zh:'已启用', en:'active', ko:'활성', ja:'有効', es:'activo', fr:'actif'},
-  act_off:{zh:'启用', en:'enable', ko:'활성화', ja:'有効化', es:'activar', fr:'activer'},
-  act_disable:{zh:'停用', en:'disable', ko:'비활성', ja:'無効化', es:'desactivar', fr:'désactiver'},
-  act_replaced:{zh:'已启用，顶掉 {x}', en:'enabled, replaced {x}', ko:'활성화, {x} 교체', ja:'有効化、{x} を置換', es:'activado, reemplazó a {x}', fr:'activé, a remplacé {x}'},
+  act_on:{zh:'范围内', en:'in scope', ko:'범위 내', ja:'スコープ内', es:'en alcance', fr:'dans le périmètre'},
   au_filtered_all:{zh:'被剔除候选（全量）', en:'Filtered candidates (all)', ko:'제외 후보(전체)', ja:'除外候補（全件）', es:'Candidatos filtrados (todos)', fr:'Candidats filtrés (tous)'},
   ratio_title:{zh:'比例控制器（目标 7:2:1，实际 vs 目标 + 当前惩罚乘子）', en:'Ratio controller (target 7:2:1 — observed vs target + penalty multipliers)', ko:'비율 컨트롤러(목표 7:2:1)', ja:'比率コントローラ（目標 7:2:1）', es:'Controlador de proporción (objetivo 7:2:1)', fr:'Contrôleur de ratio (cible 7:2:1)'},
   ratio_warm:{zh:'样本不足，冷启动中立', en:'warming up (neutral)', ko:'예열 중', ja:'ウォームアップ中', es:'calentando', fr:'en chauffe'},
@@ -2208,12 +2205,11 @@ function renderTags(){
       + (dim ? '<span class="pbadge" style="color:var(--red);border-color:var(--red)">'+esc(urTxt)+'</span>' : '')
       + (m.active
           ? '<span class="pbadge" style="color:var(--green);border-color:var(--green)" title="'+esc(t('act_on'))+'">'+esc(t('act_on'))+'</span>'
-          : '<button class="lang-btn" data-act="'+esc(m.model)+'" data-act-on="1" style="font-size:10px;padding:0 6px">'+esc(t('act_off'))+'</button>')
+          : '')
       + sel(m.capability, {kind:'capability', vals:['basic','standard','powerful']})
       + sel(m.price_tier, {kind:'price_tier', vals:['cheap','medium','premium']})
       + '<span style="color:var(--dim);min-width:34px">'+esc(t('tags_auto'))+':'+esc(m.capability_auto.slice(0,4))+'</span>'
       + '<button class="lang-btn" data-tag-reset="'+esc(m.model)+'" style="font-size:10px;padding:0 6px">'+esc(t('tags_reset'))+'</button>'
-      + (m.active ? '<button class="lang-btn" data-act="'+esc(m.model)+'" data-act-on="0" style="font-size:10px;padding:0 6px">'+esc(t('act_disable'))+'</button>' : '')
       + '</div>';
   }).join('');
   // 优先级图例（与其他标签颜色说明同区展示，减少行内占位）
@@ -2248,11 +2244,6 @@ function renderTags(){
     body[sel.dataset.tagKind] = sel.value;
     fetch('/api/model-tags', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)})
       .then(() => { loadTags(); refresh(); });
-  }));
-  list.querySelectorAll('[data-act]').forEach(b => b.addEventListener('click', () => {
-    fetch('/api/models/active', {method:'POST', headers:{'content-type':'application/json'},
-      body: JSON.stringify({model: b.dataset.act, action: b.dataset.actOn === '1' ? 'enable' : 'disable'})})
-      .then(r => r.json()).then(j => { if (j.replaced) console.info(t('act_replaced').replace('{x}', j.replaced)); loadTags(); refresh(); });
   }));
   list.querySelectorAll('[data-tag-reset]').forEach(b => b.addEventListener('click', () => {
     fetch('/api/model-tags', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({model: b.dataset.tagReset, reset: true})})

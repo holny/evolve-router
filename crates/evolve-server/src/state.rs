@@ -1421,7 +1421,6 @@ pub fn build_router(state: AppState) -> axum::Router {
             axum::routing::get(crate::meta::api_models_favorite_get).post(crate::meta::api_models_favorite_post),
         )
         .route("/api/report", axum::routing::get(crate::meta::api_report))
-        .route("/api/models/active", axum::routing::post(crate::meta::api_models_active))
         .route("/api/onboarding", axum::routing::get(crate::meta::api_onboarding))
         .route("/api/portfolio", axum::routing::get(crate::meta::api_portfolio))
         .route(
@@ -1471,10 +1470,6 @@ pub struct Overrides {
     /// 用户在面板删除的发现 provider（按 base_url 记忆，重扫不加回；恢复即移出此表）
     #[serde(default)]
     pub removed_base_urls: Vec<String>,
-    /// 活跃集手动覆盖（2026-10 用户裁决：默认活跃=最近发布/最近的 50 个）：
-    /// include = 手动开启（顶掉最低分），exclude = 手动停用
-    #[serde(default)]
-    pub active_models: ActiveOverride,
     /// 模型标签用户覆盖（2026-10）：model_id → {capability, price_tier}
     /// ——默认自动推导（tags::default_tags），此处仅存用户显式修改
     #[serde(default)]
@@ -1520,15 +1515,6 @@ impl RoutingModeCfg {
             _ => None,
         }
     }
-}
-
-/// 活跃集覆盖
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct ActiveOverride {
-    #[serde(default)]
-    pub include: Vec<String>,
-    #[serde(default)]
-    pub exclude: Vec<String>,
 }
 
 /// 标签覆盖（可只改一项）

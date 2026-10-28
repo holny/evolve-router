@@ -207,6 +207,30 @@ async fn post_replace_unknown_400() {
 /// （gateway 组合口径下三者全 active，故此断言在分发实现前必红）
 /// Task 6：chat 事件带来源标签——favorites 模式下路由到心选模型的事件
 /// `source == "fav"`（gateway 模式恒 null，由 relay 分支保证）
+/// Task 7：enable/disable 开关退役（用户裁决 2026-10-28）——
+/// 排除语义归 Off(-3)、强制归 +3 Pinned/心选，路由范围由双路径决定。
+#[tokio::test]
+async fn models_active_route_retired() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    let (status, _) = send(app, req("POST", "/api/models/active", json!({"model": "mini", "action": "enable"}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "retired endpoint must be gone");
+}
+
+#[tokio::test]
+async fn model_tags_have_active_but_no_pinned() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    let (_, body) = send(app.clone(), get("/api/model-tags")).await;
+    let m = body["models"].as_array().and_then(|a| a.first()).expect("catalog models present");
+    assert!(m["active"].is_boolean(), "active must stay (mode-aware scope membership)");
+    assert!(m.get("pinned").is_none(), "pinned flag retired from tags");
+    let (_, pf) = send(app, get("/api/portfolio")).await;
+    assert!(pf.get("totals").and_then(|t| t.get("pinned")).is_none(), "pinned retired from portfolio totals");
+    let prov = pf["providers"].as_array().and_then(|a| a.first()).expect("providers present");
+    assert!(prov.get("pinned").is_none(), "pinned retired from portfolio providers");
+}
+
 #[tokio::test]
 async fn chat_event_carries_source_tag() {
     let port = spawn_mock_upstream().await;

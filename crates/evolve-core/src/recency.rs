@@ -278,8 +278,6 @@ pub struct PortfolioItem {
     pub last_used_ms: Option<u64>,
     /// 配额余量 0..1（未知按 0.5）——额度多的 provider 权重更高
     pub quota_ratio: f32,
-    /// 用户手动 pin（不占名额）
-    pub pinned: bool,
 }
 
 /// 动态名额：最少 `PORTFOLIO_MIN_CAP`，随健康 provider 数放大
@@ -293,8 +291,9 @@ pub fn provider_slot_cap(cap: usize) -> usize {
 }
 
 /// 选组合（顺序即 UI/日志展示顺序）：
-/// ① pin（不占名额）② 免费直通车（不占名额）③ 每 provider 按权重分名额，
-/// 家内**先补满 能力×价位 9 格**（每格取代表作）④ 再按 新发布/近期使用 补齐。
+/// ① 免费直通车（不占名额）② 每 provider 按权重分名额，
+/// 家内**先补满 能力×价位 9 格**（每格取代表作）③ 再按 新发布/近期使用 补齐。
+/// （旧"用户 pin"步骤已退役——2026-10-28：强制入选由 +3 Pinned/心选范围承担）
 pub fn select_portfolio(items: &[PortfolioItem], now_ms: u64) -> Vec<String> {
     use std::collections::{BTreeMap, HashSet};
     let mut out: Vec<String> = Vec::new();
@@ -304,14 +303,10 @@ pub fn select_portfolio(items: &[PortfolioItem], now_ms: u64) -> Vec<String> {
             out.push(id.to_string());
         }
     };
-    // 计入名额的只有"非免费且非 pin"的模型（用户裁决 2026-10）——
+    // 计入名额的只有"非免费"的模型（用户裁决 2026-10）——
     // 用独立计数器，别拿 out.len() 与 cap 比（那样免费会把上限吃掉）
     let mut slot_used = 0usize;
-    // ① 用户 pin：最高优先，不占名额
-    for it in items.iter().filter(|i| i.pinned) {
-        push(&it.id, &mut out, &mut seen);
-    }
-    // ② 免费直通车：必选、不占名额（免费是"必然可用"的保底覆盖）
+    // ① 免费直通车：必选、不占名额（免费是"必然可用"的保底覆盖）
     for it in items.iter().filter(|i| i.free) {
         push(&it.id, &mut out, &mut seen);
     }
@@ -521,7 +516,6 @@ mod tests {
             release_ts: Some(1_700_000_000_000),
             last_used_ms: None,
             quota_ratio: 0.5,
-            pinned: false,
         }
     }
 
@@ -570,23 +564,19 @@ mod tests {
         }
     }
 
-    /// 免费直通车 + pin：必选且不占名额（名额被占满也要在）
+    /// 免费直通车：必选且不占名额（名额被占满也要在）
     #[test]
     fn portfolio_free_models_ride_free() {
         let mut items: Vec<PortfolioItem> = vec![item("p/free-1", "p", 0, 0, true)];
         for i in 0..40 {
             items.push(item(&format!("p/m{i}"), "p", (i % 3) as u8, ((i / 3) % 3) as u8, false));
         }
-        let mut pinned = item("q/pinned", "q", 1, 1, false);
-        pinned.pinned = true;
-        items.push(pinned);
         assert_eq!(portfolio_cap(1), PORTFOLIO_MIN_CAP);
         let out = select_portfolio(&items, 1_700_000_000_000);
         assert!(out.contains(&"p/free-1".to_string()), "free is a must: {out:?}");
-        assert!(out.contains(&"q/pinned".to_string()), "pinned is a must: {out:?}");
-        // 单供应商 41 个模型 + 免费 + pin：组合上限 50 没满 → 全部纳入
-        // （免费/pin 是"额外"的，不吃名额——若吃名额就不会是 43）
-        assert_eq!(out.len(), 42, "free/pinned ride free on top of the slots: {out:?}");
+        // 单供应商 41 个模型 + 免费：组合上限 50 没满 → 全部纳入
+        // （免费是"额外"的，不吃名额——若吃名额就不会是 41）
+        assert_eq!(out.len(), 41, "free rides free on top of the slots: {out:?}");
     }
 
     /// 免费/pin 不占名额：即使共享同一个 provider，也要在名额耗尽后仍被纳入
