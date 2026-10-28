@@ -51,6 +51,9 @@ public struct PanelView: View {
                 header
                 decisionBanner
                 metricsCard
+                if state.routingMode == "favorites" {
+                    favoritesCard
+                }
                 if !state.providers.isEmpty {
                     // Providers 行的 tokens/速率/TTFT 也是窗口口径 → 切换中同样置灰
                     providersCard
@@ -130,6 +133,8 @@ public struct PanelView: View {
                                 .foregroundStyle(.tertiary)
                                 .fixedSize()
                         }
+                        // 双路径开关（2026-10-28 用户裁决，mockup B：头行内嵌紧凑开关）
+                        modeToggle
                     }
                     HStack(spacing: 4) {
                         if let ts = state.lastSync {
@@ -457,6 +462,307 @@ public struct PanelView: View {
 
     // MARK: - Providers
 
+    // MARK: - 心选路径（2026-10-28 双路径）
+
+    /// 头行内嵌双路径开关（mockup B：紧凑两段，贴标题右侧零额外高度）
+    private var modeToggle: some View {
+        HStack(spacing: 0) {
+            modeSeg(t("fav_gateway"), selected: state.routingMode != "favorites") {
+                state.setRoutingMode("gateway")
+            }
+            modeSeg(t("fav_favorites"), selected: state.routingMode == "favorites") {
+                state.setRoutingMode("favorites")
+            }
+        }
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+        .clipShape(Capsule())
+        .opacity(state.external ? 0.5 : 1)
+        .disabled(state.external)
+    }
+
+    private func modeSeg(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Text(label)
+            .font(.system(size: 9.5, weight: selected ? .semibold : .regular))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 2)
+            .background(selected ? Capsule().fill(Color.primary.opacity(0.10)) : nil)
+            .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .onTapGesture(perform: action)
+    }
+
+    /// 来源标签色（与 spec 定稿一致：全冷色/中性，避开红黄警示色）
+    static func sourceTint(_ src: String?) -> Color? {
+        switch src {
+        case "fav": return Color(red: 0.52, green: 0.80, blue: 0.09)   // lime #84cc16
+        case "top": return Color(red: 0.23, green: 0.51, blue: 0.96)   // blue #3b82f6
+        case "new": return Color(red: 0.66, green: 0.33, blue: 0.97)   // purple #a855f7
+        case "rec": return Color(red: 0.08, green: 0.72, blue: 0.65)   // teal #14b8a6
+        default: return nil
+        }
+    }
+
+    static func sourceKey(_ src: String?) -> String? {
+        switch src {
+        case "fav": return "src_fav"
+        case "top": return "src_top"
+        case "new": return "src_new"
+        case "rec": return "src_rec"
+        default: return nil
+        }
+    }
+
+    /// 来源胶囊（淡底描边，B 方案）——主来源 + FREE 第二标签
+    private func sourcePills(for modelId: String) -> some View {
+        let tag = state.modelTagMap[modelId]
+        let tint = Self.sourceTint(tag?.source)
+        let key = Self.sourceKey(tag?.source)
+        return HStack(spacing: 3) {
+            if let tint, let key {
+                tagPill(t(key), tint: tint, bg: tint.opacity(0.14), help: "")
+            }
+            if tag?.isFree == true {
+                tagPill(t("src_free"), tint: .gray, bg: Color.gray.opacity(0.14), help: "")
+            }
+        }
+    }
+
+    /// 心选卡（favorites 模式才渲染）：引导横幅 + 每 provider chips/空位 +
+    /// 打开中的比较选择器 + 来源分布。gateway 模式整个不出现（面板维持现状）
+    private var favoritesCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let pickerProvider = state.favoritePickerProvider {
+                pickerCard(pickerProvider)
+            } else {
+                HStack(spacing: 6) {
+                    sectionLabel("heart.text.square", t("fav_card"))
+                    Spacer(minLength: 0)
+                    if favoritesEmpty {
+                        // 被动引导横幅：默认照跑，挑选只是引导（用户裁决）
+                        HStack(spacing: 5) {
+                            Text(t("fav_nudge"))
+                                .font(.system(size: 9))
+                                .foregroundStyle(Color(red: 0.30, green: 0.49, blue: 0.06))
+                            Button {
+                                if let first = state.favorites.keys.sorted().first {
+                                    state.openFavoritePicker(provider: first)
+                                } else if let first = firstProviderWithModels {
+                                    state.openFavoritePicker(provider: first)
+                                }
+                            } label: {
+                                Text(t("fav_choose"))
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color(red: 0.52, green: 0.80, blue: 0.09)))
+                                    .foregroundStyle(Color(red: 0.10, green: 0.18, blue: 0.02))
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(state.external ? 0.5 : 1)
+                            .disabled(state.external)
+                        }
+                    }
+                }
+                // chips：每 provider 一行（心选 chip × 移除 + 空位 +）
+                ForEach(sortedFavoriteProviders, id: \.self) { provider in
+                    favoriteChipsRow(provider)
+                }
+                if !favoritesEmpty && state.routingMode == "favorites" {
+                    sourceDistRow
+                }
+                if let notice = state.favoriteNotice {
+                    Text(notice)
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(groupBackground)
+    }
+
+    private var favoritesEmpty: Bool {
+        state.favorites.values.allSatisfy { $0.isEmpty }
+    }
+
+    /// 有目录模型的 provider（提供"第一次挑从哪家开始"的次序）
+    private var firstProviderWithModels: String? {
+        state.providers.first?.id
+    }
+
+    private var sortedFavoriteProviders: [String] {
+        var names = Set(state.favorites.keys)
+        _ = names.remove("")
+        var all = Array(state.favorites.keys)
+        // 有心选的 provider 优先展示；没心选记录的 provider（目录里存在）补一个空位行
+        all.sort()
+        return all
+    }
+
+    private func favoriteChipsRow(_ provider: String) -> some View {
+        let favs = state.favorites[provider] ?? []
+        let slots = max(0, 3 - favs.count)
+        return HStack(spacing: 4) {
+            Text(provider)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .frame(maxWidth: 70, alignment: .leading)
+            ForEach(favs, id: \.self) { model in
+                HStack(spacing: 3) {
+                    Text(model)
+                        .font(.system(size: 9.5, design: .monospaced))
+                            .lineLimit(1)
+                    Button {
+                        state.removeFavorite(provider: provider, model: model)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 6.5, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(state.external ? t("external") : t("fav_remove"))
+                    .disabled(state.external)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+            }
+            ForEach(0..<slots, id: \.self) { _ in
+                Button {
+                    state.openFavoritePicker(provider: provider)
+                } label: {
+                    Text(t("fav_empty_slot"))
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3])))
+                }
+                .buttonStyle(.plain)
+                .disabled(state.external)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 来源分布（最近请求按来源聚合，model → modelTagMap.source 映射）
+    private var sourceDistRow: some View {
+        var srcCounts: [String: Int] = [:]
+        for r in state.recent.prefix(50) {
+            guard let key = Self.sourceKey(state.modelTagMap[r.model]?.source) else { continue }
+            srcCounts[key, default: 0] += 1
+        }
+        let total = srcCounts.values.reduce(0, +)
+        return Group {
+            if total > 0 {
+                HStack(spacing: 6) {
+                    Text(t("fav_dist"))
+                        .font(.system(size: 8.5))
+                        .foregroundStyle(.tertiary)
+                    ForEach(srcCounts.keys.sorted(), id: \.self) { key in
+                        HStack(spacing: 2) {
+                            tagPill(t(key), tint: Self.sourceTint(key.replacingOccurrences(of: "src_", with: "")) ?? .secondary, bg: (Self.sourceTint(key.replacingOccurrences(of: "src_", with: "")) ?? .secondary).opacity(0.14), help: "")
+                            Text("\(srcCounts[key] ?? 0)")
+                                .font(.system(size: 8.5))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    /// provider 维度比较选择器（卡片内展开）：目录全量 + y-day/fail/ttft/price 四列
+    private func pickerCard(_ provider: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Button {
+                    state.closeFavoritePicker()
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                Text(provider)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                TextField(t("fav_search"), text: $state.favoritePickerSearch)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 10))
+                    .frame(width: 90)
+            }
+            // 表头（比较列）
+            HStack(spacing: 6) {
+                Text(t("models")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
+                Text(t("fav_yday")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
+                Text(t("fav_fail")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 30, alignment: .trailing)
+                Text(t("fav_ttft")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
+                Text(t("fav_price")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 40, alignment: .trailing)
+            }
+            let query = state.favoritePickerSearch.lowercased()
+            let rows = state.favoritePickerRows
+                .filter { query.isEmpty || $0.model.lowercased().contains(query) }
+                .sorted { $0.ydayTokens == $1.ydayTokens ? $0.model < $1.model : $0.ydayTokens > $1.ydayTokens }
+            ScrollView(.vertical, showsIndicators: true) {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(rows) { row in
+                        Button {
+                            if row.favorite {
+                                state.removeFavorite(provider: provider, model: row.model)
+                            } else if let current = state.favorites[provider], current.count >= 3, let replaced = current.first {
+                                state.setFavorite(provider: provider, model: row.model, replace: replaced)
+                            } else {
+                                state.setFavorite(provider: provider, model: row.model)
+                            }
+                        } label: {
+                            pickerRowView(row)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(height: 120)
+        }
+    }
+
+    private func pickerRowView(_ row: FavoritePickRow) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: row.favorite ? "star.fill" : "star")
+                .font(.system(size: 8))
+                .foregroundStyle(row.favorite ? Color(red: 0.52, green: 0.80, blue: 0.09) : .secondary)
+            Text(row.model)
+                .font(.system(size: 10, design: .monospaced))
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(AppState.fmtTok(row.ydayTokens))
+                .font(.system(size: 9))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .trailing)
+            Text(row.failPct.map { "\($0)%" } ?? "-")
+                .font(.system(size: 9))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 30, alignment: .trailing)
+            Text(row.ttftMs.map { Self.fmtMs($0) } ?? "-")
+                .font(.system(size: 9))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 36, alignment: .trailing)
+            Text(row.priceTier)
+                .font(.system(size: 9))
+                .foregroundStyle(.tertiary)
+                .frame(width: 40, alignment: .trailing)
+        }
+        .padding(.vertical, 1)
+    }
+
     private var providersCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -609,8 +915,12 @@ public struct PanelView: View {
                 .minimumScaleFactor(0.75)
                 // ③ 标签行（today 视图才展示：yesterday 的标签是当前态，对历史无意义）
                 if state.statWindowToday,
-                   (m.capability?.isEmpty == false) || (m.priceTier?.isEmpty == false) {
+                   (m.capability?.isEmpty == false) || (m.priceTier?.isEmpty == false) || state.modelTagMap[m.id]?.source != nil {
                     HStack(spacing: 4) {
+                        // 心选路径来源标签（favorites 模式下由 /api/model-tags 下发）
+                        if state.routingMode == "favorites" {
+                            sourcePills(for: m.id)
+                        }
                         if let cap = m.capability, !cap.isEmpty {
                             tagPill(cap, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: Self.tagHelpCap)
                         }

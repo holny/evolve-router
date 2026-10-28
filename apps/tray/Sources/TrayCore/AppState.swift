@@ -177,6 +177,11 @@ public struct ModelTagInfo: Equatable {
     /// 用户优先级档位（-3 Off … +3 Pinned；0 = 不干预）——/api/model-tags 下发，
     /// 与 Web dashboard 同源（overrides.json）
     public let priority: Int
+    /// 心选路径来源标签（2026-10-28）：fav/top/new/rec；none/nil = 非来源成员。
+    /// free 模型的 FREE 第二标签由 isFree 渲染
+    public let source: String?
+    /// 免费模型（/api/model-tags 下发）——FREE 第二标签
+    public let isFree: Bool
 }
 
 public struct ModelRow: Identifiable, Equatable {
@@ -303,6 +308,20 @@ public final class AppState: ObservableObject {
     /// 模型级健康冷却（/api/health）：model → 冷却态（原因 + 是否账户级）
     @Published public var modelCooling: [String: ModelCoolState] = [:]
 
+    // MARK: 心选路径（2026-10-28 双路径）
+
+    /// 当前路由路径模式："gateway"（网关智能）| "favorites"（心选智能）
+    @Published public var routingMode: String = "gateway"
+    /// 全局心选清单（/api/routing-mode 下发）：provider → ≤3 个心选 model id
+    @Published public var favorites: [String: [String]] = [:]
+    /// 心选变更的临时提示（同 priorityNotice 语义）
+    @Published public var favoriteNotice: String?
+    /// 打开的选择器对应的 provider（nil = 关闭；卡片内展开，不弹二级窗口）
+    @Published public var favoritePickerProvider: String?
+    /// 选择器行（打开时拉一次 /api/models/favorite?provider=…）
+    @Published public var favoritePickerRows: [FavoritePickRow] = []
+    @Published public var favoritePickerSearch = ""
+
     @Published public var requests = 0
     @Published public var successRate = 0
     @Published public var tokensK = "-"
@@ -335,6 +354,8 @@ public final class AppState: ObservableObject {
         var softPct = 60
         var modelCooling: [String: ModelCoolState] = [:]
         var modelTagMap: [String: ModelTagInfo] = [:]
+        var routingMode = "gateway"
+        var favorites: [String: [String]] = [:]
         var modelRows: [ModelRow] = []
         var requests = 0
         var successRate = 0
@@ -374,6 +395,8 @@ public final class AppState: ObservableObject {
         upd(\.softPct, pending.softPct)
         upd(\.modelCooling, pending.modelCooling)
         upd(\.modelTagMap, pending.modelTagMap)
+        upd(\.routingMode, pending.routingMode)
+        upd(\.favorites, pending.favorites)
         upd(\.modelRows, pending.modelRows)
         upd(\.requests, pending.requests)
         upd(\.successRate, pending.successRate)
@@ -544,9 +567,24 @@ public final class AppState: ObservableObject {
                         priceTier: (m["price_tier"] as? String) ?? "",
                         unusableReason: ((m["usable"] as? Bool) == false)
                             ? ((m["unusable_reason"] as? String) ?? "unusable") : nil,
-                        priority: (m["priority"] as? Int) ?? 0)
+                        priority: (m["priority"] as? Int) ?? 0,
+                        source: m["source"] as? String,
+                        isFree: (m["free"] as? Bool) ?? false)
                 }
                 put(\.modelTagMap, \.modelTagMap, tm)
+            }
+            // 心选路径（双路径开关 + 全局心选清单）：低频变化，随轮询直读快照
+            if case (200, let rmData)? = try? await get("/api/routing-mode"),
+               let rmObj = try? JSONSerialization.jsonObject(with: rmData) as? [String: Any] {
+                let mode = (rmObj["mode"] as? String) ?? "gateway"
+                var favs: [String: [String]] = [:]
+                if let fObj = rmObj["favorites"] as? [String: Any] {
+                    for (p, v) in fObj {
+                        favs[p] = (v as? [String]) ?? []
+                    }
+                }
+                put(\.routingMode, \.routingMode, mode)
+                put(\.favorites, \.favorites, favs)
             }
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
@@ -878,7 +916,8 @@ public final class AppState: ObservableObject {
         if let tag = modelTagMap[model] {
             var tm = modelTagMap
             tm[model] = ModelTagInfo(capability: tag.capability, priceTier: tag.priceTier,
-                                     unusableReason: tag.unusableReason, priority: level)
+                                     unusableReason: tag.unusableReason, priority: level,
+                                     source: tag.source, isFree: tag.isFree)
             put(\.modelTagMap, \.modelTagMap, tm)
         }
         Task {
@@ -909,4 +948,107 @@ public final class AppState: ObservableObject {
             await pollData()
         }
     }
+
+    // MARK: - 心选路径（2026-10-28 双路径）
+
+    /// PUT /api/routing-mode —— 双路径热切换。乐观落地（切完立刻反映，失败由
+    /// 下一轮轮询回读纠偏，与 setPriority 同纪律）
+    public func setRoutingMode(_ mode: String) {
+        guard mode == "gateway" || mode == "favorites" else { return }
+        upd(\.routingMode, mode)
+        guard !external else { return }
+        Task {
+            guard let url = URL(string: Config.baseURL + "/api/routing-mode"),
+                  let payload = try? JSONSerialization.data(withJSONObject: ["mode": mode]) else { return }
+            var req = URLRequest(url: url)
+            req.httpMethod = "PUT"
+            req.setValue("application/json", forHTTPHeaderField: "content-type")
+            req.httpBody = payload
+            guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return }
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if status != 200 {
+                let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { $0["error"] as? [String: Any] }
+                    .flatMap { $0["message"] as? String } ?? "gateway unreachable (\(status))"
+                showFavoriteNotice("⚠︎ " + msg)
+            }
+            await pollData()
+        }
+    }
+
+    /// POST /api/models/favorite —— 增设/换选/移除心选。replace 非空 = 原位换选；
+    /// remove = 移除。成功后刷新选择器行 + 全局清单
+    public func setFavorite(provider: String, model: String, replace: String? = nil) {
+        var body: [String: Any] = ["provider": provider, "model": model]
+        if let replace = replace { body["replace"] = replace }
+        Task { await favoriteAction(provider: provider, body: body) }
+    }
+
+    public func removeFavorite(provider: String, model: String) {
+        Task { await favoriteAction(provider: provider, body: ["provider": provider, "model": model, "remove": true]) }
+    }
+
+    /// 打开 provider 维度比较选择器（目录全量 + 昨日/失败率/首字延迟/价位四列）
+    public func openFavoritePicker(provider: String) {
+        upd(\.favoritePickerProvider, provider)
+        upd(\.favoritePickerSearch, "")
+        Task {
+            if case (200, let data)? = try? await get("/api/models/favorite?provider=\(provider)"),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let arr = obj["models"] as? [[String: Any]] {
+                let rows: [FavoritePickRow] = arr.compactMap { m in
+                    guard let model = m["model"] as? String else { return nil }
+                    return FavoritePickRow(
+                        model: model,
+                        priceTier: (m["price_tier"] as? String) ?? "-",
+                        ydayTokens: (m["yesterday_tokens"] as? Int) ?? Int((m["yesterday_tokens"] as? Double) ?? 0),
+                        failPct: (m["fail_pct"] as? Int) ?? (m["fail_pct"] as? Double).map(Int.init),
+                        ttftMs: (m["ttft_ms"] as? Int) ?? (m["ttft_ms"] as? Double).map(Int.init),
+                        favorite: (m["favorite"] as? Bool) ?? false)
+                }
+                upd(\.favoritePickerRows, rows)
+            }
+        }
+    }
+
+    public func closeFavoritePicker() {
+        upd(\.favoritePickerProvider, nil)
+        upd(\.favoritePickerRows, [])
+    }
+
+    private func favoriteAction(provider: String, body: [String: Any]) async {
+        let (status, data) = (try? await post("/api/models/favorite", body: body)) ?? (0, Data())
+        if status != 200 {
+            let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                .flatMap { $0["error"] as? [String: Any] }
+                .flatMap { $0["message"] as? String } ?? "gateway unreachable (\(status))"
+            showFavoriteNotice("⚠︎ " + msg)
+            return
+        }
+        showFavoriteNotice(t("fav_set"))
+        // 刷新全局清单 + 打开中的选择器
+        await pollData()
+        if favoritePickerProvider == provider {
+            openFavoritePicker(provider: provider)
+        }
+    }
+
+    private func showFavoriteNotice(_ msg: String) {
+        upd(\.favoriteNotice, msg)
+        Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            upd(\.favoriteNotice, nil)
+        }
+    }
+}
+
+/// 选择器行：provider 目录全量 + 比较列（昨日 token / 失败率 / 首字延迟 / 价位）
+public struct FavoritePickRow: Identifiable, Equatable {
+    public var id: String { model }
+    public let model: String
+    public let priceTier: String
+    public let ydayTokens: Int
+    public let failPct: Int?
+    public let ttftMs: Int?
+    public let favorite: Bool
 }
