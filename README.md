@@ -193,6 +193,17 @@ Quality cascade: a *successful* response that is degenerate / empty / has broken
 | **Routing portfolio** | The routable pool is a **per-provider portfolio**, not one global list: `cap = max(50, healthy providers × 8)`, each provider ≤ 25 % of it. Inside a provider the capability × price cells are filled first, then newest / recently used. Free models are always in and do not consume slots, and pinned models do not either. This keeps one provider that ships many models from taking every slot — and keeps large-context models reachable |
 | **Supply awareness** | Subscription quota (it expires!) ranks above pay-as-you-go spend. API-queryable providers refresh through a 90 s quota watchdog; others are probed with real requests every 5–10 min |
 
+### Two routing paths: Gateway / Favorites *(your call, hot-switchable)*
+
+The gateway runs one of two routing paths — switch anytime from the menu-bar panel or the dashboard header (persisted, hot-applied, in-flight sessions finish naturally):
+
+| Path | What it does |
+|---|---|
+| **Gateway** *(default)* | Fully automatic: the judgment model picks per request from the routing portfolio — nothing to configure |
+| **Favorites** *(curated)* | You pick up to **3 favorite models per provider** (menu-bar Favorites card or dashboard editor, with yesterday-usage / fail-rate / TTFT / price columns to compare); the scope adds **2 yesterday-top + 1 newest + all free models** and must still cover the capability × price cells (a **REC** model fills a cell nothing covers). Favorites get a soft **×1.30** score boost (explicit ▲▼ levels replace it), the newest model gets a **new-player boost** that decays over its first 50 K tokens, and the mix lands around **70 % favorites+free / 10 % yesterday-top / 20 % newest** by emergence, not quotas |
+
+Both paths share the same hard gates (quality floor, price tiers, context windows, quota, health) and the same 7-level priority: **multiplicative** score factors — ±1 = ±30 %, ±2 = ±60 %, **+3 Pinned** forces a model into the pool, **−3 Off** bans it.
+
 ## Decision model (optional)
 
 Routing works without one — the built-in rule judge is fully functional. To add one, declare slots in the config file; that is the only place they are read from (a gateway started by the menu-bar app at login has no shell environment, so environment-only configuration would silently degrade to rules):
