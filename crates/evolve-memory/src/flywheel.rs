@@ -527,6 +527,25 @@ impl Flywheel {
         out
     }
 
+    /// 逐模型 token 用量（in+out 合计）——心选范围的"昨日用量"数据源
+    /// （2026-10-28）。桶相交判定与 [`Self::hourly_window`] 一致。
+    pub fn tokens_window(&self, start_ms: u64, end_ms: u64) -> HashMap<String, u64> {
+        let Ok(inner) = self.inner.lock() else { return HashMap::new() };
+        let mut out: HashMap<String, u64> = HashMap::new();
+        for (model, buckets) in inner.hourly.iter() {
+            let mut sum = 0u64;
+            for b in buckets {
+                if b.hour_start_ms < end_ms && b.hour_start_ms + HOUR_MS > start_ms {
+                    sum += b.in_tok + b.out_tok;
+                }
+            }
+            if sum > 0 {
+                out.insert(model.clone(), sum);
+            }
+        }
+        out
+    }
+
     pub fn save(&self) {
         let Ok(mut inner) = self.inner.lock() else { return };
         if !inner.dirty {
@@ -748,5 +767,36 @@ mod hourly_tests {
         let f2 = Flywheel::open_with(&dir, StrategyParams::default());
         let w = f2.hourly_window(noon - H, noon + H);
         assert_eq!(w["m"]["requests"], 2, "hourly buckets must persist across restart: {}", w["m"]);
+    }
+}
+
+// 心选范围的"昨日用量"数据源（2026-10-28）：in+out 合计的日历窗口聚合
+#[cfg(test)]
+mod tokens_window_tests {
+    use super::Flywheel;
+    use crate::strategy::StrategyParams;
+    use serde_json::json;
+
+    fn fw(dir_suffix: &str) -> Flywheel {
+        Flywheel::open_with(
+            &format!("{}/fw-tokwin-{}", std::env::temp_dir().to_string_lossy(), dir_suffix),
+            StrategyParams::default(),
+        )
+    }
+
+    const H: u64 = 3_600_000;
+    const DAY: u64 = 24 * H;
+
+    #[test]
+    fn tokens_window_sums_in_and_out() {
+        let f = fw("sums");
+        let noon = 1_792_000_000_000 / DAY * DAY + 12 * H;
+        f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":noon,"ttft_ms":100,"total_ms":400,"prompt_tokens":100,"completion_tokens":50,"cached_tokens":0}));
+        f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":noon+60_000,"ttft_ms":100,"total_ms":400,"prompt_tokens":10,"completion_tokens":5,"cached_tokens":0}));
+        // 窗口外的桶必须排除
+        f.observe(&json!({"kind":"chat","chosen":"far","status":200,"ts":noon - 2*DAY,"ttft_ms":100,"total_ms":400,"prompt_tokens":999,"completion_tokens":0,"cached_tokens":0}));
+        let map = f.tokens_window(noon - H, noon + H);
+        assert_eq!(map.get("m"), Some(&165), "in+out summed over range: {map:?}");
+        assert!(!map.contains_key("far"), "buckets outside range must be excluded: {map:?}");
     }
 }

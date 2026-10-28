@@ -79,6 +79,101 @@ pub fn recency_score(model_id: &str, last_used_ms: Option<u64>) -> u64 {
     release_ts_from_id(model_id).unwrap_or(0).max(last_used_ms.unwrap_or(0))
 }
 
+// ───────────────────────── 本地日历（心选范围"昨日用量"，2026-10-28） ─────────────────────────
+// 服务端首次需要本地时区日历口径（api 的绝对窗口此前"由客户端算好 epoch 传入"，
+// 但路由侧的昨日聚合不能依赖客户端暗示）。不引入 chrono/time 依赖——经
+// localtime_r（macOS libSystem / Linux glibc 皆有）取本地民事日期。
+
+#[repr(C)]
+struct CTm {
+    tm_sec: std::os::raw::c_int,
+    tm_min: std::os::raw::c_int,
+    tm_hour: std::os::raw::c_int,
+    tm_mday: std::os::raw::c_int,
+    tm_mon: std::os::raw::c_int,
+    tm_year: std::os::raw::c_int,
+    tm_wday: std::os::raw::c_int,
+    tm_yday: std::os::raw::c_int,
+    tm_isdst: std::os::raw::c_int,
+    tm_gmtoff: std::os::raw::c_long,
+    tm_zone: *const std::os::raw::c_char,
+}
+
+unsafe extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut CTm) -> *mut CTm;
+}
+
+/// Howard Hinnant civil → 天数（自 1970-01-01）；与 parse_date_seg 内联公式同源
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// 民事日期（y,m,d）当日 00:00 UTC 的 epoch ms
+pub fn civil_day_start_utc_ms(y: i64, m: i64, d: i64) -> u64 {
+    (days_from_civil(y, m, d) * 86_400) as u64 * 1000
+}
+
+/// 本地时区的今天日期（年, 月, 日）——经 localtime_r
+pub fn local_date_ymd(now_ms: u64) -> (i64, i64, i64) {
+    let secs = (now_ms / 1000) as i64;
+    let mut tm = CTm {
+        tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0, tm_mon: 0, tm_year: 0,
+        tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: std::ptr::null(),
+    };
+    unsafe { localtime_r(&secs, &mut tm) };
+    ((tm.tm_year as i64) + 1900, (tm.tm_mon as i64) + 1, tm.tm_mday as i64)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+    }
+}
+
+/// 本地日历"昨天"的 [起点, 终点) epoch ms（按民事日借位，非 24h 回退——DST 日亦正确）。
+/// 终点 = 本地今天零点。
+pub fn local_yesterday_bounds_ms(now_ms: u64) -> (u64, u64) {
+    let (y, m, d) = local_date_ymd(now_ms);
+    let (ny, nm, nd) = if d > 1 {
+        (y, m, d - 1)
+    } else if m > 1 {
+        (y, m - 1, days_in_month(y, m - 1))
+    } else {
+        (y - 1, 12, 31)
+    };
+    (civil_day_start_utc_ms(ny, nm, nd), civil_day_start_utc_ms(y, m, d))
+}
+
+#[cfg(test)]
+mod calendar_tests {
+    #[test]
+    fn civil_day_start_matches_known_utc_midnights() {
+        assert_eq!(super::civil_day_start_utc_ms(1970, 1, 1), 0);
+        assert_eq!(super::civil_day_start_utc_ms(1970, 1, 2), 86_400_000);
+        assert_eq!(super::civil_day_start_utc_ms(2024, 1, 1), 1_704_067_200_000);
+        assert_eq!(super::civil_day_start_utc_ms(2026, 10, 28), 1_793_145_600_000);
+    }
+
+    #[test]
+    fn yesterday_bounds_span_exactly_one_civil_day() {
+        let now = 1_793_200_000_000u64; // 2026-10-28 前后的任意时刻
+        let (start, end) = super::local_yesterday_bounds_ms(now);
+        assert_eq!(end - start, 86_400_000, "civil-day borrow must yield exactly 24h");
+        assert!(start < now, "yesterday window must end at local midnight (before now)");
+    }
+}
+
 /// 活跃集选择（用户裁决：新发布/最近使用两部分**动态占比**，且新发布有保底）：
 /// 1. `pinned_in`（手动开启）先占位；`pinned_out`（手动停用）剔除
 /// 2. 按 `newest_quota` 从"按发布日期降序"取新发布保底名额

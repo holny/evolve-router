@@ -175,3 +175,24 @@ async fn post_replace_unknown_400() {
     let (status, _) = send(app, req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini", "replace": "nope"}))).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+/// Task 4：routing_mode=favorites 时 active 判定必须走心选范围——
+/// 只有 frontier 是心选 → tags 里 frontier.active=true、mini/standard.active=false
+/// （gateway 组合口径下三者全 active，故此断言在分发实现前必红）
+#[tokio::test]
+async fn model_tags_active_follows_favorites_scope() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    let (s, _) = send(app.clone(), req("PUT", "/api/routing-mode", json!({"mode": "favorites"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app.clone(), req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "frontier"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, body) = send(app, get("/api/model-tags")).await;
+    let find = |id: &str| body["models"].as_array().unwrap().iter().find(|m| m["model"] == id).unwrap().clone();
+    // fixture 标签（auto 推导）：frontier=powerful/cheap(2,0)，mini/standard=basic/cheap(0,0)
+    assert_eq!(find("frontier")["active"], true, "favorite must be in scope: {}", find("frontier"));
+    // 9 格覆盖：(0,0) 邻域无代表 → REC 兜底在 mini/standard（同格同分）中按 id 升序取 mini
+    assert_eq!(find("mini")["active"], true, "REC backfill for cell coverage (user-approved): {}", find("mini"));
+    // standard 输掉同分 tie-break，且没有格需要它 → 不在范围
+    assert_eq!(find("standard")["active"], false, "loser of the tie with no cell to fill must stay out: {}", find("standard"));
+}

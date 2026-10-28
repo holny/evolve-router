@@ -895,16 +895,32 @@ pub async fn api_models_favorite_get(
     let ov = crate::state::effective_overrides(&st);
     let favorites = ov.favorites.get(provider).cloned().unwrap_or_default();
     let assigned = tags_for_catalog(&st, &snap);
+    // 昨日列（本地日历"昨天"）：token = in+out；失败率/首字延迟来自同一小时桶聚合
+    let now = evolve_memory::health::now();
+    let (ys, ye) = evolve_core::recency::local_yesterday_bounds_ms(now);
+    let yview = st.flywheel.hourly_window(ys, ye);
     let mut models: Vec<Value> = snap
         .iter()
         .filter(|m| &m.provider == provider)
         .map(|m| {
+            let v = yview.get(&m.id);
+            let ytok = v
+                .map(|v| v["in_tok"].as_u64().unwrap_or(0) + v["out_tok"].as_u64().unwrap_or(0))
+                .unwrap_or(0);
+            let fail_pct = v.and_then(|v| {
+                let req = v["requests"].as_u64().unwrap_or(0);
+                let ok = v["success"].as_u64().unwrap_or(0);
+                (req > 0).then(||
+                    // f64 域取整（项目纪律：f32 有毛刺）
+                    ((req - ok) as f64 * 100.0 / req as f64).round() as i64)
+            });
+            let ttft = v.and_then(|v| v["avg_ttft_ms"].as_u64());
             json!({
                 "model": m.id,
                 "price_tier": assigned.get(&m.id).map(|(_, p)| p.label()).unwrap_or("medium"),
-                "yesterday_tokens": 0,
-                "fail_pct": Value::Null,
-                "ttft_ms": Value::Null,
+                "yesterday_tokens": ytok,
+                "fail_pct": fail_pct,
+                "ttft_ms": ttft,
                 "favorite": favorites.contains(&m.id),
             })
         })
@@ -1928,8 +1944,11 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
     let snap = st.engine.catalog_snapshot();
     let assigned = tags_for_catalog(&st, &snap);
     let usability = model_usability(&st);
-    let (active_ids, ranked) = active_models(&st);
+    // active = 当前模式的路由范围（gateway 组合 / favorites 心选范围）——
+    // 双入口同源：面板与网页的"启用"展示都吃这里
+    let active_ids = active_id_set(&st);
     let active_set: std::collections::HashSet<&String> = active_ids.iter().collect();
+    let (_, ranked) = active_models(&st);
     let score_of: std::collections::HashMap<&str, u64> =
         ranked.iter().map(|(i, s)| (i.as_str(), *s)).collect();
     let priorities = st.engine.priority_overrides();
@@ -2259,10 +2278,151 @@ pub fn usable_model_ids(st: &AppState) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// 活跃集 id 集合（路由过滤用；空集 = 不启用过滤）
+/// 活跃集 id 集合（路由过滤用；空集 = 不启用过滤）。
+/// 双路径分发（2026-10-28 用户裁决）：favorites → 心选范围；
+/// gateway → 现有组合（最近发布/近用 50 + 格位覆盖），行为不变。
 pub fn active_id_set(st: &AppState) -> std::collections::HashSet<String> {
+    if routing_mode(st) == crate::state::RoutingModeCfg::Favorites {
+        return favorite_scope_selection(st).0.into_iter().collect();
+    }
     let (active, _) = active_models(st);
     active.into_iter().collect()
+}
+
+/// 当前路由路径模式
+pub fn routing_mode(st: &AppState) -> crate::state::RoutingModeCfg {
+    crate::state::effective_overrides(&st).routing_mode
+}
+
+/// 昨日 token 用量缓存：key = 日历窗口（跨天自动失效）
+static YDAY_TOKENS_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, (u64, u64), std::collections::HashMap<String, u64>)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// 昨日（本地日历天）逐模型 token 用量（in+out 合计）——心选范围 TOP 位/空位链的数据源。
+/// 5 分钟 TTL；窗口为 key 的一部分，跨零点自然失效。
+pub fn yesterday_token_map(st: &AppState) -> std::collections::HashMap<String, u64> {
+    let now = evolve_memory::health::now();
+    let bounds = evolve_core::recency::local_yesterday_bounds_ms(now);
+    if let Ok(g) = YDAY_TOKENS_CACHE.lock()
+        && let Some((at, b, m)) = g.as_ref()
+        && *b == bounds
+        && at.elapsed().as_secs() < 300
+    {
+        return m.clone();
+    }
+    let map = st.flywheel.tokens_window(bounds.0, bounds.1);
+    if let Ok(mut g) = YDAY_TOKENS_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), bounds, map.clone()));
+    }
+    map
+}
+
+/// 心选范围缓存：key = 目录长度 + 心选指纹（provider 数/成员），30s TTL
+static FAV_SCOPE_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<Option<(std::time::Instant, (usize, String), (Vec<String>, std::collections::HashMap<String, evolve_core::scope::SourceTag>))>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// 心选路径的范围选举（2026-10-28 用户裁决）：每 provider
+/// ≤3 心选 + 2 昨日位 + 1 最新位（去重，标签反映来源）+ 全部免费模型直通车；
+/// 9 格覆盖由 select_provider_scope 内的 REC 兜底保证。资格过滤与
+/// portfolio_selection 同口径（no-key/deleted/自指端点排除；冷却/闸门是临时的不剔除）。
+pub fn favorite_scope_selection(
+    st: &AppState,
+) -> (Vec<String>, std::collections::HashMap<String, evolve_core::scope::SourceTag>) {
+    let snap = st.engine.catalog_snapshot();
+    let ov = crate::state::effective_overrides(&st);
+    let mut fav_items: Vec<(&String, &Vec<String>)> = ov.favorites.iter().collect();
+    fav_items.sort_by(|a, b| a.0.cmp(b.0));
+    let fingerprint = (
+        snap.len(),
+        fav_items
+            .iter()
+            .flat_map(|(p, v)| [p.as_str().to_string(), v.len().to_string()])
+            .collect::<Vec<_>>()
+            .join("\u{1f}"),
+    );
+    if let Ok(g) = FAV_SCOPE_CACHE.lock()
+        && let Some((at, key, out)) = g.as_ref()
+        && *key == fingerprint
+        && at.elapsed().as_secs() < 30
+    {
+        return out.clone();
+    }
+
+    let usability = model_usability(&st);
+    let tags = tags_for_catalog(&st, &snap);
+    let ytok = yesterday_token_map(&st);
+    let self_ep = format!("127.0.0.1:{}", st.config.server.port);
+    let self_ep2 = format!("localhost:{}", st.config.server.port);
+
+    // 资格过滤 + 组装 ScopeCandidate（按 provider 分组，BTreeMap 保证确定性）
+    let mut by_provider: std::collections::BTreeMap<&str, Vec<evolve_core::scope::ScopeCandidate>> =
+        std::collections::BTreeMap::new();
+    for m in snap.iter() {
+        if matches!(usability.get(&m.id), Some(Some("no-key" | "deleted"))) {
+            continue;
+        }
+        if m.base_url.contains(&self_ep) || m.base_url.contains(&self_ep2) {
+            continue;
+        }
+        let (cap_rank, price_rank) = tags
+            .get(&m.id)
+            .map(|(c, p)| {
+                (
+                    match c {
+                        evolve_core::tags::Capability::Basic => 0u8,
+                        evolve_core::tags::Capability::Standard => 1,
+                        evolve_core::tags::Capability::Powerful => 2,
+                    },
+                    match p {
+                        evolve_core::tags::PriceTier::Cheap => 0u8,
+                        evolve_core::tags::PriceTier::Medium => 1,
+                        evolve_core::tags::PriceTier::Premium => 2,
+                    },
+                )
+            })
+            .unwrap_or((1, 1));
+        // REC 兜底的稳定口径分（用户裁决：无实时遥测）= bench 档均值 × 用户权重 × 价位效率
+        let bench = (m.tiers.coding + m.tiers.reasoning + m.tiers.agentic) / 3.0;
+        let weight = st.engine.weight_override(&m.id).unwrap_or(1.0);
+        let price_eff = match price_rank {
+            0 => 1.0,
+            1 => 0.66,
+            _ => 0.33,
+        };
+        let free = m.is_free();
+        by_provider.entry(m.provider.as_str()).or_default().push(evolve_core::scope::ScopeCandidate {
+            id: m.id.clone(),
+            cap_rank,
+            price_rank,
+            free,
+            release_ts: evolve_core::recency::release_ts_of(m),
+            yesterday_tokens: ytok.get(&m.id).copied().unwrap_or(0),
+            stable_score: if free { 1.0 } else { bench * weight * price_eff },
+        });
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut tag_map: std::collections::HashMap<String, evolve_core::scope::SourceTag> =
+        std::collections::HashMap::new();
+    for (provider, cands) in &by_provider {
+        let favs = ov.favorites.get(*provider).cloned().unwrap_or_default();
+        for (id, tag) in evolve_core::scope::select_provider_scope(cands, &favs) {
+            ids.push(id.clone());
+            tag_map.insert(id, tag);
+        }
+        // 免费直通车：未被槽位/心选当选的免费模型照常入范围（不占标签）
+        for c in cands.iter().filter(|c| c.free && !tag_map.contains_key(&c.id)) {
+            ids.push(c.id.clone());
+        }
+    }
+
+    let out = (ids, tag_map);
+    if let Ok(mut g) = FAV_SCOPE_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), fingerprint, out.clone()));
+    }
+    out
 }
 
 /// 最近使用时间缓存（30s TTL）：model → 最近调用 ts（epoch ms）
