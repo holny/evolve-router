@@ -2,6 +2,7 @@
 /data
 *.local.toml
 .DS_Store
+.superpowers/
 dist/
 
 # 本地 agent 技能安装产物
