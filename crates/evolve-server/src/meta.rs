@@ -2294,33 +2294,35 @@ pub fn routing_mode(st: &AppState) -> crate::state::RoutingModeCfg {
     crate::state::effective_overrides(&st).routing_mode
 }
 
-/// 昨日 token 用量缓存：key = 日历窗口（跨天自动失效）
+/// 昨日 token 用量缓存：key = data_dir + 日历窗口（跨天/跨实例自动失效）
 static YDAY_TOKENS_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<Option<(std::time::Instant, (u64, u64), std::collections::HashMap<String, u64>)>>,
+    std::sync::Mutex<Option<(std::time::Instant, (String, u64, u64), std::collections::HashMap<String, u64>)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// 昨日（本地日历天）逐模型 token 用量（in+out 合计）——心选范围 TOP 位/空位链的数据源。
-/// 5 分钟 TTL；窗口为 key 的一部分，跨零点自然失效。
+/// 5 分钟 TTL；窗口为 key 的一部分，跨零点自然失效。key 含 data_dir：
+/// 并行测试各自独立数据目录，按窗口共享会把别家目录的用量串进来（实测）。
 pub fn yesterday_token_map(st: &AppState) -> std::collections::HashMap<String, u64> {
     let now = evolve_memory::health::now();
     let bounds = evolve_core::recency::local_yesterday_bounds_ms(now);
+    let key = (st.config.data.dir.clone(), bounds.0, bounds.1);
     if let Ok(g) = YDAY_TOKENS_CACHE.lock()
-        && let Some((at, b, m)) = g.as_ref()
-        && *b == bounds
+        && let Some((at, k, m)) = g.as_ref()
+        && *k == key
         && at.elapsed().as_secs() < 300
     {
         return m.clone();
     }
     let map = st.flywheel.tokens_window(bounds.0, bounds.1);
     if let Ok(mut g) = YDAY_TOKENS_CACHE.lock() {
-        *g = Some((std::time::Instant::now(), bounds, map.clone()));
+        *g = Some((std::time::Instant::now(), key, map.clone()));
     }
     map
 }
 
-/// 心选范围缓存：key = 目录长度 + 心选指纹（provider 数/成员），30s TTL
+/// 心选范围缓存：key = data_dir + 目录长度 + 心选内容指纹，30s TTL
 static FAV_SCOPE_CACHE: std::sync::LazyLock<
-    std::sync::Mutex<Option<(std::time::Instant, (usize, String), (Vec<String>, std::collections::HashMap<String, evolve_core::scope::SourceTag>))>>,
+    std::sync::Mutex<Option<(std::time::Instant, (usize, String, String), (Vec<String>, std::collections::HashMap<String, evolve_core::scope::SourceTag>))>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// 心选路径的范围选举（2026-10-28 用户裁决）：每 provider
@@ -2332,16 +2334,16 @@ pub fn favorite_scope_selection(
 ) -> (Vec<String>, std::collections::HashMap<String, evolve_core::scope::SourceTag>) {
     let snap = st.engine.catalog_snapshot();
     let ov = crate::state::effective_overrides(&st);
-    let mut fav_items: Vec<(&String, &Vec<String>)> = ov.favorites.iter().collect();
-    fav_items.sort_by(|a, b| a.0.cmp(b.0));
-    let fingerprint = (
-        snap.len(),
-        fav_items
-            .iter()
-            .flat_map(|(p, v)| [p.as_str().to_string(), v.len().to_string()])
-            .collect::<Vec<_>>()
-            .join("\u{1f}"),
-    );
+    // 指纹必须含 data_dir + 心选**内容**：并行测试/多实例下同名 provider 同
+    // 数量的心选但成员不同（如 [mini] vs [frontier]）曾经指纹相同，缓存串味
+    // （实测：chat 请求拿到别的 dir 算出的 mini=Rec）。内容逐条进键。
+    let mut fav_canon: Vec<String> = ov
+        .favorites
+        .iter()
+        .map(|(p, v)| format!("{p}={}", v.join(",")))
+        .collect();
+    fav_canon.sort();
+    let fingerprint = (snap.len(), st.config.data.dir.clone(), fav_canon.join(";"));
     if let Ok(g) = FAV_SCOPE_CACHE.lock()
         && let Some((at, key, out)) = g.as_ref()
         && *key == fingerprint

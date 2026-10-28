@@ -49,6 +49,20 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     let digest = build_digest(&parsed);
     let tool_heavy = features.tool_ratio;
 
+    // 心选路径输入（2026-10-28 双路径）——与 relay.rs 同源同语义
+    let curated_mode = crate::meta::routing_mode(&st) == crate::state::RoutingModeCfg::Favorites;
+    let scope_source: std::collections::HashMap<String, evolve_core::scope::SourceTag> = if curated_mode {
+        crate::meta::favorite_scope_selection(&st).1
+    } else {
+        Default::default()
+    };
+    let fav_set: std::collections::HashSet<String> = if curated_mode {
+        crate::state::effective_overrides(&st).favorites.values().flatten().cloned().collect()
+    } else {
+        Default::default()
+    };
+    let tokens_total = st.flywheel.tokens_total();
+
     let decision_started = std::time::Instant::now();
     let mut decision = match &target {
         Target::Auto(alias_policy) => {
@@ -71,9 +85,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             }
             let degraded: std::collections::HashSet<String> =
                 st.quota.provider_degraded().into_iter().collect();
-            // Task 6 接真实心选输入（占位：非 curated、空集合）
-            let empty_favs = std::collections::HashSet::new();
-            let empty_tokens = std::collections::HashMap::new();
+            // Task 5 占位 → Task 6 真实心选输入（与 relay.rs 同源）
             let input = RoutingInput {
                 session_key: &session_key,
                 features,
@@ -93,9 +105,9 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 token_ratio_backfill: &st.token_ratio_backfill,
                 est_observed: false,
                 active: &crate::meta::active_id_set(&st),
-                curated: false,
-                favorites: &empty_favs,
-                model_tokens_total: &empty_tokens,
+                curated: curated_mode,
+                favorites: &fav_set,
+                model_tokens_total: &tokens_total,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
@@ -424,6 +436,8 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
             decision_ms: Some(decision_ms),
             judge_ms: Some(decision.judge_ms),
             est_raw: Some(est),
+            source: scope_source.get(&decision.chosen).map(|t| t.as_str().to_string())
+                .filter(|_| curated_mode),
             extra: Some(json!({
                 "reason": decision.reason,
                 "scores": decision.scores,

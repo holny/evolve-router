@@ -107,6 +107,29 @@ pub async fn chat_completions(
     let tools_sig = tools_signature(&parsed);
     let digest = build_digest(&extracted, features.turn_count);
 
+    // 心选路径输入（2026-10-28 双路径）：模式、心选集合、累计 token、来源映射。
+    // 缓存命中记录也要带 source → 在缓存检查前算好（favorite_scope_selection 有
+    // 30s 缓存；tokens_total 是小时桶求和，量级小）
+    let curated_mode = crate::meta::routing_mode(&st) == crate::state::RoutingModeCfg::Favorites;
+    let scope_source: std::collections::HashMap<String, evolve_core::scope::SourceTag> = if curated_mode {
+        crate::meta::favorite_scope_selection(&st).1
+    } else {
+        Default::default()
+    };
+    let fav_set: std::collections::HashSet<String> = if curated_mode {
+        crate::state::effective_overrides(&st).favorites.values().flatten().cloned().collect()
+    } else {
+        Default::default()
+    };
+    let tokens_total = st.flywheel.tokens_total();
+    let source_of = |id: &str| -> Option<String> {
+        if curated_mode {
+            scope_source.get(id).map(|t| t.as_str().to_string())
+        } else {
+            None
+        }
+    };
+
     // A3 completion cache（FrugalGPT Strategy 2）：逻辑内容相同（去掉 model/
     // stream 字段后指纹一致）的非流式请求直接返回缓存响应——重复查询零成本
     // 零延迟。本地内存、TTL/容量受限、x-ev-no-cache 头可绕过。
@@ -126,6 +149,7 @@ pub async fn chat_completions(
         st.events.record(json!({
             "kind": "chat", "chosen": model_id, "upstream_model": model_id,
             "cache": true, "status": 200, "session": session_key,
+            "source": source_of(&model_id),
             "agent": agent_hdr, "total_ms": started.elapsed().as_millis() as u64,
         }));
         // 缓存命中也是一次"已服务请求"——喂给飞轮（样本环 + 小时桶），否则面板
@@ -218,9 +242,7 @@ pub async fn chat_completions(
                 }
             }
 
-            // Task 6 接真实心选输入（占位：非 curated、空集合）
-            let empty_favs = std::collections::HashSet::new();
-            let empty_tokens = std::collections::HashMap::new();
+            // Task 5 占位 → Task 6 真实心选输入
             let input = RoutingInput {
                 session_key: &session_key,
                 features,
@@ -240,9 +262,9 @@ pub async fn chat_completions(
                 token_ratio_backfill: &st.token_ratio_backfill,
                 est_observed,
                 active: &active_ids,
-                curated: false,
-                favorites: &empty_favs,
-                model_tokens_total: &empty_tokens,
+                curated: curated_mode,
+                favorites: &fav_set,
+                model_tokens_total: &tokens_total,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
@@ -1076,6 +1098,7 @@ pub async fn chat_completions(
             decision_ms: Some(decision_ms),
             judge_ms: Some(decision.judge_ms),
             est_raw: Some(est_raw),
+            source: source_of(&decision.chosen),
             extra: {
                 let mut ex = json!({
                     "reason": decision.reason,
@@ -1386,6 +1409,7 @@ pub async fn chat_completions(
             decision_ms: None,
             judge_ms: None,
             est_raw: None,
+            source: source_of(&original_choice),
         };
         crate::stream::finalize_event(&st.events, &st.flywheel.clone(), &st.quota, &st.bus, &telem);
     }

@@ -13,6 +13,32 @@ use tower::ServiceExt;
 
 const PROVIDER: &str = "mock";
 
+/// mock 上游（沿 tests/proxy.rs）：非流式返回固定 usage，供 chat 事件断言
+async fn spawn_mock_upstream() -> u16 {
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|body: axum::body::Bytes| async move {
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let model = v["model"].as_str().unwrap_or("unknown").to_string();
+            axum::http::Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": model, "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                           "usage": {"prompt_tokens": 123, "completion_tokens": 45}})
+                        .to_string(),
+                ))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    port
+}
+
 /// 返回 (config, data_dir)：data_dir 供断言持久化（load_overrides），
 /// 也可预写 overrides.json 后再 build_state
 fn test_config() -> (FileConfig, String) {
@@ -179,6 +205,28 @@ async fn post_replace_unknown_400() {
 /// Task 4：routing_mode=favorites 时 active 判定必须走心选范围——
 /// 只有 frontier 是心选 → tags 里 frontier.active=true、mini/standard.active=false
 /// （gateway 组合口径下三者全 active，故此断言在分发实现前必红）
+/// Task 6：chat 事件带来源标签——favorites 模式下路由到心选模型的事件
+/// `source == "fav"`（gateway 模式恒 null，由 relay 分支保证）
+#[tokio::test]
+async fn chat_event_carries_source_tag() {
+    let port = spawn_mock_upstream().await;
+    let (mut cfg, _) = test_config();
+    for m in cfg.models.iter_mut() {
+        m.base_url = format!("http://127.0.0.1:{port}/v1");
+    }
+    let app = build_router(build_state(cfg));
+    let (s, _) = send(app.clone(), req("PUT", "/api/routing-mode", json!({"mode": "favorites"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app.clone(), req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    // 显式指定心选模型（direct 路径亦可）——事件应带 source=fav
+    let (status, _) = send(app.clone(), req("POST", "/v1/chat/completions", json!({"model": "mini", "messages": [{"role": "user", "content": "hi"}]}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, events) = send(app, get("/api/events?limit=5&kind=chat")).await;
+    let chat = events.as_array().and_then(|a| a.iter().find(|e| e["chosen"] == "mini")).expect("chat event for mini must exist");
+    assert_eq!(chat["source"], "fav", "chosen favorite must carry source=fav: {chat}");
+}
+
 #[tokio::test]
 async fn model_tags_active_follows_favorites_scope() {
     let (cfg, _) = test_config();

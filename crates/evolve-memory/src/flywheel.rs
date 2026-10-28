@@ -546,6 +546,16 @@ impl Flywheel {
         out
     }
 
+    /// 逐模型累计 token（in+out，全部小时桶求和）——NEW 新手保护衰减的输入
+    pub fn tokens_total(&self) -> HashMap<String, u64> {
+        let Ok(inner) = self.inner.lock() else { return HashMap::new() };
+        inner
+            .hourly
+            .iter()
+            .map(|(m, buckets)| (m.clone(), buckets.iter().map(|b| b.in_tok + b.out_tok).sum()))
+            .collect()
+    }
+
     pub fn save(&self) {
         let Ok(mut inner) = self.inner.lock() else { return };
         if !inner.dirty {
@@ -798,5 +808,25 @@ mod tokens_window_tests {
         let map = f.tokens_window(noon - H, noon + H);
         assert_eq!(map.get("m"), Some(&165), "in+out summed over range: {map:?}");
         assert!(!map.contains_key("far"), "buckets outside range must be excluded: {map:?}");
+    }
+}
+
+#[cfg(test)]
+mod tokens_total_tests {
+    use super::Flywheel;
+    use crate::strategy::StrategyParams;
+    use serde_json::json;
+
+    #[test]
+    fn tokens_total_sums_all_buckets() {
+        let f = Flywheel::open_with(
+            &format!("{}/fw-toktotal-{}", std::env::temp_dir().to_string_lossy(), std::process::id()),
+            StrategyParams::default(),
+        );
+        let base = 1_793_200_000_000u64;
+        f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":base,"ttft_ms":100,"total_ms":400,"prompt_tokens":100,"completion_tokens":50,"cached_tokens":0}));
+        f.observe(&json!({"kind":"chat","chosen":"m","status":200,"ts":base + 86_400_000,"ttft_ms":100,"total_ms":400,"prompt_tokens":10,"completion_tokens":5,"cached_tokens":0}));
+        let map = f.tokens_total();
+        assert_eq!(map.get("m"), Some(&165), "all buckets summed (across days): {map:?}");
     }
 }

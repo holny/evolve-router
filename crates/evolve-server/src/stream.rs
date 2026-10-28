@@ -37,6 +37,9 @@ pub struct Telemetry {
     /// 本轮请求的**裸** token 估算（未会话校准）——流式收尾时与实测
     /// prompt_tokens 一起入会话账本（非流式路径在 relay 内自记）
     pub est_raw: Option<u64>,
+    /// 心选路径来源标签（2026-10-28）：fav/top/new/rec；gateway 模式或未
+    /// 当选成员为 None（事件里序列化为 null）
+    pub source: Option<String>,
 }
 
 impl Telemetry {
@@ -61,6 +64,7 @@ impl Telemetry {
             "preprocess_ms": self.preprocess_ms,
             "decision_ms": self.decision_ms,
             "judge_ms": self.judge_ms,
+            "source": self.source,
         });
         if let Some(u) = &self.usage {
             let (p, c, cached, cwrite) = extract_usage_fields(u);
