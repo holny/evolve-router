@@ -261,6 +261,7 @@ table.mx tr.win td { color:var(--green); }
     <div class="sub"><span class="dot" id="sse-dot"></span><span id="sse-status" data-i18n="sse_conn">SSE 连接中…</span><span id="app-version" class="dim2" style="margin-left:8px"></span></div>
   </div>
   <div class="chips" id="chips"></div>
+  <div class="wtabs" id="mode-tabs" title="routing path"></div>
   <button class="lang-sel" id="theme-btn" title="Theme" style="padding:5px 11px;display:inline-flex;align-items:center">
     <svg id="theme-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
     <svg id="theme-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -314,6 +315,12 @@ table.mx tr.win td { color:var(--green); }
     <div class="sub" style="margin-bottom:8px" data-i18n="tags_hint">capability/price tags are auto-derived; override to taste</div>
     <div id="tags-dist" style="display:flex;gap:26px;flex-wrap:wrap;margin-bottom:10px"></div>
     <div id="tags-list" style="max-height:300px;overflow:auto"></div>
+  </section>
+  <section class="card" id="fav-card" style="display:none">
+    <h2><span data-i18n="fav_card">心选模型 · Favorites</span></h2>
+    <div class="sub" style="margin-bottom:8px" data-i18n="fav_hint">每 provider 最多 3 个心选；空位自动由昨日用量冠军/最新入库补齐，免费模型恒在</div>
+    <div id="fav-dist" style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:6px"></div>
+    <div id="fav-list"></div>
   </section>
   <section class="card">
     <h2 style="display:flex;justify-content:space-between;align-items:center;gap:10px">
@@ -687,6 +694,25 @@ const T = {
   ur_cooling:{zh:'冷却中', en:'cooling', ko:'쿨링', ja:'クーリング', es:'enfriando', fr:'en refroidissement'},
   act_basis:{zh:'路由组合（可路由）：{a} / {n} · 名额 = max(50, 健康 provider × 8)，单 provider ≤25%；每家内先补齐 能力×价位 9 格，免费模型必选且不占名额', en:'routing portfolio (routable): {a} / {n} · cap = max(50, healthy providers × 8), each provider ≤25%; per provider it fills the capability×price cells first; free models are always in and do not consume slots', ko:'라우팅 포트폴리오: {a}/{n}', ja:'ルーティング・ポートフォリオ：{a}/{n}', es:'portafolio de enrutado: {a}/{n}', fr:'portefeuille de routage : {a}/{n}'},
   act_on:{zh:'范围内', en:'in scope', ko:'범위 내', ja:'スコープ内', es:'en alcance', fr:'dans le périmètre'},
+  // 心选路径（2026-10-28 双路径）
+  fav_gateway:{zh:'网关智能', en:'Gateway', ko:'게이트웨이', ja:'Gateway', es:'Gateway', fr:'Gateway'},
+  fav_favorites:{zh:'心选智能', en:'Favorites', ko:'즐겨찾기', ja:'Favorites', es:'Favoritos', fr:'Favoris'},
+  fav_card:{zh:'心选模型 · Favorites', en:'Favorites — curated models', ko:'즐겨찾기 모델', ja:'お気に入りモデル', es:'Modelos favoritos', fr:'Modèles favoris'},
+  fav_hint:{zh:'每 provider 最多 3 个心选；空位自动由昨日用量冠军/最新入库补齐，免费模型恒在', en:'≤3 favorites per provider; empty slots auto-fill from yesterday-top usage / newest arrival; free models are always in', ko:'provider당 최대 3개; 빈 슬롯은 어제 사용량/최신 모델로 자동 채움, 무료 모델 상시 포함', ja:'プロバイダーごとに最大3つ; 空きスロットは昨日の使用量/新着で自動補充、無料モデルは常時含む', es:'≤3 favoritos por proveedor; los huecos se rellenan con el mayor uso de ayer / el más nuevo; los gratuitos siempre entran', fr:'≤3 favoris par fournisseur; les vides se remplissent avec l\'usage d\'hier / le plus récent; les gratuits sont toujours inclus'},
+  fav_nudge:{zh:'尚未挑选心选 — 正按默认（昨日用量/最新）运行', en:'No favorites picked — running on auto defaults (yesterday / newest)', ko:'즐겨찾기 미선택 — 자동 기본값으로 실행 중', ja:'お気に入り未選択 — 自動デフォルトで実行中', es:'Sin favoritos — ejecutando con valores predeterminados', fr:'Aucun favori — fonctionnement par défaut'},
+  fav_choose:{zh:'去挑选', en:'Choose', ko:'선택', ja:'選択', es:'Elegir', fr:'Choisir'},
+  fav_yday:{zh:'昨日量', en:'y-day', ko:'어제', ja:'昨日', es:'ayer', fr:'hier'},
+  fav_fail:{zh:'失败', en:'fail', ko:'실패', ja:'失敗', es:'fallo', fr:'échec'},
+  fav_ttft:{zh:'首字', en:'ttft', ko:'TTFT', ja:'TTFT', es:'ttft', fr:'ttft'},
+  fav_price:{zh:'价位', en:'price', ko:'가격', ja:'価格', es:'precio', fr:'prix'},
+  fav_add:{zh:'加选', en:'add', ko:'추가', ja:'追加', es:'añadir', fr:'ajouter'},
+  fav_remove:{zh:'移除', en:'remove', ko:'제거', ja:'削除', es:'quitar', fr:'retirer'},
+  fav_dist:{zh:'来源分布（最近请求）', en:'Source mix (recent requests)', ko:'소스 분포(최근 요청)', ja:'ソース分布（最近のリクエスト）', es:'Mezcla de fuentes (recientes)', fr:'Répartition des sources (récents)'},
+  src_fav:{zh:'心选', en:'FAV', ko:'FAV', ja:'FAV', es:'FAV', fr:'FAV'},
+  src_top:{zh:'昨日', en:'TOP', ko:'TOP', ja:'TOP', es:'TOP', fr:'TOP'},
+  src_new:{zh:'新模', en:'NEW', ko:'NEW', ja:'NEW', es:'NEW', fr:'NEW'},
+  src_rec:{zh:'推荐', en:'REC', ko:'REC', ja:'REC', es:'REC', fr:'REC'},
+  src_free:{zh:'免费', en:'FREE', ko:'FREE', ja:'FREE', es:'FREE', fr:'FREE'},
   au_filtered_all:{zh:'被剔除候选（全量）', en:'Filtered candidates (all)', ko:'제외 후보(전체)', ja:'除外候補（全件）', es:'Candidatos filtrados (todos)', fr:'Candidats filtrés (tous)'},
   ratio_title:{zh:'比例控制器（目标 7:2:1，实际 vs 目标 + 当前惩罚乘子）', en:'Ratio controller (target 7:2:1 — observed vs target + penalty multipliers)', ko:'비율 컨트롤러(목표 7:2:1)', ja:'比率コントローラ（目標 7:2:1）', es:'Controlador de proporción (objetivo 7:2:1)', fr:'Contrôleur de ratio (cible 7:2:1)'},
   ratio_warm:{zh:'样本不足，冷启动中立', en:'warming up (neutral)', ko:'예열 중', ja:'ウォームアップ中', es:'calentando', fr:'en chauffe'},
@@ -1478,7 +1504,7 @@ function prettyBody(v){
   try { return JSON.stringify(JSON.parse(v), null, 2); } catch (_) { return v; }
 }
 
-const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0, onboarding:null, portfolio:null };
+const state = { stats:{}, bench:{}, health:{}, quota:{}, policyw:null, plans:[], trends:[], win:'today', twin:'24h', providers:[], inflight:0, onboarding:null, portfolio:null, routingMode:'gateway', favorites:{}, favExpanded:null, favRows:{} };
 
 // 评分矩阵模型名 → 飞轮行高亮（事件委托，覆盖后续新增的矩阵单元格）
 feed.addEventListener('click', ev => {
@@ -2123,6 +2149,129 @@ document.getElementById('pv-scan-btn').addEventListener('click', () => {
 });
 function renderPlans(){ renderProviders(); renderTags(); }
 async function loadTags(){ try { const j = await (await fetch('/api/model-tags')).json(); state.modelTags = j.models || []; renderTags(); } catch(_){} }
+
+// ── 心选路径（2026-10-28 双路径）──
+const SRC_COLORS = {fav:'#84cc16', top:'#3b82f6', new:'#a855f7', rec:'#14b8a6', free:'#94a3b8'};
+function srcPills(m){
+  let out = '';
+  if (m.source && SRC_COLORS[m.source]) out += '<span class="pbadge" style="color:'+SRC_COLORS[m.source]+';border-color:'+SRC_COLORS[m.source]+'">'+esc(t('src_' + m.source))+'</span>';
+  if (m.free) out += '<span class="pbadge" style="color:'+SRC_COLORS.free+';border-color:'+SRC_COLORS.free+'">'+esc(t('src_free'))+'</span>';
+  return out;
+}
+async function loadRoutingMode(){
+  try {
+    const j = await (await fetch('/api/routing-mode')).json();
+    state.routingMode = j.mode || 'gateway';
+    state.favorites = j.favorites || {};
+  } catch(_){}
+  renderModeTabs(); renderFavorites(); renderSourceDist();
+  const card = document.getElementById('fav-card');
+  if (card) card.style.display = state.routingMode === 'favorites' ? '' : 'none';
+}
+function renderModeTabs(){
+  const box = document.getElementById('mode-tabs');
+  if (!box) return;
+  const seg = (mode, label) => '<button class="lang-btn" data-rmode="'+mode+'" style="padding:2px 10px;font-size:11px;border-radius:12px;'
+    + (state.routingMode === mode ? 'background:var(--tab-on-bg);color:var(--fg);font-weight:600' : 'color:var(--dim)') + '">'+esc(label)+'</button>';
+  box.innerHTML = seg('gateway', t('fav_gateway')) + seg('favorites', t('fav_favorites'));
+  box.querySelectorAll('button[data-rmode]').forEach(b => b.addEventListener('click', async () => {
+    if (state.routingMode === b.dataset.rmode) return;
+    try { await fetch('/api/routing-mode', {method:'PUT', headers:{'content-type':'application/json'}, body: JSON.stringify({mode: b.dataset.rmode})}); } catch(_){}
+    await loadRoutingMode(); loadTags();
+  }));
+}
+function renderSourceDist(){
+  const box = document.getElementById('fav-dist');
+  if (!box) return;
+  if (state.routingMode !== 'favorites') { box.innerHTML = ''; return; }
+  const counts = {};
+  for (const m of (state.modelTags || [])) {
+    if (m.source && m.source !== 'none' && SRC_COLORS[m.source]) counts[m.source] = (counts[m.source] || 0) + 1;
+  }
+  box.innerHTML = Object.keys(counts).sort().map(k =>
+    '<span style="display:inline-flex;align-items:center;gap:4px;font-size:11px">'
+    + '<span class="pbadge" style="color:'+SRC_COLORS[k]+';border-color:'+SRC_COLORS[k]+'">'+esc(t('src_'+k))+'</span>'
+    + '<b>'+counts[k]+'</b></span>').join('');
+}
+async function loadFavRows(p){
+  try {
+    const j = await (await fetch('/api/models/favorite?provider='+encodeURIComponent(p))).json();
+    state.favRows[p] = (j.models || []).slice().sort((a,b) => (b.yesterday_tokens||0) - (a.yesterday_tokens||0) || a.model.localeCompare(b.model));
+  } catch(_) { state.favRows[p] = []; }
+}
+function renderFavorites(){
+  const list = document.getElementById('fav-list');
+  if (!list) return;
+  if (state.routingMode !== 'favorites') { list.innerHTML = ''; return; }
+  // provider 全集 = 已有心选的 ∪ 组合里的（空 provider 给出"加选"入口）
+  const names = new Set(Object.keys(state.favorites));
+  for (const p of ((state.portfolio && state.portfolio.providers) || [])) names.add(p.provider);
+  const provs = [...names].sort();
+  const anyFav = provs.some(p => (state.favorites[p] || []).length);
+  let html = '';
+  if (!anyFav) html += '<div class="dim2" style="font-size:11px;margin:4px 0">'+esc(t('fav_nudge'))+'</div>';
+  for (const p of provs) {
+    const favs = state.favorites[p] || [];
+    html += '<div style="margin:8px 0 2px;font-size:11px"><b>'+esc(p)+'</b></div>'
+      + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
+      + favs.map(m => '<span class="pbadge" style="display:inline-flex;align-items:center;gap:4px">'+esc(m)
+        + '<button class="lang-btn" data-fav-remove="'+esc(p)+'|'+esc(m)+'" style="font-size:9px;padding:0 2px" title="'+esc(t('fav_remove'))+'">✕</button></span>').join('')
+      + (favs.length < 3 ? '<button class="lang-btn" data-fav-add="'+esc(p)+'" style="font-size:10px;padding:0 8px">'+esc(t('fav_add'))+'</button>' : '')
+      + '</div>';
+    if (state.favExpanded === p) {
+      const rows = state.favRows[p] || [];
+      const q = (state.favSearch && state.favSearch[p] || '').toLowerCase();
+      const visible = rows.filter(r => !q || r.model.toLowerCase().includes(q));
+      html += '<div style="margin:4px 0 0 14px;max-height:220px;overflow:auto">'
+        + '<div style="display:flex;gap:10px;font-size:10px;color:var(--dim);margin:2px 0">'
+        + '<input class="mock-input" data-fav-search="'+esc(p)+'" placeholder="'+esc(t('fav_search'))+'" value="'+esc(state.favSearch && state.favSearch[p] || '')+'" style="flex:1;max-width:180px;font-size:10px;padding:1px 6px">'
+        + '<span style="width:56px;text-align:right">'+esc(t('fav_yday'))+'</span>'
+        + '<span style="width:44px;text-align:right">'+esc(t('fav_fail'))+'</span>'
+        + '<span style="width:52px;text-align:right">'+esc(t('fav_ttft'))+'</span>'
+        + '<span style="width:56px;text-align:right">'+esc(t('fav_price'))+'</span></div>'
+        + visible.map(r => '<div style="display:flex;gap:10px;font-size:11px;padding:1px 0;align-items:center">'
+          + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
+          + '<button class="lang-btn" data-fav-pick="'+esc(p)+'|'+esc(r.model)+'" style="font-size:9px;padding:0 3px" title="'+esc(t('fav_add'))+'">'
+          + (r.favorite ? '★' : '☆') + '</button> '+esc(r.model)+'</span>'
+          + '<span style="width:56px;text-align:right">'+fmtK(r.yesterday_tokens)+'</span>'
+          + '<span style="width:44px;text-align:right">'+(r.fail_pct == null ? '-' : r.fail_pct+'%')+'</span>'
+          + '<span style="width:52px;text-align:right">'+(r.ttft_ms == null ? '-' : r.ttft_ms+'ms')+'</span>'
+          + '<span style="width:56px;text-align:right;color:var(--dim)">'+esc(r.price_tier)+'</span></div>').join('')
+        + '</div>';
+    }
+  }
+  list.innerHTML = html;
+  list.querySelectorAll('button[data-fav-remove]').forEach(b => b.addEventListener('click', async () => {
+    const i = b.dataset.favRemove.indexOf('|');
+    const p = b.dataset.favRemove.slice(0, i), m = b.dataset.favRemove.slice(i + 1);
+    try { await fetch('/api/models/favorite', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({provider:p, model:m, remove:true})}); } catch(_){}
+    await loadRoutingMode(); if (state.favExpanded === p) await loadFavRows(p); renderFavorites();
+  }));
+  list.querySelectorAll('button[data-fav-add]').forEach(b => b.addEventListener('click', async () => {
+    state.favExpanded = b.dataset.favAdd;
+    await loadFavRows(state.favExpanded);
+    renderFavorites();
+  }));
+  list.querySelectorAll('button[data-fav-pick]').forEach(b => b.addEventListener('click', async () => {
+    const s = b.dataset.favPick, i = s.indexOf('|');
+    const p = s.slice(0, i), m = s.slice(i + 1);
+    const cur = state.favorites[p] || [];
+    const body = cur.length >= 3 && !cur.includes(m) ? {provider:p, model:m, replace:cur[0]} : {provider:p, model:m};
+    try { await fetch('/api/models/favorite', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)}); } catch(_){}
+    await loadRoutingMode(); await loadFavRows(p); renderFavorites();
+  }));
+  list.querySelectorAll('input[data-fav-search]').forEach(inp => inp.addEventListener('input', () => {
+    state.favSearch = state.favSearch || {};
+    state.favSearch[inp.dataset.favSearch] = inp.value;
+    // 只重渲染行，不打断输入焦点：粗粒度全量重绘会丢焦点，改由 blur/回车触发
+  }));
+  list.querySelectorAll('input[data-fav-search]').forEach(inp => inp.addEventListener('change', async () => {
+    state.favSearch = state.favSearch || {};
+    state.favSearch[inp.dataset.favSearch] = inp.value;
+    await loadFavRows(inp.dataset.favSearch);
+    renderFavorites();
+  }));
+}
 const PRIO_COLORS = {'-3':'#6b7280','-2':'#2563eb','-1':'#38bdf8','0':'','1':'#14b8a6','2':'#22c55e','3':'#84cc16'};
 function prioLabel(l){ return t('prio_' + (l < 0 ? 'm'+(-l) : l === 0 ? '0' : 'p'+l)); }
 function prioDot(l){
@@ -2202,6 +2351,7 @@ function renderTags(){
       + '<span style="flex:1;min-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.model)+'</span>'
       + prioDot(m.priority)
       + prioStepper(m)
+      + (state.routingMode === 'favorites' ? srcPills(m) : '')
       + (dim ? '<span class="pbadge" style="color:var(--red);border-color:var(--red)">'+esc(urTxt)+'</span>' : '')
       + (m.active
           ? '<span class="pbadge" style="color:var(--green);border-color:var(--green)" title="'+esc(t('act_on'))+'">'+esc(t('act_on'))+'</span>'
@@ -2364,6 +2514,7 @@ function renderPortfolio(){
 
 async function refresh(){
   try {
+    loadRoutingMode();
     // today/yesterday = 日历口径（本地时区由浏览器算好，服务端不引时区库）
     const winParam = (() => {
       if (state.win === 'today' || state.win === 'yesterday') {
@@ -2554,7 +2705,7 @@ async function loadFeed(){
     if (Array.isArray(evs)) evs.forEach(addRow);
   } catch(_){}
 }
-(async () => { await loadFeed(); await loadTags(); })();
+(async () => { await loadFeed(); await loadRoutingMode(); await loadTags(); })();
 applyLang();
 refresh();
 setInterval(refresh, 3000);

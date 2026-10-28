@@ -232,6 +232,27 @@ async fn model_tags_have_active_but_no_pinned() {
 }
 
 #[tokio::test]
+async fn post_remove_deletes() {
+    let (cfg, dir) = config_with_seeded_favorites(&["mini", "standard"]);
+    let app = build_router(build_state(cfg));
+    let (status, _) = send(app, req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini", "remove": true}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        load_overrides(&dir).favorites.get(PROVIDER),
+        Some(&vec!["standard".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn routing_mode_get_carries_favorites_map() {
+    let (cfg, _) = config_with_seeded_favorites(&["mini"]);
+    let app = build_router(build_state(cfg));
+    let (_, body) = send(app, get("/api/routing-mode")).await;
+    assert_eq!(body["mode"], "gateway");
+    assert_eq!(body["favorites"][PROVIDER], json!(["mini"]), "tray needs the global favorites map in one call");
+}
+
+#[tokio::test]
 async fn chat_event_carries_source_tag() {
     let port = spawn_mock_upstream().await;
     let (mut cfg, _) = test_config();

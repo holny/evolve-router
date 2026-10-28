@@ -858,10 +858,15 @@ fn demote_other_pins(
     demoted
 }
 
-/// GET /api/routing-mode —— 当前路由路径模式（gateway | favorites）
+/// GET /api/routing-mode —— 当前路由路径模式 + 全局心选清单
+/// （托盘面板一次调用拿全量 favorites，逐 provider 拉取只在选择器打开时）
 pub async fn api_routing_mode_get(State(st): State<AppState>) -> Response {
-    let mode = crate::state::effective_overrides(&st).routing_mode;
-    (axum::Json(json!({"mode": mode.as_str()}))).into_response()
+    let ov = crate::state::effective_overrides(&st);
+    let mut favorites: Vec<(String, Vec<String>)> =
+        ov.favorites.iter().map(|(p, v)| (p.clone(), v.clone())).collect();
+    favorites.sort_by(|a, b| a.0.cmp(&b.0));
+    let favorites: std::collections::BTreeMap<String, Vec<String>> = favorites.into_iter().collect();
+    (axum::Json(json!({"mode": ov.routing_mode.as_str(), "favorites": favorites}))).into_response()
 }
 
 /// PUT /api/routing-mode {"mode": "gateway"|"favorites"} —— 双路径热切换
@@ -929,9 +934,10 @@ pub async fn api_models_favorite_get(
     (axum::Json(json!({"provider": provider, "favorites": favorites, "models": models}))).into_response()
 }
 
-/// POST /api/models/favorite {"provider","model","replace"?} —— 增设/换选心选。
-/// 槽位语义（用户裁决 2026-10-28）：≤3 服务端强制；已满必须带 replace 原位
-/// 替换（UI 的"点行即换选"天然携带）；幽灵 id 404（同 priority 的防御）。
+/// POST /api/models/favorite {"provider","model","replace"?,"remove"?} —— 增设/
+/// 换选/移除心选。槽位语义（用户裁决 2026-10-28）：≤3 服务端强制；已满必须带
+/// replace 原位替换（UI 的"点行即换选"天然携带）；remove=true 移除该心选；
+/// 幽灵 id 404（同 priority 的防御；remove 只要求在清单内，不要求在目录）。
 pub async fn api_models_favorite_post(
     State(st): State<AppState>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -943,6 +949,27 @@ pub async fn api_models_favorite_post(
         return (StatusCode::BAD_REQUEST, axum::Json(json!({"error": {"message": "model is required"}}))).into_response();
     };
     let replace = body.get("replace").and_then(|v| v.as_str());
+    let remove = body.get("remove").and_then(|v| v.as_bool()).unwrap_or(false);
+    if remove {
+        let dir = st.config.data.dir.clone();
+        let provider = provider.to_string();
+        let model = model.to_string();
+        let result: Result<Vec<String>, (axum::http::StatusCode, String)> =
+            crate::state::update_overrides(&dir, |ov| {
+                let list = ov.favorites.entry(provider.clone()).or_default();
+                match list.iter().position(|x| x == &model) {
+                    Some(i) => {
+                        list.remove(i);
+                        Ok(list.clone())
+                    }
+                    None => Err((axum::http::StatusCode::NOT_FOUND, format!("{model} is not a favorite"))),
+                }
+            });
+        return match result {
+            Ok(favorites) => (axum::Json(json!({"status": "ok", "provider": provider, "favorites": favorites}))).into_response(),
+            Err((code, message)) => (code, axum::Json(json!({"error": {"message": message}}))).into_response(),
+        };
+    }
     // 幽灵 id 防御：模型必须在目录中且属于该 provider
     let snap = st.engine.catalog_snapshot();
     let known = snap
@@ -1952,6 +1979,14 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
     let score_of: std::collections::HashMap<&str, u64> =
         ranked.iter().map(|(i, s)| (i.as_str(), *s)).collect();
     let priorities = st.engine.priority_overrides();
+    // 心选来源标签（2026-10-28）：fav/top/new/rec/none——favorites 模式下的
+    // 范围成员来源；gateway 模式恒 none（范围归组合，无来源概念）
+    let (scope_source): std::collections::HashMap<String, evolve_core::scope::SourceTag> =
+        if routing_mode(&st) == crate::state::RoutingModeCfg::Favorites {
+            favorite_scope_selection(&st).1
+        } else {
+            Default::default()
+        };
     let out: Vec<Value> = snap.iter().map(|m| {
         let (auto_cap, auto_tier) = assigned
             .get(&m.id)
@@ -1973,6 +2008,7 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
             "free": m.is_free(),
             "priority": priorities.get(&m.id).copied().unwrap_or(0),
             "active": active_set.contains(&m.id),
+            "source": scope_source.get(&m.id).map(|t| t.as_str()).unwrap_or("none"),
             "release_ts": evolve_core::recency::release_ts_of(m),
             "release_src": if m.release_ts.is_some() { "provider/models.dev" } else if evolve_core::recency::release_ts_from_id(&m.id).is_some() { "id" } else { "none" },
             "recency_score": score_of.get(m.id.as_str()).copied().unwrap_or(0),
