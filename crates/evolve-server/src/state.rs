@@ -643,6 +643,11 @@ pub fn merge_config_providers(
         } else {
             p.key.clone()
         };
+        // existed = overrides 里已有该 provider 的运行时条目（面板开关/编辑写过）。
+        // disabled 是面板开关的落点（2026-10-29）：配置文件的显式值只在**首次
+        // 种子**时采纳——否则配置里的 "disabled": false 会在每次读取时反向覆盖
+        // 运行时的 true，面板开关永远"点了没反应"（实测 MiniMax 即此情况）
+        let existed = ov.providers.contains_key(&key);
         let entry = ov.providers.entry(key).or_default();
         entry.base_url = p.base_url.trim_end_matches('/').to_string();
         if p.api_key.as_deref().map(|k| !k.trim().is_empty()).unwrap_or(false) {
@@ -658,7 +663,10 @@ pub fn merge_config_providers(
         if let Some(v) = &p.plan_kind { entry.plan_kind = v.clone(); }
         if let Some(v) = &p.tier { entry.tier = v.clone(); }
         if let Some(v) = &p.docs_url { entry.docs_url = v.clone(); }
-        if let Some(v) = p.disabled { entry.disabled = v; }
+        // disabled：仅种子时采纳配置值；已有运行时条目一律以 overrides 为准
+        if !existed {
+            if let Some(v) = p.disabled { entry.disabled = v; }
+        }
         entry.origin = p.origin.clone();
         entry.source_path = p.source_path.clone();
     }
@@ -1669,5 +1677,48 @@ mod priority_persistence_tests {
         let back = load_overrides(dir.to_str().unwrap());
         assert_eq!(back.priorities.get("a"), Some(&3), "first update must survive the second");
         assert_eq!(back.priorities.get("b"), Some(&-3));
+    }
+}
+
+/// 面板 disabled 开关 vs 配置文件显式值（2026-10-29 实测 MiniMax：配置里的
+/// "disabled": false 每次 merge 都反向覆盖运行时 true → 面板开关"点了没反应"）。
+/// 规则：disabled 只在首次种子时采纳配置值；已有运行时条目一律以 overrides 为准。
+#[cfg(test)]
+mod merge_disabled_tests {
+    use super::merge_config_providers;
+    use evolve_core::config::ProviderCfg;
+
+    fn cfg(key: &str, disabled: Option<bool>) -> ProviderCfg {
+        ProviderCfg {
+            key: key.into(),
+            base_url: format!("https://{key}.example.com/v1"),
+            disabled,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merge_keeps_runtime_disabled_over_config_false() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let d = dir.to_str().unwrap();
+        // 预置：面板开关已把 MiniMax 切成 true（overrides 里有运行时条目）
+        crate::state::update_overrides(d, |ov| {
+            ov.providers.entry("MiniMax".into()).or_default().disabled = true;
+        });
+        let merged = merge_config_providers(d, &[cfg("MiniMax", Some(false))]);
+        assert_eq!(
+            merged.providers["MiniMax"].disabled, true,
+            "config's explicit false must not stomp the runtime toggle"
+        );
+    }
+
+    #[test]
+    fn merge_seeds_disabled_from_config_when_entry_absent() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        let merged = merge_config_providers(
+            dir.to_str().unwrap(),
+            &[cfg("fresh-provider", Some(true))],
+        );
+        assert_eq!(merged.providers["fresh-provider"].disabled, true, "config value seeds a fresh entry");
     }
 }
