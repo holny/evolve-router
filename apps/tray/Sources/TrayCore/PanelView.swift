@@ -830,24 +830,35 @@ public struct PanelView: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.85)
                         Spacer(minLength: 4)
-                        // provider On/Off（评审 UX round 3：两种模式都存在都生效——
-                        // Off = 彻底不使用该 provider，网关级）
-                        favProviderToggle(p)
                         providerStateInline(p)
                     }
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                    // ② 数据
-                    providerMetricsLine(p)
-                    // ③ 标签
-                    providerLabelsLine(p)
+                    // ② 数据行：心选模式 = On/Off 开头 + 统计数据（用户裁决
+                    // 2026-10-29 二稿：开关移到第二行开头，disabled 文案删掉——
+                    // 胶囊 + 状态点已表达）
+                    providerMetricsLine(p, leadsWithToggle: true)
+                    // ③ 标签行：计费类型 + fav x/3（未选提示）+ top/new/rec/free（0 不展示）
+                    providerLabelsLine(p, favoritesCompact: state.routingMode == "favorites")
                 }
                 // 占满可用宽度：让第①行的 Spacer 把状态推到右边缘
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // ④ 心选 subline（仅 favorites 模式）：竞争构成 + 未选提示 + 展开箭头
+            // ④ 展开的选择器：点第三行任意处内联铺开（默认折叠）
+            if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
+                favPickerInline(p.key)
+            }
+            // 展开热区：第三行整体点按 = 折叠/展开切换（有模型才可挑）
             if state.routingMode == "favorites" && p.modelCount > 0 {
-                favSubline(p)
+                Rectangle().fill(.clear).frame(height: 10)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if state.favoritePickerProvider == p.key {
+                            state.closeFavoritePicker()
+                        } else if !state.external && p.enabled {
+                            state.openFavoritePicker(provider: p.key)
+                        }
+                    }
             }
         }
     }
@@ -961,12 +972,12 @@ public struct PanelView: View {
         }
     }
 
-    /// ② 数据行：与 Model 行的数据一致
+    /// ② 数据行：与 Model 行的数据一致；favorites 模式下行首放 On/Off 胶囊
     @ViewBuilder
-    private func providerMetricsLine(_ p: ProviderRow) -> some View {
+    private func providerMetricsLine(_ p: ProviderRow, leadsWithToggle: Bool = false) -> some View {
         HStack(spacing: 5) {
-            if !p.enabled {
-                Text(t("disabled")).font(.system(size: 9.5)).foregroundStyle(.tertiary)
+            if leadsWithToggle {
+                favProviderToggle(p)
             }
             if p.tokensWin > 0 {
                 Text(AppState.fmtTok(p.tokensWin))
@@ -989,9 +1000,56 @@ public struct PanelView: View {
         .minimumScaleFactor(0.75)
     }
 
-    /// ③ 标签行：档位 / 模型数 / 免费 / 降级 / 缺 key
+    /// ③ 标签行：档位 / 模型数 / 免费 / 降级 / 缺 key；
+    /// favoritesCompact（心选模式）= 计费类型 + fav x/3（未选橙色提示）+
+    /// top/new/rec/free 计数（0 不展示；总模型数不展示）
     @ViewBuilder
-    private func providerLabelsLine(_ p: ProviderRow) -> some View {
+    private func providerLabelsLine(_ p: ProviderRow, favoritesCompact: Bool = false) -> some View {
+        HStack(spacing: 4) {
+            if favoritesCompact {
+                // 计费类型：订阅方案档位（pro/max/go/go-plus）或 api（按量余额）
+                let billing = displayTier(p).isEmpty ? (p.planKind == "api" ? "api" : "") : displayTier(p)
+                if !billing.isEmpty {
+                    Text(billing)
+                        .font(.system(size: 8.5, weight: .medium))
+                        .padding(.horizontal, 4).padding(.vertical, 0.5)
+                        .background(Capsule().fill(Color.secondary.opacity(0.14)))
+                        .foregroundStyle(.secondary)
+                }
+                if (state.favorites[p.key] ?? []).isEmpty && p.enabled {
+                    Text(t("fav_unpicked"))
+                        .font(.system(size: 8.5, weight: .medium))
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("fav \((state.favorites[p.key] ?? []).count)/3")
+                        .font(.system(size: 8.5))
+                        .monospacedDigit()
+                        .foregroundStyle(Color(red: 0.52, green: 0.80, blue: 0.09))
+                }
+                if let c = state.scopeCounts[p.key] {
+                    // 数量为 0 的来源不展示（用户裁决）
+                    if c.top > 0 {
+                        Text("top \(c.top)").font(.system(size: 8.5)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
+                    if c.new > 0 {
+                        Text("new \(c.new)").font(.system(size: 8.5)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
+                    if c.rec > 0 {
+                        Text("rec \(c.rec)").font(.system(size: 8.5)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
+                    if c.free > 0 {
+                        Text("free \(c.free)").font(.system(size: 8.5)).monospacedDigit().foregroundStyle(.tertiary)
+                    }
+                }
+            } else {
+                favLabelsLegacy(p)
+            }
+            favStatusTail(p)
+        }
+    }
+
+    /// 既有标签（Autopilot 模式）：档位 / 模型数 / 免费 / 降级 / 冷却 / 缺 key
+    private func favLabelsLegacy(_ p: ProviderRow) -> some View {
         HStack(spacing: 4) {
             if !displayTier(p).isEmpty {
                 Text(displayTier(p))
@@ -1012,6 +1070,15 @@ public struct PanelView: View {
                     .background(Capsule().fill(Color.green.opacity(0.16)))
                     .foregroundStyle(.green)
             }
+            favStatusTail(p)
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
+    }
+
+    /// 状态尾巴（两模式共用）：降级 / 非配额冷却原因 / 缺 key
+    private func favStatusTail(_ p: ProviderRow) -> some View {
+        Group {
             if !p.issueLabel.isEmpty {
                 Text(t("degraded") + " · " + Self.fmtProbe(p.nextProbeMs))
                     .font(.system(size: 8.5, weight: .medium))
@@ -1049,8 +1116,6 @@ public struct PanelView: View {
                 }
             }
         }
-        .lineLimit(1)
-        .minimumScaleFactor(0.75)
     }
 
     // MARK: - 控制区
