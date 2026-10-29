@@ -774,12 +774,6 @@ public struct PanelView: View {
                 .font(.system(size: 10, design: .monospaced))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if !row.capability.isEmpty {
-                tagPill(row.capability, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: "")
-            }
-            if !row.priceTier.isEmpty {
-                tagPill(row.priceTier, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: "")
-            }
             // 来源标签复用（评审 UX round）：TOP/NEW/REC = 已在候选队列；
             // FREE = 免费直通车成员。重复挑选只是叠加心选加成
             if let src = row.scopeSource, src != "none", let key = Self.sourceKey(src), let tint = Self.sourceTint(src) {

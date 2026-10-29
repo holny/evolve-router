@@ -69,6 +69,40 @@ enum PanelPreview {
                         modelCount: 12, tierEffective: "pro"),
         ]
         state.lastSync = Date()
+        // 心选模式种子（EV_PREVIEW_FAV=1）：模式开关 + provider 折叠行 +
+        // 未选提示 + On/Off（面板加高/折叠行/未选提示的回归看图用）
+        if ProcessInfo.processInfo.environment["EV_PREVIEW_FAV"] != nil {
+            state.routingMode = "favorites"
+            state.favorites = [
+                "opencode-go": ["opencode-go/minimax-m3.1-flash", "opencode-go/claude-haiku-5-5"],
+                "deepseek": ["deepseek/deepseek-v4-pro"],
+                // MiniMax 有记录但清单为空 → 不触发；zhipuai 无记录 → 「+」空位行
+            ]
+            state.favoriteNotice = nil
+        }
+        // 选择器展开种子（EV_PREVIEW_FAV_PICK=<provider>）：比较列/来源标签/
+        // 免费标签/候选队列提示（EV_PREVIEW_FAV=1 需同时给）
+        if let pickProv = ProcessInfo.processInfo.environment["EV_PREVIEW_FAV_PICK"],
+           ProcessInfo.processInfo.environment["EV_PREVIEW_FAV"] != nil {
+            state.favoritePickerProvider = pickProv
+            state.favoritePickerRows = [
+                FavoritePickRow(model: "opencode-go/minimax-m3.1-flash", capability: "basic", priceTier: "cheap",
+                                tokens7d: 46_275_714, cacheHitPct: 96, ttftMs: 10_061, favorite: true,
+                                scopeSource: "fav", isFree: false),
+                FavoritePickRow(model: "opencode-go/beam-free", capability: "basic", priceTier: "cheap",
+                                tokens7d: 1_200, cacheHitPct: nil, ttftMs: 800, favorite: false,
+                                scopeSource: nil, isFree: true),
+                FavoritePickRow(model: "opencode-go/claude-haiku-5-5", capability: "basic", priceTier: "cheap",
+                                tokens7d: 42_562_507, cacheHitPct: 95, ttftMs: 5_362, favorite: true,
+                                scopeSource: "top", isFree: false),
+                FavoritePickRow(model: "opencode-go/glm-5.2", capability: "standard", priceTier: "premium",
+                                tokens7d: 14_071_327, cacheHitPct: 81, ttftMs: 18_325, favorite: false,
+                                scopeSource: "new", isFree: false),
+                FavoritePickRow(model: "opencode-go/deepseek-v4-pro", capability: "powerful", priceTier: "premium",
+                                tokens7d: 0, cacheHitPct: nil, ttftMs: nil, favorite: false,
+                                scopeSource: "rec", isFree: false),
+            ]
+        }
         // 预览/截图：展示“配置改动待重启”提示行与 Restart 按钮（README 图需要）
         if ProcessInfo.processInfo.environment["EV_PREVIEW_SEED"] != nil {
             // EV_PREVIEW_JUDGE=model|degraded|missing|rules → 切换"配置态 + 横幅"，便于核对

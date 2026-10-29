@@ -1096,4 +1096,18 @@ public struct FavoritePickRow: Identifiable, Equatable {
     public let scopeSource: String?
     /// 免费模型（直通车成员，同样已在候选队列）
     public let isFree: Bool
+
+    public init(model: String, capability: String, priceTier: String,
+                tokens7d: Int, cacheHitPct: Int?, ttftMs: Int?,
+                favorite: Bool, scopeSource: String?, isFree: Bool) {
+        self.model = model
+        self.capability = capability
+        self.priceTier = priceTier
+        self.tokens7d = tokens7d
+        self.cacheHitPct = cacheHitPct
+        self.ttftMs = ttftMs
+        self.favorite = favorite
+        self.scopeSource = scopeSource
+        self.isFree = isFree
+    }
 }
