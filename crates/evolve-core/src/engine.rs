@@ -975,11 +975,15 @@ impl Engine {
         }
         // 心选路径专属加成（仅 curated；2026-10-28 用户裁决）：
         // ① FAV 软偏好——无显式档位的心选模型 ×FAV_SOFT_BOOST（显式档位优先，不叠加）；
-        // ② NEW 新手保护——累计完成 token 头 NEW_DECAY_TOKENS 内线性衰减的新模型加成。
-        // 只乘分数：不进 priority_overlay、不触发 band>=1 的质量下限豁免、不影响粘性
+        // ② NEW 新手保护——累计完成 token 头 NEW_DECAY_TOKENS 内线性衰减的新模型加成，
+        //    同样让位显式档位（评审 M1：负档被 ×1.4 抬回 = 用户降档被部分抵消）。
+        // 只乘分数：不进 priority_overlay、不触发 band>=3 的质量下限豁免、不影响粘性
         if input.curated {
             for s in scores.iter_mut() {
-                if !prio_map.contains_key(&s.model_id) && input.favorites.contains(&s.model_id) {
+                if prio_map.contains_key(&s.model_id) {
+                    continue;
+                }
+                if input.favorites.contains(&s.model_id) {
                     s.score *= FAV_SOFT_BOOST;
                 }
                 let done = input.model_tokens_total.get(&s.model_id).copied().unwrap_or(0) as f32;
@@ -2669,6 +2673,32 @@ mod curated_tests {
         let mut inp = input("你好", 500, &d, None, &h);
         inp.model_tokens_total = &map;
         assert!((score_of(&e.decide(inp), "mini") - f_mini).abs() / f_mini < 1e-3);
+    }
+
+    /// NEW 衰减与显式档位的关系（评审 M1）：显式档位（含负档）完全取代衰减——
+    /// 显式 −1 不得被 ×1.4 抬回（×0.7 ≠ ×0.98），显式 +1 也不叠 ×1.4
+    #[test]
+    fn curated_new_decay_yields_to_explicit_priority() {
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        let base = e.decide(input("你好", 500, &d, None, &h));
+        let f_mini = score_of(&base, "mini");
+        let mut map = EMPTY_TOKENS.clone();
+        map.insert("mini".to_string(), 0);
+        for level in [-2i8, -1, 1, 2] {
+            e.set_priority_override("mini", Some(level));
+            let mut inp = input("你好", 500, &d, None, &h);
+            inp.curated = true;
+            inp.model_tokens_total = &map;
+            let s = score_of(&e.decide(inp), "mini");
+            let want = f_mini * band_factor(level);
+            assert!(
+                (s - want).abs() / want < 1e-3,
+                "level {level} with fresh-model tokens must be exactly band_factor: {s} vs {want}"
+            );
+            e.set_priority_override("mini", None);
+        }
     }
 
     #[test]

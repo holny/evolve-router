@@ -252,6 +252,17 @@ async fn routing_mode_get_carries_favorites_map() {
     assert_eq!(body["favorites"][PROVIDER], json!(["mini"]), "tray needs the global favorites map in one call");
 }
 
+/// 评审 L10：remove 落空（provider 无心选记录）→ 404 且不得在 overrides
+/// 里落 "provider": [] 幽灵条目
+#[tokio::test]
+async fn remove_miss_leaves_no_stray_entry() {
+    let (cfg, dir) = test_config();
+    let app = build_router(build_state(cfg));
+    let (status, _) = send(app, req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini", "remove": true}))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(load_overrides(&dir).favorites.get(PROVIDER).is_none(), "no stray empty entry");
+}
+
 #[tokio::test]
 async fn chat_event_carries_source_tag() {
     let port = spawn_mock_upstream().await;
@@ -270,6 +281,23 @@ async fn chat_event_carries_source_tag() {
     let (_, events) = send(app, get("/api/events?limit=5&kind=chat")).await;
     let chat = events.as_array().and_then(|a| a.iter().find(|e| e["chosen"] == "mini")).expect("chat event for mini must exist");
     assert_eq!(chat["source"], "fav", "chosen favorite must carry source=fav: {chat}");
+}
+
+/// Task 评审 M4：被 Off(-3) 的心选模型不得占用范围槽位（引擎硬排除它，
+/// 留在范围里只是白吃 3-6 个名额中的一个）——active 必须为 false
+#[tokio::test]
+async fn offed_favorite_leaves_the_scope() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    let (s, _) = send(app.clone(), req("PUT", "/api/routing-mode", json!({"mode": "favorites"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app.clone(), req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "standard"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app.clone(), req("POST", "/api/priority", json!({"model": "standard", "level": -3}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, body) = send(app, get("/api/model-tags")).await;
+    let find = |id: &str| body["models"].as_array().unwrap().iter().find(|m| m["model"] == id).unwrap().clone();
+    assert_eq!(find("standard")["active"], false, "Off'd favorite must not occupy scope slots: {}", find("standard"));
 }
 
 #[tokio::test]

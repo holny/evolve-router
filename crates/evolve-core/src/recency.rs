@@ -119,16 +119,34 @@ pub fn civil_day_start_utc_ms(y: i64, m: i64, d: i64) -> u64 {
     (days_from_civil(y, m, d) * 86_400) as u64 * 1000
 }
 
-/// 本地时区的今天日期（年, 月, 日）+ GMT 偏移秒——经 localtime_r
-pub fn local_date_ymd_gmtoff(now_ms: u64) -> ((i64, i64, i64), i64) {
+/// 本地时区的今天日期（年, 月, 日）+ GMT 偏移秒——经 localtime_r（仅 unix）。
+/// 返回 None = 系统调用失败（极罕见）：调用方回退 UTC 口径并告警——静默
+/// 1970 会让"昨日"窗口彻底失真（评审 M2）。非 unix 目标（MSVC 无
+/// localtime_r 符号）同样回退 UTC（评审 M3 可移植性）。
+#[cfg(unix)]
+pub fn local_date_ymd_gmtoff(now_ms: u64) -> Option<((i64, i64, i64), i64)> {
     let secs = (now_ms / 1000) as i64;
     let mut tm = CTm {
         tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0, tm_mon: 0, tm_year: 0,
         tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: std::ptr::null(),
     };
-    unsafe { localtime_r(&secs, &mut tm) };
-    let date = ((tm.tm_year as i64) + 1900, (tm.tm_mon as i64) + 1, tm.tm_mday as i64);
-    (date, tm.tm_gmtoff as i64)
+    // SAFETY: `secs` 指向合法 i64，`tm` 是本函数持有的完整 struct tm
+    // （glibc/BSD 布局，含尾部 tm_gmtoff/tm_zone）；localtime_r 线程安全、
+    // 失败返回 null（下方已检查）
+    let ptr = unsafe { localtime_r(&secs, &mut tm) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some((
+            ((tm.tm_year as i64) + 1900, (tm.tm_mon as i64) + 1, tm.tm_mday as i64),
+            tm.tm_gmtoff as i64,
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+pub fn local_date_ymd_gmtoff(_now_ms: u64) -> Option<((i64, i64, i64), i64)> {
+    None
 }
 
 fn days_in_month(y: i64, m: i64) -> i64 {
@@ -143,17 +161,45 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 }
 
 /// 民事日期当日**本地**零点的 epoch ms：UTC 零点 − GMT 偏移
-/// （offset 为该时刻 tm_gmtoff；DST 切换日两个边界共用同一 offset，±1h 近似）
+/// （offset 为该时刻 tm_gmtoff；DST 切换日两个边界共用同一 offset，±1h 近似）。
+/// 饱和运算防回绕（评审 L9：1970-01-01 + 正偏移的中间值为负，`as u64` 会
+/// 包成 ~u64::MAX 的荒谬窗口边界）
 pub fn local_midnight_utc_ms(y: i64, m: i64, d: i64, gmtoff_secs: i64) -> u64 {
-    (civil_day_start_utc_ms(y, m, d) as i64 - gmtoff_secs * 1000) as u64
+    let ms = civil_day_start_utc_ms(y, m, d) as i64 - gmtoff_secs * 1000;
+    ms.max(0) as u64
 }
 
 /// 本地日历"昨天"的 [起点, 终点) epoch ms（按民事日借位，非 24h 回退——DST 日
 /// 亦正确；零点锚定本地时区：UTC+8 的"昨天"= 本地 00:00–24:00，而非 UTC 零点
 /// 平移（该 bug 曾让窗口落在本地 08:00–次日 08:00，早晨流量被记进"昨天"）。
+/// Howard Hinnant 天数 → 民事日期（与 days_from_civil 互逆）
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// 终点 = 本地今天零点。
 pub fn local_yesterday_bounds_ms(now_ms: u64) -> (u64, u64) {
-    let ((y, m, d), gmtoff) = local_date_ymd_gmtoff(now_ms);
+    let ((y, m, d), gmtoff) = match local_date_ymd_gmtoff(now_ms) {
+        Some(v) => v,
+        // localtime 失败/不可用：回退 UTC 口径（gmtoff=0）并告警——窗口仍为
+        // 合法 24h，只是日界偏移时区差（评审 M2：不许静默 1970）
+        None => {
+            tracing::warn!(
+                "localtime_r unavailable — falling back to UTC day boundary for favorites yesterday window"
+            );
+            let days = (now_ms / 86_400_000) as i64;
+            (civil_from_days(days), 0)
+        }
+    };
     let (ny, nm, nd) = if d > 1 {
         (y, m, d - 1)
     } else if m > 1 {

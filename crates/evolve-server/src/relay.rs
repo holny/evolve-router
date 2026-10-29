@@ -121,7 +121,9 @@ pub async fn chat_completions(
     } else {
         Default::default()
     };
-    let tokens_total = st.flywheel.tokens_total();
+    // tokens_total 只在 curated 模式被引擎消费（评审 M5：gateway 模式每请求
+    // 白 clone 全部 lifetime map + 遍历小时桶）——按模式门控
+    let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
     let source_of = |id: &str| -> Option<String> {
         if curated_mode {
             scope_source.get(id).map(|t| t.as_str().to_string())

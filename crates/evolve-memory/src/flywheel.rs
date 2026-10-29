@@ -217,6 +217,22 @@ impl Flywheel {
             }
             tracing::info!(models = inner.models.len(), "flywheel snapshot restored");
         }
+        // 一次性折叠：升级首启时永续计数是空的，历史 token 只在小时桶里（3 天
+        // 后修剪）——不折入的话 decay 会先归零再回弹（评审 L8 非单调）。折入后
+        // 桶修剪不再影响衰减输入
+        let mut folded = false;
+        for (model, buckets) in inner.hourly.iter() {
+            let sum: u64 = buckets.iter().map(|b| b.in_tok + b.out_tok).sum();
+            let slot = inner.lifetime_tokens.entry(model.clone()).or_insert(0);
+            if sum > *slot {
+                *slot = sum;
+                folded = true;
+            }
+        }
+        if folded {
+            tracing::info!("flywheel lifetime token counters folded from hourly buckets (upgrade)");
+            inner.dirty = true;
+        }
         let params = params.sanitized();
         tracing::info!(version = params.version, ok_weight = params.ok_weight, bias_gain = params.bias_gain, "flywheel strategy loaded");
         Self { inner: std::sync::Arc::new(Mutex::new(inner)), path: Some(path), params }

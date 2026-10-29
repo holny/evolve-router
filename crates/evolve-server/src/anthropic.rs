@@ -61,7 +61,8 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     } else {
         Default::default()
     };
-    let tokens_total = st.flywheel.tokens_total();
+    // tokens_total 只在 curated 模式被引擎消费（评审 M5）——按模式门控
+    let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
 
     let decision_started = std::time::Instant::now();
     let mut decision = match &target {

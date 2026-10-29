@@ -91,6 +91,7 @@ let T: [String: String] = [
     "fav_dist": "Source mix",
     "fav_set": "Favorite set",
     "fav_removed": "Favorite removed",
+    "fav_swapped": "Replaced oldest favorite: %@",
     "fav_full": "3 favorites set — swap or remove first",
     "fav_back": "back",
     "src_fav": "FAV",

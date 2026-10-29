@@ -952,11 +952,12 @@ public final class AppState: ObservableObject {
     // MARK: - 心选路径（2026-10-28 双路径）
 
     /// PUT /api/routing-mode —— 双路径热切换。乐观落地（切完立刻反映，失败由
-    /// 下一轮轮询回读纠偏，与 setPriority 同纪律）
+    /// 下一轮轮询回读纠偏，与 setPriority 同纪律）；external 只读守卫**先于**
+    /// 乐观写（评审 L1：否则面板闪切后回跳）
     public func setRoutingMode(_ mode: String) {
         guard mode == "gateway" || mode == "favorites" else { return }
-        upd(\.routingMode, mode)
         guard !external else { return }
+        upd(\.routingMode, mode)
         Task {
             guard let url = URL(string: Config.baseURL + "/api/routing-mode"),
                   let payload = try? JSONSerialization.data(withJSONObject: ["mode": mode]) else { return }
@@ -988,14 +989,23 @@ public final class AppState: ObservableObject {
         Task { await favoriteAction(provider: provider, body: ["provider": provider, "model": model, "remove": true]) }
     }
 
-    /// 打开 provider 维度比较选择器（目录全量 + 昨日/失败率/首字延迟/价位四列）
+    /// 打开 provider 维度比较选择器（目录全量 + 昨日/失败率/首字延迟/价位四列）。
+    /// 打开即清旧行；回包落点校验（评审 L2：A 的慢回包不得盖掉 B 的目录）
     public func openFavoritePicker(provider: String) {
         upd(\.favoritePickerProvider, provider)
         upd(\.favoritePickerSearch, "")
+        upd(\.favoritePickerRows, [])
         Task {
-            if case (200, let data)? = try? await get("/api/models/favorite?provider=\(provider)"),
+            // provider 键是用户可配置串（可含空格/非 ASCII）——percent-encode
+            //（评审 L3：裸插值让 URL(string:) 返回 nil，选择器静默空白）
+            let q = provider.addingPercentEncoding(
+                withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+            ) ?? provider
+            if case (200, let data)? = try? await get("/api/models/favorite?provider=\(q)"),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let arr = obj["models"] as? [[String: Any]] {
+                // 回包落点校验：选择器已关闭/切到别家时丢弃
+                guard favoritePickerProvider == provider else { return }
                 let rows: [FavoritePickRow] = arr.compactMap { m in
                     guard let model = m["model"] as? String else { return nil }
                     return FavoritePickRow(
@@ -1017,6 +1027,9 @@ public final class AppState: ObservableObject {
     }
 
     private func favoriteAction(provider: String, body: [String: Any]) async {
+        // external 只读守卫（评审 M4-tray：选择器行的点击没有 UI 级禁用，
+        // 另一实例接管网关时不得经此路径改 overrides）
+        guard !external else { return }
         let (status, data) = (try? await post("/api/models/favorite", body: body)) ?? (0, Data())
         if status != 200 {
             let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -1025,7 +1038,12 @@ public final class AppState: ObservableObject {
             showFavoriteNotice("⚠︎ " + msg)
             return
         }
-        showFavoriteNotice(t("fav_set"))
+        // 换选时点名被换掉的心选（评审 L6：静默换最旧 = 用户不知道动了谁）
+        if let replaced = body["replace"] as? String {
+            showFavoriteNotice(String(format: t("fav_swapped"), replaced))
+        } else {
+            showFavoriteNotice(t((body["remove"] as? Bool) == true ? "fav_removed" : "fav_set"))
+        }
         // 刷新全局清单 + 打开中的选择器
         await pollData()
         if favoritePickerProvider == provider {

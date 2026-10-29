@@ -956,11 +956,19 @@ pub async fn api_models_favorite_post(
         let model = model.to_string();
         let result: Result<Vec<String>, (axum::http::StatusCode, String)> =
             crate::state::update_overrides(&dir, |ov| {
-                let list = ov.favorites.entry(provider.clone()).or_default();
+                // get_mut 而非 entry().or_default()：remove 404 不得在 overrides
+                // 里落一个 "provider": [] 的幽灵条目（评审 L10）；移除后空清单
+                // 整键剪枝，避免托盘渲染幻影 provider 行
+                let Some(list) = ov.favorites.get_mut(&provider) else {
+                    return Err((axum::http::StatusCode::NOT_FOUND, format!("{model} is not a favorite")));
+                };
                 match list.iter().position(|x| x == &model) {
                     Some(i) => {
                         list.remove(i);
-                        Ok(list.clone())
+                        if list.is_empty() {
+                            ov.favorites.remove(&provider);
+                        }
+                        Ok(ov.favorites.get(&provider).cloned().unwrap_or_default())
                     }
                     None => Err((axum::http::StatusCode::NOT_FOUND, format!("{model} is not a favorite"))),
                 }
@@ -983,6 +991,8 @@ pub async fn api_models_favorite_post(
     let model = model.to_string();
     let result: Result<Vec<String>, (axum::http::StatusCode, String)> =
         crate::state::update_overrides(&dir, |ov| {
+            // 容量校验先于落任何条目（评审 L10：满 3 无 replace 的 400 不得
+            // 在 overrides 里留下空/多余条目）
             let list = ov.favorites.entry(provider.clone()).or_default();
             if list.iter().any(|x| x == &model) {
                 return Ok(list.clone()); // 幂等：已是心选
@@ -997,6 +1007,11 @@ pub async fn api_models_favorite_post(
                 },
                 None => {
                     if list.len() >= 3 {
+                        // 未 entry 新 provider 时的 400 不落条目——但 entry 已建；
+                        // 无成员则剪掉
+                        if list.is_empty() {
+                            ov.favorites.remove(&provider);
+                        }
                         Err((axum::http::StatusCode::BAD_REQUEST, "3 favorites set — pass replace".to_string()))
                     } else {
                         list.push(model.clone());
@@ -1972,10 +1987,15 @@ pub async fn api_model_tags_get(State(st): State<AppState>) -> Response {
     let assigned = tags_for_catalog(&st, &snap);
     let usability = model_usability(&st);
     // active = 当前模式的路由范围（gateway 组合 / favorites 心选范围）——
-    // 双入口同源：面板与网页的"启用"展示都吃这里
-    let active_ids = active_id_set(&st);
+    // 双入口同源：面板与网页的"启用"展示都吃这里。
+    // gateway 分支一次算好 ids+ranked（评审 L11：此前 active_id_set 与
+    // active_models 各算一遍 portfolio，全目录遍历 ×2）
+    let (active_ids, ranked) = if routing_mode(&st) == crate::state::RoutingModeCfg::Favorites {
+        (favorite_scope_selection(&st).0, active_models(&st).1)
+    } else {
+        active_models(&st)
+    };
     let active_set: std::collections::HashSet<&String> = active_ids.iter().collect();
-    let (_, ranked) = active_models(&st);
     let score_of: std::collections::HashMap<&str, u64> =
         ranked.iter().map(|(i, s)| (i.as_str(), *s)).collect();
     let priorities = st.engine.priority_overrides();
@@ -2402,6 +2422,11 @@ pub fn favorite_scope_selection(
             continue;
         }
         if m.base_url.contains(&self_ep) || m.base_url.contains(&self_ep2) {
+            continue;
+        }
+        // Off(-3) 的模型被引擎硬排除——留在范围里只会白吃 ≤3 心选/2 昨日/1 最新
+        // 槽位中的一个（评审 M4：小池子里的名额浪费）
+        if ov.priorities.get(&m.id).copied() == Some(-3) {
             continue;
         }
         let (cap_rank, price_rank) = tags

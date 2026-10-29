@@ -527,56 +527,61 @@ public struct PanelView: View {
     }
 
     /// 心选卡（favorites 模式才渲染）：引导横幅 + 每 provider chips/空位 +
-    /// 打开中的比较选择器 + 来源分布。gateway 模式整个不出现（面板维持现状）
+    /// 打开中的比较选择器 + 来源分布。gateway 模式整个不出现（面板维持现状）。
+    /// 内容区有界滚动（评审 L5：面板定高 640，选择器展开 ~190pt 会把
+    /// controls 区挤出可视范围）
     private var favoritesCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let pickerProvider = state.favoritePickerProvider {
-                pickerCard(pickerProvider)
-            } else {
-                HStack(spacing: 6) {
-                    sectionLabel("heart.text.square", t("fav_card"))
-                    Spacer(minLength: 0)
-                    if favoritesEmpty {
-                        // 被动引导横幅：默认照跑，挑选只是引导（用户裁决）
-                        HStack(spacing: 5) {
-                            Text(t("fav_nudge"))
-                                .font(.system(size: 9))
-                                .foregroundStyle(Color(red: 0.30, green: 0.49, blue: 0.06))
-                            Button {
-                                if let first = state.favorites.keys.sorted().first {
-                                    state.openFavoritePicker(provider: first)
-                                } else if let first = firstProviderWithModels {
-                                    state.openFavoritePicker(provider: first)
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let pickerProvider = state.favoritePickerProvider {
+                        pickerCard(pickerProvider)
+                    } else {
+                        HStack(spacing: 6) {
+                            sectionLabel("heart.text.square", t("fav_card"))
+                            Spacer(minLength: 0)
+                            if favoritesEmpty {
+                                // 被动引导横幅：默认照跑，挑选只是引导（用户裁决）
+                                HStack(spacing: 5) {
+                                    Text(t("fav_nudge"))
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Color(red: 0.30, green: 0.49, blue: 0.06))
+                                    Button {
+                                        if let first = sortedFavoriteProviders.first {
+                                            state.openFavoritePicker(provider: first)
+                                        }
+                                    } label: {
+                                        Text(t("fav_choose"))
+                                            .font(.system(size: 9, weight: .bold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Capsule().fill(Color(red: 0.52, green: 0.80, blue: 0.09)))
+                                            .foregroundStyle(Color(red: 0.10, green: 0.18, blue: 0.02))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .opacity(state.external ? 0.5 : 1)
+                                    .disabled(state.external)
                                 }
-                            } label: {
-                                Text(t("fav_choose"))
-                                    .font(.system(size: 9, weight: .bold))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color(red: 0.52, green: 0.80, blue: 0.09)))
-                                    .foregroundStyle(Color(red: 0.10, green: 0.18, blue: 0.02))
                             }
-                            .buttonStyle(.plain)
-                            .opacity(state.external ? 0.5 : 1)
-                            .disabled(state.external)
+                        }
+                        // chips：每 provider 一行（心选 chip × 移除 + 空位 +）
+                        ForEach(sortedFavoriteProviders, id: \.self) { provider in
+                            favoriteChipsRow(provider)
+                        }
+                        if !favoritesEmpty && state.routingMode == "favorites" {
+                            sourceDistRow
+                        }
+                        if let notice = state.favoriteNotice {
+                            Text(notice)
+                                .font(.system(size: 8.5))
+                                .foregroundStyle(.orange)
+                                .lineLimit(2)
+                                .minimumScaleFactor(0.8)
                         }
                     }
                 }
-                // chips：每 provider 一行（心选 chip × 移除 + 空位 +）
-                ForEach(sortedFavoriteProviders, id: \.self) { provider in
-                    favoriteChipsRow(provider)
-                }
-                if !favoritesEmpty && state.routingMode == "favorites" {
-                    sourceDistRow
-                }
-                if let notice = state.favoriteNotice {
-                    Text(notice)
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.orange)
-                        .lineLimit(2)
-                        .minimumScaleFactor(0.8)
-                }
             }
+            .frame(maxHeight: 210)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -587,18 +592,16 @@ public struct PanelView: View {
         state.favorites.values.allSatisfy { $0.isEmpty }
     }
 
-    /// 有目录模型的 provider（提供"第一次挑从哪家开始"的次序）
-    private var firstProviderWithModels: String? {
-        state.providers.first?.id
-    }
-
     private var sortedFavoriteProviders: [String] {
-        var names = Set(state.favorites.keys)
-        _ = names.remove("")
-        var all = Array(state.favorites.keys)
-        // 有心选的 provider 优先展示；没心选记录的 provider（目录里存在）补一个空位行
-        all.sort()
-        return all
+        // /api/routing-mode 只回**已有心选记录**的 provider——目录里的其他
+        // provider 也要补一行「+」空位，否则从未挑过心选的 provider 在横幅
+        // 消失后就没有打开选择器的入口了（评审 L7：死代码 + 注释不兑现）
+        var all = Set(state.favorites.keys)
+        for p in state.providers where p.modelCount > 0 {
+            all.insert(p.key)
+        }
+        all.remove("")
+        return all.sorted()
     }
 
     private func favoriteChipsRow(_ provider: String) -> some View {
@@ -761,6 +764,8 @@ public struct PanelView: View {
                 .frame(width: 40, alignment: .trailing)
         }
         .padding(.vertical, 1)
+        .opacity(state.external ? 0.5 : 1)
+        .disabled(state.external)
     }
 
     private var providersCard: some View {

@@ -90,12 +90,12 @@ pub fn select_provider_scope(
     }
 
     // 槽位选举序：昨日 token 降序优先（0 = 无来源），其次最新发布降序，同分 id 升序
-    let slot_order = |a: &ScopeCandidate, b: &ScopeCandidate| {
+    fn slot_order(a: &ScopeCandidate, b: &ScopeCandidate) -> std::cmp::Ordering {
         b.yesterday_tokens
             .cmp(&a.yesterday_tokens)
             .then(b.release_ts.cmp(&a.release_ts))
             .then(a.id.cmp(&b.id))
-    };
+    }
     // 槽位来源标签：有昨日用量 = Top；只有发布时间 = New（标签反映来源不反映槽位）
     let slot_tag = |c: &ScopeCandidate| {
         if c.yesterday_tokens > 0 {
@@ -106,21 +106,30 @@ pub fn select_provider_scope(
     };
 
     // ② 剩余心选位 + ③ 昨日位：同一资格（有昨日用量或可判定"最新"），
-    // 各自排除已选；②③ 用同一条序，④ 只认可判定最新者
+    // 各自排除已选；②③ 用同一条序，④ 只按"最新"序（评审 H1：复用 ②③ 的
+    // 昨日优先序会让第 6 个昨日量模型偷走 NEW 槽，真最新反而落选）
     fn has_source(c: &ScopeCandidate) -> bool {
         c.yesterday_tokens > 0 || c.release_ts.is_some()
     }
     fn has_release(c: &ScopeCandidate) -> bool {
         c.release_ts.is_some()
     }
-    for (slots, eligible) in [
-        (FAV_SLOTS.saturating_sub(fav_count), has_source as fn(&ScopeCandidate) -> bool),
-        (TOP_SLOTS, has_source),
-        (NEW_SLOTS, has_release),
+    fn new_order(a: &ScopeCandidate, b: &ScopeCandidate) -> std::cmp::Ordering {
+        b.release_ts.cmp(&a.release_ts).then(a.id.cmp(&b.id))
+    }
+    // 显式 fn 指针类型：三个 fn item 类型不同，数组需要统一成指针
+    let slot_order: fn(&ScopeCandidate, &ScopeCandidate) -> std::cmp::Ordering = slot_order;
+    let new_order: fn(&ScopeCandidate, &ScopeCandidate) -> std::cmp::Ordering = new_order;
+    let has_source: fn(&ScopeCandidate) -> bool = has_source;
+    let has_release: fn(&ScopeCandidate) -> bool = has_release;
+    for (slots, eligible, order) in [
+        (FAV_SLOTS.saturating_sub(fav_count), has_source, slot_order),
+        (TOP_SLOTS, has_source, slot_order),
+        (NEW_SLOTS, has_release, new_order),
     ] {
         let mut pool: Vec<&ScopeCandidate> =
             cands.iter().filter(|c| !c.free && !seen.contains(&c.id) && eligible(c)).collect();
-        pool.sort_by(|a, b| slot_order(a, b));
+        pool.sort_by(|a, b| order(a, b));
         for c in pool.into_iter().take(slots) {
             out.push((c.id.clone(), slot_tag(c)));
             seen.insert(c.id.clone());
@@ -276,6 +285,26 @@ mod tests {
         let favs = vec!["ghost".to_string(), "a".to_string()];
         let out = select_provider_scope(&cands, &favs);
         assert_eq!(out, vec![("a".to_string(), SourceTag::Fav)]);
+    }
+
+    /// ④ 最新位必须是"真最新"：昨日活跃模型 ≥5 时心选/昨日位先吃掉前 5，
+    /// 新入库（ytok=0）模型仍应凭 release_ts 拿到 NEW 槽（评审 H1）
+    #[test]
+    fn newest_slot_goes_to_newest_release_not_leftover_yesterday() {
+        let mut cands: Vec<ScopeCandidate> = Vec::new();
+        // 6 个昨日活跃模型：p1..p6，ytok 递减
+        for (i, tok) in [900u64, 800, 700, 600, 500, 400].iter().enumerate() {
+            cands.push(cand(&format!("p{i}"), 1, 1, false, Some(1_000 + i as u64), *tok, 1.0));
+        }
+        // 真最新入库：release 最大、无昨日用量
+        cands.push(cand("fresh", 1, 1, false, Some(9_999), 0, 1.0));
+        let out = select_provider_scope(&cands, &[]);
+        assert_eq!(tags_of(&out, "fresh"), Some(SourceTag::New), "newest release must take the NEW slot: {out:?}");
+        // 3 心选位（按来源标 Top）+ 2 昨日位 + 1 最新位 = 6 个入选
+        assert_eq!(out.len(), 6, "3+2+1 slots fully elected: {out:?}");
+        assert_eq!(tags_of(&out, "p0"), Some(SourceTag::Top));
+        assert_eq!(tags_of(&out, "p4"), Some(SourceTag::Top), "5th yesterday-active fills the last TOP slot");
+        assert!(tags_of(&out, "p5").is_none(), "6th yesterday-active must not steal the NEW slot");
     }
 
     /// ⑤ REC 兜底：范围盖不住的格由稳定分最高的邻接候选补齐；免费成员
