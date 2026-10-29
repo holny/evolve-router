@@ -464,9 +464,10 @@ public struct PanelView: View {
 
     // MARK: - 心选路径（2026-10-28 双路径）
 
-    /// 头行内嵌双路径开关（mockup B：紧凑两段，贴标题右侧零额外高度）
+    /// 头行内嵌双路径开关（mockup B：紧凑两段，贴标题右侧零额外高度）。
+    /// Text 锁 .fixedSize（评审：头行空间紧时被压缩成"一个圆、字母挤在一起"）
     private var modeToggle: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 2) {
             modeSeg(t("fav_gateway"), selected: state.routingMode != "favorites") {
                 state.setRoutingMode("gateway")
             }
@@ -474,19 +475,25 @@ public struct PanelView: View {
                 state.setRoutingMode("favorites")
             }
         }
+        .padding(2)
         .background(Capsule().fill(Color.primary.opacity(0.06)))
         .clipShape(Capsule())
         .opacity(state.external ? 0.5 : 1)
         .disabled(state.external)
+        // 开关自身不参与压缩：宁可状态文字缩放，不让两段标签挤成一团
+        .fixedSize()
+        .layoutPriority(2)
     }
 
     private func modeSeg(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Text(label)
             .font(.system(size: 9.5, weight: selected ? .semibold : .regular))
             .padding(.horizontal, 8)
-            .padding(.vertical, 2)
-            .background(selected ? Capsule().fill(Color.primary.opacity(0.10)) : nil)
+            .padding(.vertical, 3)
+            .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.primary.opacity(0.12) : Color.clear))
             .foregroundStyle(selected ? Color.primary : Color.secondary)
+            .lineLimit(1)
+            .fixedSize()
             .onTapGesture(perform: action)
     }
 
@@ -581,7 +588,9 @@ public struct PanelView: View {
                     }
                 }
             }
-            .frame(maxHeight: 210)
+            // 固定高（评审：maxHeight 会被下方 decisionsCard 的弹性扩张挤到
+            // 只剩一条缝，"看不到什么内容"）——卡片恒定占位，内容内滚
+            .frame(height: 170)
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -615,7 +624,7 @@ public struct PanelView: View {
                 .frame(maxWidth: 70, alignment: .leading)
             ForEach(favs, id: \.self) { model in
                 HStack(spacing: 3) {
-                    Text(model)
+                    Text(Self.shortModelName(model))
                         .font(.system(size: 9.5, design: .monospaced))
                             .lineLimit(1)
                     Button {
@@ -700,20 +709,21 @@ public struct PanelView: View {
                     .font(.system(size: 10))
                     .frame(width: 90)
             }
-            // 表头（比较列）
+            // 表头（比较列：7 天消耗 / 缓存命中 / 平均首字；档位胶囊由图例说明）
             HStack(spacing: 6) {
                 Text(t("models")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
-                Text(t("fav_yday")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
-                Text(t("fav_fail")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 30, alignment: .trailing)
+                Text(t("fav_7d")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
+                Text(t("fav_hit")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 30, alignment: .trailing)
                 Text(t("fav_ttft")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
-                Text(t("fav_price")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 40, alignment: .trailing)
             }
             let query = state.favoritePickerSearch.lowercased()
             let rows = state.favoritePickerRows
                 .filter { query.isEmpty || $0.model.lowercased().contains(query) }
-                .sorted { $0.ydayTokens == $1.ydayTokens ? $0.model < $1.model : $0.ydayTokens > $1.ydayTokens }
+                .sorted { $0.tokens7d == $1.tokens7d ? $0.model < $1.model : $0.tokens7d > $1.tokens7d }
             ScrollView(.vertical, showsIndicators: true) {
-                VStack(alignment: .leading, spacing: 2) {
+                // LazyVStack（评审：非 Lazy 的 655 行 Button 每次渲染全量重建，
+                // 主线程百 ms 级、轮询叠加即"返回卡 2s"的元凶）
+                LazyVStack(alignment: .leading, spacing: 2) {
                     ForEach(rows) { row in
                         Button {
                             if row.favorite {
@@ -730,8 +740,20 @@ public struct PanelView: View {
                     }
                 }
             }
-            .frame(height: 120)
+            .frame(height: 96)
+            // 标签图例（用户裁决：复用网关评估好的 能力×价位 档位，要有说明）
+            Text(t("fav_legend"))
+                .font(.system(size: 8.5))
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
         }
+    }
+
+    /// 目录 id 去掉 provider 前缀的显示名（用户裁决：选择器里 zhipu/glm-5.3
+    /// 只显示 glm-5.3，全 id 仅用于提交）
+    static func shortModelName(_ id: String) -> String {
+        id.split(separator: "/").last.map(String.init) ?? id
     }
 
     private func pickerRowView(_ row: FavoritePickRow) -> some View {
@@ -739,16 +761,22 @@ public struct PanelView: View {
             Image(systemName: row.favorite ? "star.fill" : "star")
                 .font(.system(size: 8))
                 .foregroundStyle(row.favorite ? Color(red: 0.52, green: 0.80, blue: 0.09) : .secondary)
-            Text(row.model)
+            Text(Self.shortModelName(row.model))
                 .font(.system(size: 10, design: .monospaced))
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(AppState.fmtTok(row.ydayTokens))
+            if !row.capability.isEmpty {
+                tagPill(row.capability, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: "")
+            }
+            if !row.priceTier.isEmpty {
+                tagPill(row.priceTier, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: "")
+            }
+            Text(AppState.fmtTok(row.tokens7d))
                 .font(.system(size: 9))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: 36, alignment: .trailing)
-            Text(row.failPct.map { "\($0)%" } ?? "-")
+            Text(row.cacheHitPct.map { "\($0)%" } ?? "-")
                 .font(.system(size: 9))
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
@@ -758,10 +786,6 @@ public struct PanelView: View {
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: 36, alignment: .trailing)
-            Text(row.priceTier)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
-                .frame(width: 40, alignment: .trailing)
         }
         .padding(.vertical, 1)
         .opacity(state.external ? 0.5 : 1)

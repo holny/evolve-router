@@ -900,31 +900,35 @@ pub async fn api_models_favorite_get(
     let ov = crate::state::effective_overrides(&st);
     let favorites = ov.favorites.get(provider).cloned().unwrap_or_default();
     let assigned = tags_for_catalog(&st, &snap);
-    // 昨日列（本地日历"昨天"）：token = in+out；失败率/首字延迟来自同一小时桶聚合
+    // 比较列（用户裁决 2026-10-29）：过去 7 天消耗 / 平均 TTFT / 缓存命中率 +
+    // 网关评估好的 能力×价位 档位（替代原 fail_pct/yesterday_tokens 两列）
     let now = evolve_memory::health::now();
-    let (ys, ye) = evolve_core::recency::local_yesterday_bounds_ms(now);
-    let yview = st.flywheel.hourly_window(ys, ye);
+    let wview = st.flywheel.hourly_window(now.saturating_sub(7 * 86_400_000), now);
     let mut models: Vec<Value> = snap
         .iter()
         .filter(|m| &m.provider == provider)
         .map(|m| {
-            let v = yview.get(&m.id);
-            let ytok = v
+            let v = wview.get(&m.id);
+            let tok7 = v
                 .map(|v| v["in_tok"].as_u64().unwrap_or(0) + v["out_tok"].as_u64().unwrap_or(0))
                 .unwrap_or(0);
-            let fail_pct = v.and_then(|v| {
-                let req = v["requests"].as_u64().unwrap_or(0);
-                let ok = v["success"].as_u64().unwrap_or(0);
-                (req > 0).then(||
-                    // f64 域取整（项目纪律：f32 有毛刺）
-                    ((req - ok) as f64 * 100.0 / req as f64).round() as i64)
+            // 缓存命中率 = cached / prompt（prompt 含缓存读；分母 0 → null）
+            let cache_hit = v.and_then(|v| {
+                let cin = v["cached_tok"].as_u64().unwrap_or(0);
+                let pin = v["in_tok"].as_u64().unwrap_or(0);
+                (pin > 0).then(|| (100.0 * cin as f64 / pin as f64).round() as i64)
             });
             let ttft = v.and_then(|v| v["avg_ttft_ms"].as_u64());
+            let (cap, price) = assigned
+                .get(&m.id)
+                .map(|(c, p)| (c.label(), p.label()))
+                .unwrap_or(("standard", "medium"));
             json!({
                 "model": m.id,
-                "price_tier": assigned.get(&m.id).map(|(_, p)| p.label()).unwrap_or("medium"),
-                "yesterday_tokens": ytok,
-                "fail_pct": fail_pct,
+                "capability": cap,
+                "price_tier": price,
+                "tokens_7d": tok7,
+                "cache_hit_pct": cache_hit,
                 "ttft_ms": ttft,
                 "favorite": favorites.contains(&m.id),
             })

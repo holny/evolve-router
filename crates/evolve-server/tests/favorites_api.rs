@@ -160,7 +160,14 @@ async fn post_favorite_appends() {
         "price_tier must come from tags: {}",
         mini["price_tier"]
     );
-    assert!(mini["yesterday_tokens"].is_number(), "placeholder field must exist (Task 4 wires real data)");
+    assert!(
+        ["basic", "standard", "powerful"].contains(&mini["capability"].as_str().unwrap_or("")),
+        "capability must come from tags: {}",
+        mini["capability"]
+    );
+    assert!(mini["tokens_7d"].is_number(), "7-day tokens column must exist (user ruling 2026-10-29): {}", mini);
+    assert!(mini["ttft_ms"].is_null() || mini["ttft_ms"].is_number());
+    assert!(mini["cache_hit_pct"].is_null() || mini["cache_hit_pct"].is_number());
 }
 
 #[tokio::test]

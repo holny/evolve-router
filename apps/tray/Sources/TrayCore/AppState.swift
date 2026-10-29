@@ -1010,9 +1010,10 @@ public final class AppState: ObservableObject {
                     guard let model = m["model"] as? String else { return nil }
                     return FavoritePickRow(
                         model: model,
-                        priceTier: (m["price_tier"] as? String) ?? "-",
-                        ydayTokens: (m["yesterday_tokens"] as? Int) ?? Int((m["yesterday_tokens"] as? Double) ?? 0),
-                        failPct: (m["fail_pct"] as? Int) ?? (m["fail_pct"] as? Double).map(Int.init),
+                        capability: (m["capability"] as? String) ?? "",
+                        priceTier: (m["price_tier"] as? String) ?? "",
+                        tokens7d: (m["tokens_7d"] as? Int) ?? Int((m["tokens_7d"] as? Double) ?? 0),
+                        cacheHitPct: (m["cache_hit_pct"] as? Int) ?? (m["cache_hit_pct"] as? Double).map(Int.init),
                         ttftMs: (m["ttft_ms"] as? Int) ?? (m["ttft_ms"] as? Double).map(Int.init),
                         favorite: (m["favorite"] as? Bool) ?? false)
                 }
@@ -1060,13 +1061,15 @@ public final class AppState: ObservableObject {
     }
 }
 
-/// 选择器行：provider 目录全量 + 比较列（昨日 token / 失败率 / 首字延迟 / 价位）
+/// 选择器行：provider 目录全量 + 比较列（7 天消耗 / 缓存命中率 / 平均 TTFT /
+/// 网关评估好的 能力×价位 档位——用户裁决 2026-10-29，替代原昨日/失败率列）
 public struct FavoritePickRow: Identifiable, Equatable {
     public var id: String { model }
     public let model: String
+    public let capability: String
     public let priceTier: String
-    public let ydayTokens: Int
-    public let failPct: Int?
+    public let tokens7d: Int
+    public let cacheHitPct: Int?
     public let ttftMs: Int?
     public let favorite: Bool
 }
