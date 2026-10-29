@@ -670,11 +670,13 @@ public struct PanelView: View {
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(provs, id: \.id) { p in
-                            providerRow(p)
-                            // 心选比较选择器：默认折叠，点行内联展开（外层滚动吸收，
-                            // 评审 UX round 3：Favorites 并入 Providers 卡）
-                            if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
-                                favPickerInline(p.key)
+                            // 单一 VStack 子视图（评审：行 + 条件选择器的 TupleView
+                            // 在 LazyVStack 里条件翻转时会 diff 出重复块）
+                            VStack(alignment: .leading, spacing: 2) {
+                                providerRow(p)
+                                if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
+                                    favPickerInline(p.key)
+                                }
                             }
                         }
                     }

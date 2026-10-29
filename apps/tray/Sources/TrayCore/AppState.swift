@@ -1064,10 +1064,60 @@ public final class AppState: ObservableObject {
         } else {
             showFavoriteNotice(t((body["remove"] as? Bool) == true ? "fav_removed" : "fav_set"))
         }
-        // 刷新全局清单 + 打开中的选择器
-        await pollData()
+        // 轻量刷新（评审：每次点星全量 pollData + 清空重拉选择器 = 卡顿 +
+        // 列表滚回顶部）——只刷 scope 计数与打开中的选择器行，不清空
+        await refreshRoutingState()
         if favoritePickerProvider == provider {
-            openFavoritePicker(provider: provider)
+            await refreshPickerRows(provider: provider)
+        }
+    }
+
+    /// 轻量刷新：/api/routing-mode（mode/favorites/scope 计数），不跑全量 pollData
+    public func refreshRoutingState() async {
+        if case (200, let data)? = try? await get("/api/routing-mode"),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let mode = (obj["mode"] as? String) ?? "gateway"
+            var favs: [String: [String]] = [:]
+            if let fObj = obj["favorites"] as? [String: Any] {
+                for (p, v) in fObj { favs[p] = (v as? [String]) ?? [] }
+            }
+            var counts: [String: ScopeCount] = [:]
+            if let sObj = obj["scope"] as? [String: Any] {
+                for (p, v) in sObj {
+                    guard let d = v as? [String: Any] else { continue }
+                    let n = { (k: String) -> Int in (d[k] as? Int) ?? Int((d[k] as? Double) ?? 0) }
+                    counts[p] = ScopeCount(fav: n("fav"), top: n("top"), new: n("new"),
+                                           rec: n("rec"), free: n("free"))
+                }
+            }
+            upd(\.routingMode, mode)
+            upd(\.favorites, favs)
+            upd(\.scopeCounts, counts)
+        }
+    }
+
+    /// 静默刷新选择器行（不清空 → 滚动位置与星级就地更新）
+    public func refreshPickerRows(provider: String) async {
+        let q = provider.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        ) ?? provider
+        if case (200, let data)? = try? await get("/api/models/favorite?provider=\(q)"),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let arr = obj["models"] as? [[String: Any]] {
+            let rows: [FavoritePickRow] = arr.compactMap { m in
+                guard let model = m["model"] as? String else { return nil }
+                return FavoritePickRow(
+                    model: model,
+                    capability: (m["capability"] as? String) ?? "",
+                    priceTier: (m["price_tier"] as? String) ?? "",
+                    tokens7d: (m["tokens_7d"] as? Int) ?? Int((m["tokens_7d"] as? Double) ?? 0),
+                    cacheHitPct: (m["cache_hit_pct"] as? Int) ?? (m["cache_hit_pct"] as? Double).map(Int.init),
+                    ttftMs: (m["ttft_ms"] as? Int) ?? (m["ttft_ms"] as? Double).map(Int.init),
+                    favorite: (m["favorite"] as? Bool) ?? false,
+                    scopeSource: m["scope_source"] as? String,
+                    isFree: (m["free"] as? Bool) ?? false)
+            }
+            upd(\.favoritePickerRows, rows)
         }
     }
 
