@@ -73,6 +73,10 @@ pub struct RoutingInput<'a> {
     /// 心选模式开关（2026-10-28 双路径）：true = favorites 路径，启用
     /// FAV 软加成与 NEW 新手保护（分数软偏好，不碰档位语义）
     pub curated: bool,
+    /// provider 级禁用（2026-10-29 心选面板开关）：被禁 provider 的模型从
+    /// **所有**路径硬排除——主池、大上下文突破、粘性复用、低置信留旧。
+    /// 语义 = "彻底不使用该 provider"（区别于 degraded 的只进兜底段）
+    pub excluded_providers: &'a std::collections::HashSet<String>,
     /// 心选模型集合（curated 模式下无显式档位者获 FAV_SOFT_BOOST）
     pub favorites: &'a std::collections::HashSet<String>,
     /// 逐模型累计完成 token（curated 模式下 NEW 新手保护的衰减输入）
@@ -339,8 +343,17 @@ impl Engine {
         };
 
         // 只有"工具流程延续"才允许粘性复用：新用户消息（末条是纯文本 user）走完整重判定。
-        // 注意 sticky 状态里的 difficulty 是**该会话上一轮判定的难度**，闸门据此收窄
-        if let Some(sticky) = input.sticky.as_ref().filter(|_| input.continues_tools) {
+        // 注意 sticky 状态里的 difficulty 是**该会话上一轮判定的难度**，闸门据此收窄。
+        // 粘性模型所在 provider 被禁用（2026-10-29）→ 视为无粘性，走完整重判定
+        let sticky_provider_dead = input.sticky.as_ref().is_some_and(|s| {
+            self.catalog_read_model(&s.chosen)
+                .is_some_and(|m| input.excluded_providers.contains(&m.provider))
+        });
+        if let Some(sticky) = input
+            .sticky
+            .as_ref()
+            .filter(|_| input.continues_tools && !sticky_provider_dead)
+        {
             let now = now_epoch_ms();
             // 预算压力保护：所选方案消耗超过软阈值时粘性立即断开，
             // 把宝贵配额留给硬任务（用户裁决）
@@ -597,6 +610,16 @@ impl Engine {
             }
             // provider 级降级（非配额故障）：不进主池。**不是永久封禁**——
             // 兜底段仍会试、探活成功立即放回（见 quota::provider_failure/_success）
+            // provider 级禁用（2026-10-29 心选面板开关）：彻底不使用——
+            // 先于 degraded（后者还允许进兜底段，禁用连兜底都不进），
+            // 大上下文突破（big_ctx）也不得复活被禁 provider
+            if input.excluded_providers.contains(&m.provider) {
+                filtered.push(FilteredOut {
+                    model: m.id.clone(),
+                    cause: format!("provider {} disabled (面板可重新开启)", m.provider),
+                });
+                continue;
+            }
             if input.degraded_providers.contains(&m.provider) {
                 filtered.push(FilteredOut {
                     model: m.id.clone(),
@@ -1688,6 +1711,7 @@ mod tests {
             curated: false,
             favorites: &EMPTY_FAVS,
             model_tokens_total: &EMPTY_TOKENS,
+            excluded_providers: &EMPTY_EXCLUDED_PROV,
             // 测试默认按"工具延续"构造（粘性用例）；专门验证新用户消息的用例
             // 用 input_with(...) 覆盖
             continues_tools: true,
@@ -1711,6 +1735,8 @@ mod tests {
     pub(crate) static EMPTY_DEGRADED: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(crate) static EMPTY_ACTIVE: std::sync::LazyLock<std::collections::HashSet<String>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
+    pub(super) static EMPTY_EXCLUDED_PROV: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);
     pub(super) static EMPTY_FAVS: std::sync::LazyLock<std::collections::HashSet<String>> =
         std::sync::LazyLock::new(std::collections::HashSet::new);
@@ -2755,5 +2781,98 @@ mod curated_tests {
         let dec = e.decide(inp);
         assert!(dec.sticky, "curated favorites must not break sticky sessions: {}", dec.reason);
         assert_eq!(dec.chosen, "mini");
+    }
+}
+
+/// provider 级禁用硬排除（2026-10-29 心选面板开关）——回归测试三连：
+/// 主池排除 / 大上下文突破不得复活 / 粘性复用断开
+#[cfg(test)]
+mod excluded_provider_tests {
+    use super::tests::{catalog3, det_policy, digest, input, EMPTY_EXCLUDED_PROV, EMPTY_FAVS, EMPTY_TOKENS};
+    use super::*;
+
+    fn engine() -> Engine {
+        Engine::new(catalog3(), det_policy(), Box::new(crate::heuristic::HeuristicJudge))
+    }
+
+    fn excluded(items: &[&str]) -> std::collections::HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn excluded_provider_filtered_from_main_pool() {
+        let e = engine();
+        let d = digest("你好");
+        let ex = excluded(&["mock"]);
+        let h = HealthMap::new();
+        let mut inp = input("你好", 500, &d, None, &h);
+        inp.excluded_providers = &ex;
+        let dec = e.decide(inp);
+        assert!(
+            !dec.scored.iter().any(|s| s.model_id.contains("mini")),
+            "excluded provider must not be scored: {:?}",
+            dec.scored.iter().map(|s| &s.model_id).collect::<Vec<_>>()
+        );
+        assert!(
+            dec.filtered.iter().any(|f| f.cause.contains("disabled")),
+            "filtered must explain the provider-off cause"
+        );
+    }
+
+    #[test]
+    fn big_ctx_breakout_respects_exclusion() {
+        let e = engine();
+        let text = "x".repeat(600_000); // ~150k tok：全目录只有 frontier 窗口装得下
+        let d = digest(&text[..100]);
+        let h = HealthMap::new();
+        // active 只放 mini → 常规路径 mini 全灭（窗口）→ big_ctx 突破会拉 frontier
+        let active: std::collections::HashSet<String> = ["mini".to_string()].into_iter().collect();
+        let mut inp = input(&text[..100], 150_000, &d, None, &h);
+        inp.active = &active;
+        let base = e.decide(inp);
+        assert_eq!(base.chosen, "frontier", "big-ctx breakout pulls frontier: {}", base.reason);
+        // 禁用 MiniMax 后：突破也不得复活被禁 provider（这里 frontier 属未被禁
+        // provider——用排除整个 mock provider 反证：排除后宁死不选被禁模型）
+        let ex = excluded(&["mock"]);
+        let mut inp2 = input(&text[..100], 150_000, &d, None, &h);
+        inp2.active = &active;
+        inp2.excluded_providers = &ex;
+        let dec2 = e.decide(inp2);
+        assert!(
+            !dec2.scored.iter().any(|s| s.model_id.contains("mini")),
+            "big-ctx breakout must not revive excluded providers: {:?}",
+            dec2.scored.iter().map(|s| &s.model_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn sticky_on_excluded_provider_breaks() {
+        fn sticky_on(id: &str) -> StickyState {
+            StickyState {
+                chosen: id.into(),
+                est_tokens_band: crate::tokens::tokens_band(600),
+                turns_left: 3,
+                tools_sig: 0,
+                domain: Domain::Chitchat,
+                difficulty: 0.5,
+                flags: JudgmentFlags::default(),
+                est_tokens: 600,
+            }
+        }
+        let e = engine();
+        let d = digest("你好");
+        let h = HealthMap::new();
+        // 基线：粘性复用生效
+        assert!(e.decide(input("你好", 620, &d, Some(sticky_on("mini")), &h)).sticky);
+        // mini 所在 provider 被禁用：粘性断开，重判定选别的模型
+        let ex = excluded(&["mock"]);
+        let mut inp = input("你好", 620, &d, Some(sticky_on("mini")), &h);
+        inp.curated = false;
+        inp.favorites = &EMPTY_FAVS;
+        inp.model_tokens_total = &EMPTY_TOKENS;
+        inp.excluded_providers = &ex;
+        let dec = e.decide(inp);
+        assert!(!dec.sticky, "sticky must break when the provider is disabled: {}", dec.reason);
+        assert_ne!(dec.chosen, "mini");
     }
 }

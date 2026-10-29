@@ -124,6 +124,15 @@ pub async fn chat_completions(
     // tokens_total 只在 curated 模式被引擎消费（评审 M5：gateway 模式每请求
     // 白 clone 全部 lifetime map + 遍历小时桶）——按模式门控
     let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
+    // provider 级禁用（评审：Off = 彻底不使用，两模式都生效）——引擎硬排除
+    // （主池/大上下文突破/粘性复用全路径；兜底 sweep 另有同语义跳过）
+    let excluded_provs: std::collections::HashSet<String> =
+        crate::state::effective_overrides(&st)
+            .providers
+            .iter()
+            .filter(|(_, p)| p.disabled)
+            .map(|(k, _)| k.clone())
+            .collect();
     let source_of = |id: &str| -> Option<String> {
         if curated_mode {
             scope_source.get(id).map(|t| t.as_str().to_string())
@@ -267,6 +276,7 @@ pub async fn chat_completions(
                 curated: curated_mode,
                 favorites: &fav_set,
                 model_tokens_total: &tokens_total,
+                excluded_providers: &excluded_provs,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);
@@ -1975,6 +1985,22 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
         return Ok(Target::Auto(None));
     }
     if let Some(m) = st.catalog_get(model_field) {
+        // provider 级禁用（2026-10-29 心选面板开关）：显式点名也拒绝——
+        // 用户语义"彻底不使用该 provider"；重新开启入口在 Providers 卡行上
+        let disabled = crate::state::effective_overrides(st)
+            .providers
+            .get(&m.provider)
+            .map(|p| p.disabled)
+            .unwrap_or(false);
+        if disabled {
+            return Err(json_error(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "provider '{}' is disabled — re-enable it in the Providers card (该 provider 已被禁用，面板 Providers 卡可重新开启)",
+                    m.provider
+                ),
+            ));
+        }
         let dec = Decision {
             id: format!("direct-{}", evolve_memory::now_millis().unwrap_or(0)),
             chosen: m.id.clone(),

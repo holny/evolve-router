@@ -63,6 +63,14 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     };
     // tokens_total 只在 curated 模式被引擎消费（评审 M5）——按模式门控
     let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
+    // provider 级禁用（评审：Off = 彻底不使用，两模式都生效）——与 relay.rs 同源
+    let excluded_provs: std::collections::HashSet<String> =
+        crate::state::effective_overrides(&st)
+            .providers
+            .iter()
+            .filter(|(_, p)| p.disabled)
+            .map(|(k, _)| k.clone())
+            .collect();
 
     let decision_started = std::time::Instant::now();
     let mut decision = match &target {
@@ -109,6 +117,7 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
                 curated: curated_mode,
                 favorites: &fav_set,
                 model_tokens_total: &tokens_total,
+                excluded_providers: &excluded_provs,
             };
             let d = st.engine.decide(input);
             crate::state::note_judge(&st, d.judgment.judge_source);

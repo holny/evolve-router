@@ -370,3 +370,17 @@ async fn model_tags_active_follows_favorites_scope() {
     // standard 输掉同分 tie-break，且没有格需要它 → 不在范围
     assert_eq!(find("standard")["active"], false, "loser of the tie with no cell to fill must stay out: {}", find("standard"));
 }
+
+/// 评审：显式点名被禁 provider 的模型 → 403 拒绝（"彻底不使用"含点名路径，
+/// 错误信息指明重开入口）
+#[tokio::test]
+async fn explicit_request_to_disabled_provider_rejected() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    // 禁用 provider（心选面板开关写的同一端点）
+    let (s, _) = send(app.clone(), req("POST", "/api/providers", json!({"key": PROVIDER, "disabled": true}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (status, body) = send(app, req("POST", "/v1/chat/completions", json!({"model": "mini", "messages": [{"role": "user", "content": "hi"}]}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "explicit request to a disabled provider must be rejected: {}", body);
+    assert!(body["error"]["message"].as_str().unwrap_or("").contains("disabled"), "error must name the disable: {}", body);
+}
