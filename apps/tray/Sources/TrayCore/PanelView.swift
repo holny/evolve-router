@@ -571,8 +571,16 @@ public struct PanelView: View {
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity, alignment: .leading)
             let query = state.favoritePickerSearch.lowercased()
+            // 归一化匹配（用户实测：glm-5.3-flash 搜不到——火山引擎 id 是
+            // 短横线+日期风格 glm-5-3-flash-260828）：./_/- 视为等价
+            let norm = { (s: String) -> String in
+                s.lowercased()
+                    .replacingOccurrences(of: ".", with: "-")
+                    .replacingOccurrences(of: "_", with: "-")
+            }
+            let q = norm(query)
             let rows = state.favoritePickerRows
-                .filter { query.isEmpty || $0.model.lowercased().contains(query) }
+                .filter { q.isEmpty || norm($0.model).contains(q) }
                 .sorted { $0.model < $1.model }
             // 行直接铺进外层 LazyVStack（评审：无嵌套滚动、无独立卡片）
             ForEach(rows) { row in
