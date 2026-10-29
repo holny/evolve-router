@@ -110,14 +110,18 @@ pub async fn chat_completions(
     // 心选路径输入（2026-10-28 双路径）：模式、心选集合、累计 token、来源映射。
     // 缓存命中记录也要带 source → 在缓存检查前算好（favorite_scope_selection 有
     // 30s 缓存；tokens_total 是小时桶求和，量级小）
-    let curated_mode = crate::meta::routing_mode(&st) == crate::state::RoutingModeCfg::Favorites;
+    // 单次 overrides 读取（评审 2026-10-30 性能：此前 routing_mode/fav_set/
+    // excluded 各自 effective_overrides = 3 次同步磁盘读，加上 favorite_scope_selection
+    // 内部 1 次，共 4 次/请求）——一次读全派生出模式/心选/禁用集合
+    let ov = crate::state::effective_overrides(&st);
+    let curated_mode = ov.routing_mode == crate::state::RoutingModeCfg::Favorites;
     let scope_source: std::collections::HashMap<String, evolve_core::scope::SourceTag> = if curated_mode {
         crate::meta::favorite_scope_selection(&st).1
     } else {
         Default::default()
     };
     let fav_set: std::collections::HashSet<String> = if curated_mode {
-        crate::state::effective_overrides(&st).favorites.values().flatten().cloned().collect()
+        ov.favorites.values().flatten().cloned().collect()
     } else {
         Default::default()
     };
@@ -126,13 +130,12 @@ pub async fn chat_completions(
     let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
     // provider 级禁用（评审：Off = 彻底不使用，两模式都生效）——引擎硬排除
     // （主池/大上下文突破/粘性复用全路径；兜底 sweep 另有同语义跳过）
-    let excluded_provs: std::collections::HashSet<String> =
-        crate::state::effective_overrides(&st)
-            .providers
-            .iter()
-            .filter(|(_, p)| p.disabled)
-            .map(|(k, _)| k.clone())
-            .collect();
+    let excluded_provs: std::collections::HashSet<String> = ov
+        .providers
+        .iter()
+        .filter(|(_, p)| p.disabled)
+        .map(|(k, _)| k.clone())
+        .collect();
     let source_of = |id: &str| -> Option<String> {
         if curated_mode {
             scope_source.get(id).map(|t| t.as_str().to_string())
@@ -155,6 +158,7 @@ pub async fn chat_completions(
     };
     if let Some(key) = &cache_key
         && let Some((model_id, content_type, bytes)) = st.ccache.lock().ok().and_then(|mut c| c.get(*key))
+        && !cached_model_disabled(&excluded_provs, &st, &model_id)
     {
         tracing::info!(model = %model_id, "completion cache hit");
         st.events.record(json!({
@@ -1971,6 +1975,18 @@ pub(crate) fn auto_request(model_field: &str) -> bool {
         .join(" ")
         .to_ascii_lowercase();
     matches!(norm.as_str(), "auto" | "auto (smart routing)" | "auto (smart)" | "smart routing")
+}
+
+/// A3 缓存命中的禁用校验（评审 2026-10-30）：缓存键是内容指纹，不含 model/
+/// provider——被禁 provider 的模型在禁用前产出的缓存响应不得继续命中
+fn cached_model_disabled(
+    excluded: &std::collections::HashSet<String>,
+    st: &AppState,
+    model_id: &str,
+) -> bool {
+    st.catalog_get(model_id)
+        .map(|m| excluded.contains(&m.provider))
+        .unwrap_or(false)
 }
 
 #[allow(clippy::result_large_err)]

@@ -10,7 +10,7 @@ public enum Config {
     /// 面板不应因此进入只读（2026-10-29：托盘重启时网关存活曾被判 external，
     /// 整个面板变只读，用户开关全部失灵）。远程网关维持只读语义。
     public static let isLocalGateway: Bool = {
-        guard let host = URL(string: baseURL)?.host else { return true }
+        guard let host = URL(string: baseURL)?.host else { return false }
         return ["127.0.0.1", "localhost", "::1"].contains(host)
     }()
     public static let githubURL = URL(string: "https://github.com/holny/evolve-router")!

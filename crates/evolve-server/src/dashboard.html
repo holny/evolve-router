@@ -692,6 +692,7 @@ const T = {
   ur_no_key:{zh:'无凭据', en:'no key', ko:'키 없음', ja:'キーなし', es:'sin clave', fr:'sans clé'},  ur_deleted:{zh:'已删除', en:'deleted', ko:'삭제됨', ja:'削除済み', es:'eliminado', fr:'supprimé'},
   ur_gated:{zh:'配额闸门', en:'quota gated', ko:'쿼터 차단', ja:'クォータ遮断', es:'cuota bloqueada', fr:'quota bloqué'},
   ur_cooling:{zh:'冷却中', en:'cooling', ko:'쿨링', ja:'クーリング', es:'enfriando', fr:'en refroidissement'},
+  ur_provider_off:{zh:'provider 已禁用（面板可重新开启）', en:'provider disabled (re-enable in Providers card)', ko:'provider 비활성', ja:'プロバイダー無効', es:'proveedor desactivado', fr:'fournisseur désactivé'},
   act_basis:{zh:'路由组合（可路由）：{a} / {n} · 名额 = max(50, 健康 provider × 8)，单 provider ≤25%；每家内先补齐 能力×价位 9 格，免费模型必选且不占名额', en:'routing portfolio (routable): {a} / {n} · cap = max(50, healthy providers × 8), each provider ≤25%; per provider it fills the capability×price cells first; free models are always in and do not consume slots', ko:'라우팅 포트폴리오: {a}/{n}', ja:'ルーティング・ポートフォリオ：{a}/{n}', es:'portafolio de enrutado: {a}/{n}', fr:'portefeuille de routage : {a}/{n}'},
   act_on:{zh:'范围内', en:'in scope', ko:'범위 내', ja:'スコープ内', es:'en alcance', fr:'dans le périmètre'},
   // 心选路径（2026-10-28 双路径）
@@ -2244,22 +2245,31 @@ function renderFavorites(){
       html += '<div style="margin:4px 0 0 14px;max-height:220px;overflow:auto">'
         + '<div style="display:flex;gap:10px;font-size:10px;color:var(--dim);margin:2px 0">'
         + '<input class="mock-input" data-fav-search="'+esc(p)+'" placeholder="'+esc(t('fav_search'))+'" value="'+esc(state.favSearch && state.favSearch[p] || '')+'" style="flex:1;max-width:180px;font-size:10px;padding:1px 6px">'
-        + '<span style="width:56px;text-align:right">'+esc(t('fav_yday'))+'</span>'
-        + '<span style="width:44px;text-align:right">'+esc(t('fav_fail'))+'</span>'
+        + '<span style="width:56px;text-align:right">'+esc(t('fav_7d'))+'</span>'
+        + '<span style="width:44px;text-align:right">'+esc(t('fav_hit'))+'</span>'
         + '<span style="width:52px;text-align:right">'+esc(t('fav_ttft'))+'</span>'
-        + '<span style="width:56px;text-align:right">'+esc(t('fav_price'))+'</span></div>'
+        + '<span style="width:56px;text-align:right"></span></div>'
         + visible.map(r => '<div style="display:flex;gap:10px;font-size:11px;padding:1px 0;align-items:center">'
           + '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'
           + '<button class="lang-btn" data-fav-pick="'+esc(p)+'|'+esc(r.model)+'" style="font-size:9px;padding:0 3px" title="'+esc(t('fav_add'))+'">'
           + (r.favorite ? '★' : '☆') + '</button> '+esc(r.model)+'</span>'
-          + '<span style="width:56px;text-align:right">'+fmtK(r.yesterday_tokens)+'</span>'
-          + '<span style="width:44px;text-align:right">'+(r.fail_pct == null ? '-' : r.fail_pct+'%')+'</span>'
+          + '<span style="width:56px;text-align:right">'+fmtK(r.tokens_7d)+'</span>'
+          + '<span style="width:44px;text-align:right">'+(r.cache_hit_pct == null ? '-' : r.cache_hit_pct+'%')+'</span>'
           + '<span style="width:52px;text-align:right">'+(r.ttft_ms == null ? '-' : r.ttft_ms+'ms')+'</span>'
-          + '<span style="width:56px;text-align:right;color:var(--dim)">'+esc(r.price_tier)+'</span></div>').join('')
+          + '<span class="pbadge" style="color:var(--blue);border-color:var(--blue)">'+esc(r.capability)+'</span>'
+          + '<span class="pbadge" style="color:var(--mint);border-color:var(--mint)">'+esc(r.price_tier)+'</span></div>').join('')
         + '</div>';
     }
   }
+  // 滚动位置保护（评审 2026-10-30）：展开的选择器列表 3s 重建会被重置
+  // scrollTop——先记后还原
+  const listEl = list.querySelector('div[style*="max-height:220px"]');
+  const savedTop = listEl ? listEl.scrollTop : 0;
   list.innerHTML = html;
+  if (listEl) {
+    const newEl = list.querySelector('div[style*="max-height:220px"]');
+    if (newEl) newEl.scrollTop = savedTop;
+  }
   list.querySelectorAll('button[data-fav-remove]').forEach(b => b.addEventListener('click', async () => {
     const i = b.dataset.favRemove.indexOf('|');
     const p = b.dataset.favRemove.slice(0, i), m = b.dataset.favRemove.slice(i + 1);
@@ -2275,7 +2285,9 @@ function renderFavorites(){
     const s = b.dataset.favPick, i = s.indexOf('|');
     const p = s.slice(0, i), m = s.slice(i + 1);
     const cur = state.favorites[p] || [];
-    const body = cur.length >= 3 && !cur.includes(m) ? {provider:p, model:m, replace:cur[0]} : {provider:p, model:m};
+    const body = cur.includes(m)
+      ? {provider:p, model:m, remove:true}
+      : (cur.length >= 3 ? {provider:p, model:m, replace:cur[0]} : {provider:p, model:m});
     try { await fetch('/api/models/favorite', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)}); } catch(_){}
     await loadRoutingMode(); await loadFavRows(p); renderFavorites();
   }));
@@ -2363,7 +2375,7 @@ function renderTags(){
       + opts.vals.map(v => '<option value="'+v+'"'+(v===cur?' selected':'')+'>'+esc(label(opts.kind, v))+'</option>').join('')
       + '</select>';
     const ur = m.unusable_reason;
-    const urTxt = ur ? t('ur_' + (ur === 'no-key' ? 'no_key' : ur === 'quota-gated' ? 'gated' : ur === 'cooldown' ? 'cooling' : 'deleted')) : '';
+    const urTxt = ur ? t('ur_' + (ur === 'no-key' ? 'no_key' : ur === 'quota-gated' ? 'gated' : ur === 'cooldown' ? 'cooling' : ur === 'provider-off' ? 'provider_off' : 'deleted')) : '';
     const dim = !!ur;
     return '<div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-size:11px'+(dim?';opacity:.45':'')+'"'
       + (dim ? ' title="' + esc(urTxt) + '"' : '') + '>'

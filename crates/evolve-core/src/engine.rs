@@ -740,11 +740,17 @@ impl Engine {
                 .iter()
                 .filter(|m| m.context_window.is_some())
                 .filter(|m| prio_of(&m.id) > -3)
+                // provider 级禁用（评审 2026-10-30）：绝境兜底也不得复活被禁
+                // provider——与模型级 Off 同等级的红线
+                .filter(|m| !input.excluded_providers.contains(&m.provider))
                 .filter(|m| {
                     model_available(input.health, &m.id, now_be)
                 })
                 .max_by_key(|m| m.context_window.unwrap())
-                .or_else(|| cat.iter().find(|m| prio_of(&m.id) > -3));
+                .or_else(|| {
+                    cat.iter()
+                        .find(|m| prio_of(&m.id) > -3 && !input.excluded_providers.contains(&m.provider))
+                });
             let Some(best) = best else {
                 // 目录为空 ≠ 全部 Off：给链路视图一句可行动的真话
                 let all_off = !cat.is_empty()
@@ -1663,7 +1669,7 @@ mod tests {
     static EMPTY_TELEM: std::sync::LazyLock<TelemetrySnapshot> = std::sync::LazyLock::new(TelemetrySnapshot::new);
     static EMPTY_QUOTA: std::sync::LazyLock<QuotaView> = std::sync::LazyLock::new(QuotaView::new);
 
-    fn model(id: &str, window: u64, in_price: f32, out_price: f32, coding: f32, speed: f32) -> ModelRecord {
+    pub(super) fn model(id: &str, window: u64, in_price: f32, out_price: f32, coding: f32, speed: f32) -> ModelRecord {
         ModelRecord {
             id: id.into(),
             provider: "mock".into(),
@@ -2819,30 +2825,37 @@ mod excluded_provider_tests {
         );
     }
 
+    fn two_provider_engine() -> Engine {
+        // mock: mini 32k / frontier 200k；other: alt 300k（更小 bench → 无排除时
+        // frontier 胜出；排除 mock 后 best-effort 只能选 alt）
+        let cat = Catalog::from_records(vec![
+            tests::model("mini", 32_000, 0.1, 0.4, 0.45, 0.95),
+            tests::model("frontier", 200_000, 3.0, 15.0, 0.95, 0.4),
+            {
+                let mut m = tests::model("alt", 64_000, 1.0, 4.0, 0.5, 0.6);
+                m.provider = "other".to_string();
+                m
+            },
+        ]);
+        Engine::new(cat, det_policy(), Box::new(crate::heuristic::HeuristicJudge))
+    }
+
+    /// big-ctx 突破与绝境兜底都不得复活被禁 provider：
+    /// est=400k 使所有窗口候选全灭 → best-effort 取最大窗口——
+    /// 无排除取 frontier(mock)，排除 mock 后取 alt(other)
     #[test]
-    fn big_ctx_breakout_respects_exclusion() {
-        let e = engine();
-        let text = "x".repeat(600_000); // ~150k tok：全目录只有 frontier 窗口装得下
+    fn big_ctx_breakout_and_best_effort_respect_exclusion() {
+        let e = two_provider_engine();
+        let text = "x".repeat(400_000); // est 400k > 全部窗口 → 绝境兜底
         let d = digest(&text[..100]);
         let h = HealthMap::new();
-        // active 只放 mini → 常规路径 mini 全灭（窗口）→ big_ctx 突破会拉 frontier
-        let active: std::collections::HashSet<String> = ["mini".to_string()].into_iter().collect();
-        let mut inp = input(&text[..100], 150_000, &d, None, &h);
-        inp.active = &active;
-        let base = e.decide(inp);
-        assert_eq!(base.chosen, "frontier", "big-ctx breakout pulls frontier: {}", base.reason);
-        // 禁用 MiniMax 后：突破也不得复活被禁 provider（这里 frontier 属未被禁
-        // provider——用排除整个 mock provider 反证：排除后宁死不选被禁模型）
+        let base = e.decide(input(&text[..100], 400_000, &d, None, &h));
+        assert_eq!(base.chosen, "frontier", "no exclusion → largest window (mock): {}", base.reason);
         let ex = excluded(&["mock"]);
-        let mut inp2 = input(&text[..100], 150_000, &d, None, &h);
-        inp2.active = &active;
-        inp2.excluded_providers = &ex;
-        let dec2 = e.decide(inp2);
-        assert!(
-            !dec2.scored.iter().any(|s| s.model_id.contains("mini")),
-            "big-ctx breakout must not revive excluded providers: {:?}",
-            dec2.scored.iter().map(|s| &s.model_id).collect::<Vec<_>>()
-        );
+        let mut inp = input(&text[..100], 400_000, &d, None, &h);
+        inp.excluded_providers = &ex;
+        let dec = e.decide(inp);
+        assert_eq!(dec.chosen, "alt", "best-effort must not revive a disabled provider: {}", dec.reason);
     }
 
     #[test]

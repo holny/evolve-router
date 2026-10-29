@@ -643,6 +643,16 @@ public struct PanelView: View {
 
     private var providersCard: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // 心选/开关操作反馈（评审 2026-10-30：此前 favoriteNotice 发布但从不渲染，
+            // 写失败静默回滚；这里给可见反馈）
+            if let notice = state.favoriteNotice {
+                Text(notice)
+                    .font(.system(size: 8.5))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             HStack(spacing: 6) {
                 // 标题随维度切换（Providers / Models），tab 也用复数
                 sectionLabel("server.rack", state.modelDim ? t("models") : t("providers"))
@@ -673,7 +683,7 @@ public struct PanelView: View {
                         prioNotice
                     }
                 }
-            } else if state.favoritePickerProvider != nil {
+            } else if state.routingMode == "favorites" && state.favoritePickerProvider != nil {
                 // 心选比较选择器：钻取页——整卡只渲染选择器（独立内滚），
                 // 不把上百行模型混进 provider 懒加载列表（LazyVStack 滚动中
                 // 数据更新会 diff 出重复块，实测 volcengine 复制 2-3 份）
@@ -876,47 +886,6 @@ public struct PanelView: View {
         .help(writable ? t("fav_toggle_help") : t("external"))
     }
 
-    /// 心选 subline：fav x/3（未选橙色提示）· top n · new n · rec n · free n · 展开箭头
-    @ViewBuilder
-    private func favSubline(_ p: ProviderRow) -> some View {
-        let c = state.scopeCounts[p.key]
-        let favs = state.favorites[p.key] ?? []
-        let expanded = state.favoritePickerProvider == p.key
-        HStack(spacing: 5) {
-            // 未选提示（用户裁决：未选择时要提示）或 fav 计数
-            if favs.isEmpty && p.enabled {
-                Text(t("fav_unpicked"))
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(.orange)
-            } else {
-                Text("fav \(favs.count)/3")
-                    .font(.system(size: 8.5))
-                    .monospacedDigit()
-                    .foregroundStyle(Color(red: 0.52, green: 0.80, blue: 0.09))
-            }
-            if let c {
-                Text("· top \(c.top) · new \(c.new) · rec \(c.rec) · free \(c.free)")
-                    .font(.system(size: 8.5))
-                    .monospacedDigit()
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            Spacer(minLength: 4)
-            // 展开箭头 = 打开该 provider 的比较选择器（默认折叠）
-            Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                .font(.system(size: 7.5, weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .contentShape(Rectangle())
-        .onTapGesture {
-            if expanded {
-                state.closeFavoritePicker()
-            } else if !state.external && p.enabled {
-                state.openFavoritePicker(provider: p.key)
-            }
-        }
-    }
 
     /// 三选一状态：配额进度 / 余额 / 窗口用完警告（互斥）。
     /// 昨天/历史视图里这些都是**当前态**，对历史无意义（既有裁决）→ 不显示。
@@ -1036,10 +1005,10 @@ public struct PanelView: View {
                         Text("free \(c.free)").font(.system(size: 8.5)).monospacedDigit().foregroundStyle(.tertiary)
                     }
                 }
+                favStatusTail(p)
             } else {
                 favLabelsLegacy(p)
             }
-            favStatusTail(p)
             // 展开箭头（心选模式）：整行点按 = 折叠/展开选择器
             if state.routingMode == "favorites" && p.modelCount > 0 {
                 Spacer(minLength: 4)

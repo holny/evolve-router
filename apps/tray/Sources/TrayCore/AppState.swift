@@ -402,8 +402,6 @@ public final class AppState: ObservableObject {
         upd(\.routingMode, pending.routingMode)
         upd(\.favorites, pending.favorites)
         upd(\.scopeCounts, pending.scopeCounts)
-        upd(\.routingMode, pending.routingMode)
-        upd(\.favorites, pending.favorites)
         upd(\.modelRows, pending.modelRows)
         upd(\.requests, pending.requests)
         upd(\.successRate, pending.successRate)
@@ -978,6 +976,9 @@ public final class AppState: ObservableObject {
     public func setRoutingMode(_ mode: String) {
         guard mode == "gateway" || mode == "favorites" else { return }
         guard !external else { return }
+        if mode == "gateway" {
+            closeFavoritePicker()
+        }
         upd(\.routingMode, mode)
         Task {
             guard let url = URL(string: Config.baseURL + "/api/routing-mode"),
@@ -1121,6 +1122,8 @@ public final class AppState: ObservableObject {
                     scopeSource: m["scope_source"] as? String,
                     isFree: (m["free"] as? Bool) ?? false)
             }
+            // 落点校验（评审 2026-10-30）：选择器已切到别家/关闭时丢弃慢回包
+            guard favoritePickerProvider == provider else { return }
             upd(\.favoritePickerRows, rows)
         }
     }
@@ -1129,6 +1132,7 @@ public final class AppState: ObservableObject {
     /// 网关级语义（两路径共用），复用 /api/providers/set 的 disabled 标志：
     /// model_usability 打 provider-off、范围/组合/兜底 sweep 全路径排除
     public func setProviderDisabled(provider: String, disabled: Bool) {
+        guard !external else { return }
         Task {
             let (status, data) = (try? await post("/api/providers", body: ["key": provider, "disabled": disabled])) ?? (0, Data())
             if status != 200 {
@@ -1142,11 +1146,17 @@ public final class AppState: ObservableObject {
         }
     }
 
+    private var favoriteNoticeTask: Task<Void, Never>?
+
     private func showFavoriteNotice(_ msg: String) {
         upd(\.favoriteNotice, msg)
-        Task {
+        // 代际令牌（评审 2026-10-30）：新提示取消旧定时器，避免后发提示被前一条
+        // 的 5s 清除提前抹掉
+        favoriteNoticeTask?.cancel()
+        favoriteNoticeTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 5_000_000_000)
-            upd(\.favoriteNotice, nil)
+            guard !Task.isCancelled else { return }
+            self?.upd(\.favoriteNotice, nil)
         }
     }
 }

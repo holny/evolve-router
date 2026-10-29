@@ -50,27 +50,29 @@ pub async fn messages(State(st): State<AppState>, headers: HeaderMap, body: Byte
     let tool_heavy = features.tool_ratio;
 
     // 心选路径输入（2026-10-28 双路径）——与 relay.rs 同源同语义
-    let curated_mode = crate::meta::routing_mode(&st) == crate::state::RoutingModeCfg::Favorites;
+    // 单次 overrides 读取（评审 2026-10-30 性能：与 relay.rs 同款收紧——
+    // 一次读派生出模式/心选/禁用集合，消除每请求 3-4 次同步磁盘读）
+    let ov = crate::state::effective_overrides(&st);
+    let curated_mode = ov.routing_mode == crate::state::RoutingModeCfg::Favorites;
     let scope_source: std::collections::HashMap<String, evolve_core::scope::SourceTag> = if curated_mode {
         crate::meta::favorite_scope_selection(&st).1
     } else {
         Default::default()
     };
     let fav_set: std::collections::HashSet<String> = if curated_mode {
-        crate::state::effective_overrides(&st).favorites.values().flatten().cloned().collect()
+        ov.favorites.values().flatten().cloned().collect()
     } else {
         Default::default()
     };
     // tokens_total 只在 curated 模式被引擎消费（评审 M5）——按模式门控
     let tokens_total = if curated_mode { st.flywheel.tokens_total() } else { Default::default() };
     // provider 级禁用（评审：Off = 彻底不使用，两模式都生效）——与 relay.rs 同源
-    let excluded_provs: std::collections::HashSet<String> =
-        crate::state::effective_overrides(&st)
-            .providers
-            .iter()
-            .filter(|(_, p)| p.disabled)
-            .map(|(k, _)| k.clone())
-            .collect();
+    let excluded_provs: std::collections::HashSet<String> = ov
+        .providers
+        .iter()
+        .filter(|(_, p)| p.disabled)
+        .map(|(k, _)| k.clone())
+        .collect();
 
     let decision_started = std::time::Instant::now();
     let mut decision = match &target {
@@ -678,6 +680,22 @@ fn resolve_target(st: &AppState, model_field: &str) -> Result<Target, Response> 
         return Ok(Target::Auto(None));
     }
     if let Some(m) = st.catalog_get(model_field) {
+        // provider 级禁用（评审 2026-10-30）：/v1/messages 显式点名同样 403——
+        // 与 OpenAI 入口同语义（"彻底不使用该 provider"）
+        let disabled = crate::state::effective_overrides(st)
+            .providers
+            .get(&m.provider)
+            .map(|p| p.disabled)
+            .unwrap_or(false);
+        if disabled {
+            return Err(mr_error(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "provider '{}' is disabled — re-enable it in the Providers card (该 provider 已被禁用，面板 Providers 卡可重新开启)",
+                    m.provider
+                ),
+            ));
+        }
         let dec = Decision {
             id: format!("direct-{}", evolve_memory::now_millis().unwrap_or(0)),
             chosen: m.id.clone(),
