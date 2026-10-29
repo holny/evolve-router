@@ -848,18 +848,6 @@ public struct PanelView: View {
             if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
                 favPickerInline(p.key)
             }
-            // 展开热区：第三行整体点按 = 折叠/展开切换（有模型才可挑）
-            if state.routingMode == "favorites" && p.modelCount > 0 {
-                Rectangle().fill(.clear).frame(height: 10)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if state.favoritePickerProvider == p.key {
-                            state.closeFavoritePicker()
-                        } else if !state.external && p.enabled {
-                            state.openFavoritePicker(provider: p.key)
-                        }
-                    }
-            }
         }
     }
 
@@ -1045,6 +1033,26 @@ public struct PanelView: View {
                 favLabelsLegacy(p)
             }
             favStatusTail(p)
+            // 展开箭头（心选模式）：整行点按 = 折叠/展开选择器
+            if state.routingMode == "favorites" && p.modelCount > 0 {
+                Spacer(minLength: 4)
+                Image(systemName: state.favoritePickerProvider == p.key ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        // 心选模式：整行点按 = 折叠/展开选择器（行尾箭头为可视入口；
+        // On/Off 胶囊在第二行不受影响；Autopilot 模式/无模型/外部实例为无操作）
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard state.routingMode == "favorites",
+                  p.modelCount > 0,
+                  !state.external else { return }
+            if state.favoritePickerProvider == p.key {
+                state.closeFavoritePicker()
+            } else if p.enabled {
+                state.openFavoritePicker(provider: p.key)
+            }
         }
     }
 
