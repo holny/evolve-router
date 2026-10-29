@@ -4,6 +4,15 @@ public enum Config {
     public static let baseURL = ProcessInfo.processInfo.environment["EVO_ROUTER_URL"]
         ?? ProcessInfo.processInfo.environment["EVOLVE_URL"]   // 旧名兜底
         ?? "http://127.0.0.1:8787"
+
+    /// 面板指向的网关是否在本机（127.0.0.1 / localhost / ::1）。
+    /// 本机网关 = 无论由哪个托盘实例拉起，写入都落在同一份 overrides.json——
+    /// 面板不应因此进入只读（2026-10-29：托盘重启时网关存活曾被判 external，
+    /// 整个面板变只读，用户开关全部失灵）。远程网关维持只读语义。
+    public static let isLocalGateway: Bool = {
+        guard let host = URL(string: baseURL)?.host else { return true }
+        return ["127.0.0.1", "localhost", "::1"].contains(host)
+    }()
     public static let githubURL = URL(string: "https://github.com/holny/evolve-router")!
     public static let trayLabel = "ai.evolve-router.tray"
 

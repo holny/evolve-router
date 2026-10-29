@@ -502,7 +502,11 @@ public final class AppState: ObservableObject {
         }
         let net = await gw.networkHealthy()
         healthyNow = net
-        externalNow = !gw.owned && net
+        // external = 非本面板拉起 且 指向**远程**网关（2026-10-29 语义收紧）：
+        // 本机网关即使由上一任托盘拉起，写入也落同一份 overrides.json，
+        // 面板保持可操作——否则托盘重启就全体控件只读（实测多轮踩坑）。
+        // 远程网关维持只读；网关不在时仍会自愈拉起（ensureRunning）
+        externalNow = !gw.owned && net && !Config.isLocalGateway
         icon?.upd(\.healthy, net)
         icon?.upd(\.starting, gw.starting || (!net && gw.isChildAlive))
         put(\.healthy, \.healthy, net)
