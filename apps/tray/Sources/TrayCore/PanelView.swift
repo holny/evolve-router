@@ -665,19 +665,20 @@ public struct PanelView: View {
                         prioNotice
                     }
                 }
+            } else if state.favoritePickerProvider != nil {
+                // 心选比较选择器：钻取页——整卡只渲染选择器（独立内滚），
+                // 不把上百行模型混进 provider 懒加载列表（LazyVStack 滚动中
+                // 数据更新会 diff 出重复块，实测 volcengine 复制 2-3 份）
+                ScrollView(.vertical, showsIndicators: true) {
+                    favPickerInline(state.favoritePickerProvider!)
+                }
+                .frame(height: providersScrollH)
             } else {
                 let provs = state.providers
                 ScrollView(.vertical, showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(provs, id: \.id) { p in
-                            // 单一 VStack 子视图（评审：行 + 条件选择器的 TupleView
-                            // 在 LazyVStack 里条件翻转时会 diff 出重复块）
-                            VStack(alignment: .leading, spacing: 2) {
-                                providerRow(p)
-                                if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
-                                    favPickerInline(p.key)
-                                }
-                            }
+                            providerRow(p)
                         }
                     }
                 }
@@ -845,10 +846,6 @@ public struct PanelView: View {
                 }
                 // 占满可用宽度：让第①行的 Spacer 把状态推到右边缘
                 .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            // ④ 展开的选择器：点第三行任意处内联铺开（默认折叠）
-            if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
-                favPickerInline(p.key)
             }
         }
     }
