@@ -267,6 +267,10 @@ fn build_state_inner(config: FileConfig, config_src: Option<std::path::PathBuf>)
     let (bus, _) = broadcast::channel(256);
     let http = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
+        // 读超时（2026-10-29 僵死事故）：上游连接建立后若 60s 无任何字节，
+        // 视为停滞强制断开——没有它，一条挂死的上游连接会让 chat 请求永久
+        // 挂起（无响应、无事件），挂死任务累积后拖垮整个运行时
+        .read_timeout(std::time::Duration::from_secs(60))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()
         .expect("http client");
@@ -992,6 +996,30 @@ impl Inner {
         // （远端模型更新后网关及时跟进）。
         // AppState = Arc<Inner>，直接 clone 保持引用（网关生命周期内常驻）
         let state: AppState = self.clone();
+        // 看门狗心跳（2026-10-29 僵死事故）：后台循环任何分支体卡死（如
+        // discovery/远程刷新被无超时网络调用挂住）会让 select 循环停摆——
+        // 事件/重扫/蒸馏全部静默停摆 3 小时无人知晓。心跳由循环每轮更新，
+        // 监视任务发现 15 分钟（3 个 scan 周期）无心跳 → error + 退出(75)，
+        // 由托盘/launchd 秒级拉起新实例自愈
+        let last_tick_ms = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(
+            evolve_memory::health::now(),
+        ));
+        let heartbeat = last_tick_ms.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let now = evolve_memory::health::now();
+                let last = heartbeat.load(std::sync::atomic::Ordering::Relaxed);
+                if now.saturating_sub(last) > Duration::from_secs(900).as_millis() as u64 {
+                    tracing::error!(
+                        silent_secs = (now - last) / 1000,
+                        "background tick loop wedged — exiting for supervisor restart"
+                    );
+                    std::process::exit(75);
+                }
+            }
+        });
+        let heartbeat = last_tick_ms.clone();
         tokio::spawn(async move {
             let mut scan_tick = tokio::time::interval(Duration::from_secs(300));
             scan_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1001,6 +1029,7 @@ impl Inner {
             distill_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             distill_tick.tick().await; // 启动首跳立即消费：等 10 分钟后再首轮检查
             loop {
+                heartbeat.store(evolve_memory::health::now(), std::sync::atomic::Ordering::Relaxed);
                 tokio::select! {
                     _ = scan_tick.tick() => {
                         state.rescan_discovery();
