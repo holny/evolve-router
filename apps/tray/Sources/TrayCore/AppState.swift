@@ -1015,7 +1015,9 @@ public final class AppState: ObservableObject {
                         tokens7d: (m["tokens_7d"] as? Int) ?? Int((m["tokens_7d"] as? Double) ?? 0),
                         cacheHitPct: (m["cache_hit_pct"] as? Int) ?? (m["cache_hit_pct"] as? Double).map(Int.init),
                         ttftMs: (m["ttft_ms"] as? Int) ?? (m["ttft_ms"] as? Double).map(Int.init),
-                        favorite: (m["favorite"] as? Bool) ?? false)
+                        favorite: (m["favorite"] as? Bool) ?? false,
+                        scopeSource: m["scope_source"] as? String,
+                        isFree: (m["free"] as? Bool) ?? false)
                 }
                 upd(\.favoritePickerRows, rows)
             }
@@ -1052,6 +1054,23 @@ public final class AppState: ObservableObject {
         }
     }
 
+    /// provider 级禁用（2026-10-29 心选面板）：Off = 彻底不使用该 provider——
+    /// 网关级语义（两路径共用），复用 /api/providers/set 的 disabled 标志：
+    /// model_usability 打 provider-off、范围/组合/兜底 sweep 全路径排除
+    public func setProviderDisabled(provider: String, disabled: Bool) {
+        Task {
+            let (status, data) = (try? await post("/api/providers", body: ["key": provider, "disabled": disabled])) ?? (0, Data())
+            if status != 200 {
+                let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { $0["error"] as? [String: Any] }
+                    .flatMap { $0["message"] as? String } ?? "gateway unreachable (\(status))"
+                showFavoriteNotice("⚠︎ " + msg)
+                return
+            }
+            await pollData()
+        }
+    }
+
     private func showFavoriteNotice(_ msg: String) {
         upd(\.favoriteNotice, msg)
         Task {
@@ -1072,4 +1091,9 @@ public struct FavoritePickRow: Identifiable, Equatable {
     public let cacheHitPct: Int?
     public let ttftMs: Int?
     public let favorite: Bool
+    /// 心选范围来源（fav/top/new/rec；gateway 模式恒 none）——TOP/NEW 提示
+    /// "已在候选队列"
+    public let scopeSource: String?
+    /// 免费模型（直通车成员，同样已在候选队列）
+    public let isFree: Bool
 }

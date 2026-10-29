@@ -80,7 +80,10 @@ public struct PanelView: View {
         // 内滚 172 + recent 186 时代总高超出视口 ~50pt → 整面板滑动；收 148/148
         // 后内容 ≈ 636，定高 640 贴合）。decisionBanner（降级横幅 ~40pt）出现的
         // 少见态由外层滚动兜底。
-        .frame(width: 336, height: 640)
+        // 高度随模式自适应（评审：favorites 卡加入后 640 装不下，上下被裁）——
+        // 高度仍由**状态推导**（心选 +182 = 卡 170 + 卡间距 12），保持定高 O(1)
+        // 测量的性能设计；gateway 模式维持 640
+        .frame(width: 336, height: state.routingMode == "favorites" ? 822 : 640)
         // 面板开合门控（2026-10-19）：关闭期间 AppState 只养快照（零发布），
         // 打开瞬间 flush + 立即拉一轮最新——菜单栏图标不再被隐藏面板的
         // 每秒全量重测量拖死；预览/截图模式（previewSeed）不打扰种子数据
@@ -573,7 +576,7 @@ public struct PanelView: View {
                         }
                         // chips：每 provider 一行（心选 chip × 移除 + 空位 +）
                         ForEach(sortedFavoriteProviders, id: \.self) { provider in
-                            favoriteChipsRow(provider)
+                            favoriteProviderRow(provider)
                         }
                         if !favoritesEmpty && state.routingMode == "favorites" {
                             sourceDistRow
@@ -613,50 +616,55 @@ public struct PanelView: View {
         return all.sorted()
     }
 
-    private func favoriteChipsRow(_ provider: String) -> some View {
+    /// provider 折叠行（评审 UX round 2）：一行 = 状态点 + 名称 + On/Off +
+    /// x/3（未选提示）+ 展开箭头。选择窗口默认折叠，点行展开比较选择器
+    private func favoriteProviderRow(_ provider: String) -> some View {
         let favs = state.favorites[provider] ?? []
-        let slots = max(0, 3 - favs.count)
-        return HStack(spacing: 4) {
+        let enabled = state.providers.first(where: { $0.key == provider })?.enabled ?? true
+        let writable = !state.external
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(!enabled ? Color.gray : (favs.isEmpty ? Color.orange : Color.green))
+                .frame(width: 5, height: 5)
             Text(provider)
-                .font(.system(size: 9))
-                .foregroundStyle(.tertiary)
+                .font(.system(size: 10, weight: favs.isEmpty ? .regular : .medium))
                 .lineLimit(1)
-                .frame(maxWidth: 70, alignment: .leading)
-            ForEach(favs, id: \.self) { model in
-                HStack(spacing: 3) {
-                    Text(Self.shortModelName(model))
-                        .font(.system(size: 9.5, design: .monospaced))
-                            .lineLimit(1)
-                    Button {
-                        state.removeFavorite(provider: provider, model: model)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 6.5, weight: .bold))
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help(state.external ? t("external") : t("fav_remove"))
-                    .disabled(state.external)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.05)))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            // 未选择提示（用户裁决：未选择时要提示用户去选）
+            if favs.isEmpty && enabled {
+                Text(t("fav_unpicked"))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.orange)
+            } else {
+                Text("\(favs.count)/3")
+                    .font(.system(size: 9))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
             }
-            ForEach(0..<slots, id: \.self) { _ in
-                Button {
-                    state.openFavoritePicker(provider: provider)
-                } label: {
-                    Text(t("fav_empty_slot"))
-                        .font(.system(size: 9.5, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3])))
-                }
-                .buttonStyle(.plain)
-                .disabled(state.external)
+            // provider 开关：Off = 彻底不使用该 provider（网关级，两路径共用）
+            Button {
+                state.setProviderDisabled(provider: provider, disabled: enabled)
+            } label: {
+                Text(enabled ? t("fav_on") : t("fav_off"))
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(enabled ? Color.green.opacity(0.16) : Color.primary.opacity(0.10)))
+                    .foregroundStyle(enabled ? Color.green : .secondary)
             }
-            Spacer(minLength: 0)
+            .buttonStyle(.plain)
+            .disabled(!writable)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 7.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 2)
+        .contentShape(Rectangle())
+        .opacity(enabled ? 1 : 0.5)
+        .onTapGesture {
+            if writable && enabled {
+                state.openFavoritePicker(provider: provider)
+            }
         }
     }
 
@@ -709,17 +717,18 @@ public struct PanelView: View {
                     .font(.system(size: 10))
                     .frame(width: 90)
             }
-            // 表头（比较列：7 天消耗 / 缓存命中 / 平均首字；档位胶囊由图例说明）
-            HStack(spacing: 6) {
-                Text(t("models")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(maxWidth: .infinity, alignment: .leading)
-                Text(t("fav_7d")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
-                Text(t("fav_hit")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 30, alignment: .trailing)
-                Text(t("fav_ttft")).font(.system(size: 8.5)).foregroundStyle(.tertiary).frame(width: 36, alignment: .trailing)
-            }
+            // 候选队列提示（评审 UX round）：TOP/NEW/FREE 已在候选队列，
+            // 重复挑选也可以——只是给该模型叠加心选加成
+            Text(t("fav_hint_queue"))
+                .font(.system(size: 8.5))
+                .foregroundStyle(.tertiary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             let query = state.favoritePickerSearch.lowercased()
             let rows = state.favoritePickerRows
                 .filter { query.isEmpty || $0.model.lowercased().contains(query) }
-                .sorted { $0.tokens7d == $1.tokens7d ? $0.model < $1.model : $0.tokens7d > $1.tokens7d }
+                .sorted { $0.model < $1.model }
             ScrollView(.vertical, showsIndicators: true) {
                 // LazyVStack（评审：非 Lazy 的 655 行 Button 每次渲染全量重建，
                 // 主线程百 ms 级、轮询叠加即"返回卡 2s"的元凶）
@@ -771,21 +780,20 @@ public struct PanelView: View {
             if !row.priceTier.isEmpty {
                 tagPill(row.priceTier, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: "")
             }
-            Text(AppState.fmtTok(row.tokens7d))
-                .font(.system(size: 9))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .trailing)
-            Text(row.cacheHitPct.map { "\($0)%" } ?? "-")
-                .font(.system(size: 9))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 30, alignment: .trailing)
-            Text(row.ttftMs.map { Self.fmtMs($0) } ?? "-")
-                .font(.system(size: 9))
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .frame(width: 36, alignment: .trailing)
+            // 来源标签复用（评审 UX round）：TOP/NEW/REC = 已在候选队列；
+            // FREE = 免费直通车成员。重复挑选只是叠加心选加成
+            if let src = row.scopeSource, src != "none", let key = Self.sourceKey(src), let tint = Self.sourceTint(src) {
+                tagPill(t(key), tint: tint, bg: tint.opacity(0.14), help: "")
+            }
+            if row.isFree {
+                tagPill(t("src_free"), tint: .gray, bg: Color.gray.opacity(0.14), help: "")
+            }
+            if !row.capability.isEmpty {
+                tagPill(row.capability, tint: Self.tagColorCap, bg: Self.tagColorCap.opacity(0.14), help: "")
+            }
+            if !row.priceTier.isEmpty {
+                tagPill(row.priceTier, tint: Self.tagColorPrice, bg: Self.tagColorPrice.opacity(0.14), help: "")
+            }
         }
         .padding(.vertical, 1)
         .opacity(state.external ? 0.5 : 1)

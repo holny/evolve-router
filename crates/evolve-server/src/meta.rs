@@ -904,6 +904,13 @@ pub async fn api_models_favorite_get(
     // 网关评估好的 能力×价位 档位（替代原 fail_pct/yesterday_tokens 两列）
     let now = evolve_memory::health::now();
     let wview = st.flywheel.hourly_window(now.saturating_sub(7 * 86_400_000), now);
+    // 范围来源映射（favorites 模式）：选择器行复用来源标签提示"已在候选队列"
+    let scope_src: std::collections::HashMap<String, evolve_core::scope::SourceTag> =
+        if routing_mode(&st) == crate::state::RoutingModeCfg::Favorites {
+            favorite_scope_selection(&st).1
+        } else {
+            Default::default()
+        };
     let mut models: Vec<Value> = snap
         .iter()
         .filter(|m| &m.provider == provider)
@@ -931,6 +938,10 @@ pub async fn api_models_favorite_get(
                 "cache_hit_pct": cache_hit,
                 "ttft_ms": ttft,
                 "favorite": favorites.contains(&m.id),
+                // 范围来源 + 免费标记（评审 UX round）：选择器里 TOP/NEW/免费模型
+                // 要提示"已在候选队列"；favorites 模式外恒 none
+                "free": m.is_free(),
+                "scope_source": scope_src.get(&m.id).map(|t| t.as_str()).unwrap_or("none"),
             })
         })
         .collect();
@@ -2422,7 +2433,7 @@ pub fn favorite_scope_selection(
     let mut by_provider: std::collections::BTreeMap<&str, Vec<evolve_core::scope::ScopeCandidate>> =
         std::collections::BTreeMap::new();
     for m in snap.iter() {
-        if matches!(usability.get(&m.id), Some(Some("no-key" | "deleted"))) {
+        if matches!(usability.get(&m.id), Some(Some("no-key" | "deleted" | "provider-off"))) {
             continue;
         }
         if m.base_url.contains(&self_ep) || m.base_url.contains(&self_ep2) {
@@ -2552,7 +2563,7 @@ pub fn portfolio_selection(
     let self_ep2 = format!("localhost:{}", st.config.server.port);
     let eligible: Vec<&evolve_core::types::ModelRecord> = snap
         .iter()
-        .filter(|m| !matches!(usability.get(&m.id), Some(Some("no-key" | "deleted"))))
+        .filter(|m| !matches!(usability.get(&m.id), Some(Some("no-key" | "deleted" | "provider-off"))))
         .filter(|m| !m.base_url.contains(&self_ep) && !m.base_url.contains(&self_ep2))
         .collect();
 
@@ -2647,6 +2658,10 @@ pub fn model_usability(st: &AppState) -> std::collections::HashMap<String, Optio
                 Some("no-key")
             } else if deleted.contains(m.id.as_str()) {
                 Some("deleted")
+            } else if ov.providers.get(&m.provider).map(|p| p.disabled).unwrap_or(false) {
+                // provider 级禁用（2026-10-29 心选面板开关复用此标志）：同步硬闸——
+                // 组合/心选范围/兜底 sweep 全路径排除，"彻底不使用该 provider"
+                Some("provider-off")
             } else if gated.contains(&m.provider) && !m.is_free() {
                 // 免费直通车豁免：账号级配额闸不连带免费模型（与 relay 侧
                 // quota_view 豁免同口径，2026-10-23）；上游模型级 429 仍走

@@ -168,6 +168,9 @@ async fn post_favorite_appends() {
     assert!(mini["tokens_7d"].is_number(), "7-day tokens column must exist (user ruling 2026-10-29): {}", mini);
     assert!(mini["ttft_ms"].is_null() || mini["ttft_ms"].is_number());
     assert!(mini["cache_hit_pct"].is_null() || mini["cache_hit_pct"].is_number());
+    // 评审 UX round：选择器行带 范围来源 + 免费标记（复用来源标签，提示"已在候选队列"）
+    assert!(mini["free"].is_boolean(), "free flag must exist: {}", mini);
+    assert_eq!(mini["scope_source"], "none", "gateway mode has no scope membership");
 }
 
 #[tokio::test]
@@ -268,6 +271,25 @@ async fn remove_miss_leaves_no_stray_entry() {
     let (status, _) = send(app, req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini", "remove": true}))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(load_overrides(&dir).favorites.get(PROVIDER).is_none(), "no stray empty entry");
+}
+
+/// 评审 UX round 2：provider 级禁用（心选面板开关复用 providers disabled）
+/// → 该 provider 的模型全路径排除（范围 active=false + unusable_reason）
+#[tokio::test]
+async fn disabled_provider_excluded_from_scope() {
+    let (cfg, _) = test_config();
+    let app = build_router(build_state(cfg));
+    let (s, _) = send(app.clone(), req("PUT", "/api/routing-mode", json!({"mode": "favorites"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = send(app.clone(), req("POST", "/api/models/favorite", json!({"provider": PROVIDER, "model": "mini"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    // 禁用 provider（心选面板开关写的同一端点：POST /api/providers）
+    let (s, _) = send(app.clone(), req("POST", "/api/providers", json!({"key": PROVIDER, "disabled": true}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, body) = send(app, get("/api/model-tags")).await;
+    let mini = body["models"].as_array().unwrap().iter().find(|m| m["model"] == "mini").unwrap().clone();
+    assert_eq!(mini["active"], false, "disabled provider must leave the scope: {}", mini);
+    assert_eq!(mini["unusable_reason"], "provider-off", "reason must surface in UI: {}", mini);
 }
 
 #[tokio::test]

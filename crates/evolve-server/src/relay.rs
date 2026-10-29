@@ -1670,6 +1670,13 @@ pub(crate) fn sweep_candidates(
     const SWEEP_MAX: usize = 6;
     let health = st.health.snapshot();
     let now = evolve_memory::health::now();
+    let disabled_providers: std::collections::HashSet<String> =
+        crate::state::effective_overrides(st)
+            .providers
+            .iter()
+            .filter(|(_, p)| p.disabled)
+            .map(|(k, _)| k.clone())
+            .collect();
     let needs_vision = j.needs_vision > evolve_core::thresholds::VISION;
     // provider → 通过硬约束的候选（BTreeMap 保证遍历顺序稳定、可测）
     let mut per: std::collections::BTreeMap<&str, Vec<&evolve_core::types::ModelRecord>> =
@@ -1681,6 +1688,10 @@ pub(crate) fn sweep_candidates(
         // 无凭据模型不进兜底：默认接入的 provider 未填 key 时去撞 401 只会把它
         // 误标成 provider 级降级（真实原因是"还没填 key"，由 needs_key 提示）
         if !m.has_credential() {
+            continue;
+        }
+        // provider 级禁用（2026-10-29）：绝境兜底也不得复活被彻底关闭的 provider
+        if disabled_providers.contains(m.provider.as_str()) {
             continue;
         }
         if needs_vision && m.tiers.vision < evolve_core::thresholds::VISION {
