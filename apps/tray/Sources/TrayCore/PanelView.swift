@@ -51,9 +51,6 @@ public struct PanelView: View {
                 header
                 decisionBanner
                 metricsCard
-                if state.routingMode == "favorites" {
-                    favoritesCard
-                }
                 if !state.providers.isEmpty {
                     // Providers 行的 tokens/速率/TTFT 也是窗口口径 → 切换中同样置灰
                     providersCard
@@ -80,10 +77,10 @@ public struct PanelView: View {
         // 内滚 172 + recent 186 时代总高超出视口 ~50pt → 整面板滑动；收 148/148
         // 后内容 ≈ 636，定高 640 贴合）。decisionBanner（降级横幅 ~40pt）出现的
         // 少见态由外层滚动兜底。
-        // 高度随模式自适应（评审：favorites 卡加入后 640 装不下，上下被裁）——
-        // 高度仍由**状态推导**（心选 +182 = 卡 170 + 卡间距 12），保持定高 O(1)
-        // 测量的性能设计；gateway 模式维持 640
-        .frame(width: 336, height: state.routingMode == "favorites" ? 822 : 640)
+        // 高度定 640（评审 UX round 3：Favorites 并入 Providers 卡后，增量由
+        // 心选模式下列表拉高 148→210 吸收，面板本身不再变高）——定高保持
+        // O(1) 测量的性能设计
+        .frame(width: 336, height: 640)
         // 面板开合门控（2026-10-19）：关闭期间 AppState 只养快照（零发布），
         // 打开瞬间 flush + 立即拉一轮最新——菜单栏图标不再被隐藏面板的
         // 每秒全量重测量拖死；预览/截图模式（previewSeed）不打扰种子数据
@@ -221,7 +218,11 @@ public struct PanelView: View {
     /// 172 时头部+指标+双卡+图例总高超出滚动视口 ~50pt，外层滚动被激活成
     /// "整面板滑动"（2026-10-23 实测）——收到 148 让总高回到视口内，
     /// 外层滚动只留给降级横幅等少见态兜底
-    private let providersScrollH: CGFloat = 148
+    /// Providers 列表高度：心选模式拉高（评审 UX round 3：行上有 subline +
+    /// 展开的选择器，需要更多可视行）；Autopilot 模式维持 148
+    private var providersScrollH: CGFloat {
+        state.routingMode == "favorites" ? 210 : 148
+    }
 
     /// 配额百分比文案：**估算来源**加 `~` 前缀（与 web 同口径）。
     /// 不用 "quota: estimated/headers" 这类行话标签——数字自己表达可信度，
@@ -540,165 +541,9 @@ public struct PanelView: View {
     /// 打开中的比较选择器 + 来源分布。gateway 模式整个不出现（面板维持现状）。
     /// 内容区有界滚动（评审 L5：面板定高 640，选择器展开 ~190pt 会把
     /// controls 区挤出可视范围）
-    private var favoritesCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 6) {
-                    if let pickerProvider = state.favoritePickerProvider {
-                        pickerCard(pickerProvider)
-                    } else {
-                        HStack(spacing: 6) {
-                            sectionLabel("heart.text.square", t("fav_card"))
-                            Spacer(minLength: 0)
-                            if favoritesEmpty {
-                                // 被动引导横幅：默认照跑，挑选只是引导（用户裁决）
-                                HStack(spacing: 5) {
-                                    Text(t("fav_nudge"))
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(Color(red: 0.30, green: 0.49, blue: 0.06))
-                                    Button {
-                                        if let first = sortedFavoriteProviders.first {
-                                            state.openFavoritePicker(provider: first)
-                                        }
-                                    } label: {
-                                        Text(t("fav_choose"))
-                                            .font(.system(size: 9, weight: .bold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Capsule().fill(Color(red: 0.52, green: 0.80, blue: 0.09)))
-                                            .foregroundStyle(Color(red: 0.10, green: 0.18, blue: 0.02))
-                                    }
-                                    .buttonStyle(.plain)
-                                    .opacity(state.external ? 0.5 : 1)
-                                    .disabled(state.external)
-                                }
-                            }
-                        }
-                        // chips：每 provider 一行（心选 chip × 移除 + 空位 +）
-                        ForEach(sortedFavoriteProviders, id: \.self) { provider in
-                            favoriteProviderRow(provider)
-                        }
-                        if !favoritesEmpty && state.routingMode == "favorites" {
-                            sourceDistRow
-                        }
-                        if let notice = state.favoriteNotice {
-                            Text(notice)
-                                .font(.system(size: 8.5))
-                                .foregroundStyle(.orange)
-                                .lineLimit(2)
-                                .minimumScaleFactor(0.8)
-                        }
-                    }
-                }
-            }
-            // 固定高（评审：maxHeight 会被下方 decisionsCard 的弹性扩张挤到
-            // 只剩一条缝，"看不到什么内容"）——卡片恒定占位，内容内滚
-            .frame(height: 170)
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(groupBackground)
-    }
-
-    private var favoritesEmpty: Bool {
-        state.favorites.values.allSatisfy { $0.isEmpty }
-    }
-
-    private var sortedFavoriteProviders: [String] {
-        // /api/routing-mode 只回**已有心选记录**的 provider——目录里的其他
-        // provider 也要补一行「+」空位，否则从未挑过心选的 provider 在横幅
-        // 消失后就没有打开选择器的入口了（评审 L7：死代码 + 注释不兑现）
-        var all = Set(state.favorites.keys)
-        for p in state.providers where p.modelCount > 0 {
-            all.insert(p.key)
-        }
-        all.remove("")
-        return all.sorted()
-    }
-
-    /// provider 折叠行（评审 UX round 2）：一行 = 状态点 + 名称 + On/Off +
-    /// x/3（未选提示）+ 展开箭头。选择窗口默认折叠，点行展开比较选择器
-    private func favoriteProviderRow(_ provider: String) -> some View {
-        let favs = state.favorites[provider] ?? []
-        let enabled = state.providers.first(where: { $0.key == provider })?.enabled ?? true
-        let writable = !state.external
-        return HStack(spacing: 6) {
-            Circle()
-                .fill(!enabled ? Color.gray : (favs.isEmpty ? Color.orange : Color.green))
-                .frame(width: 5, height: 5)
-            Text(provider)
-                .font(.system(size: 10, weight: favs.isEmpty ? .regular : .medium))
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            // 未选择提示（用户裁决：未选择时要提示用户去选）
-            if favs.isEmpty && enabled {
-                Text(t("fav_unpicked"))
-                    .font(.system(size: 8.5, weight: .medium))
-                    .foregroundStyle(.orange)
-            } else {
-                Text("\(favs.count)/3")
-                    .font(.system(size: 9))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            // provider 开关：Off = 彻底不使用该 provider（网关级，两路径共用）
-            Button {
-                state.setProviderDisabled(provider: provider, disabled: enabled)
-            } label: {
-                Text(enabled ? t("fav_on") : t("fav_off"))
-                    .font(.system(size: 8.5, weight: .semibold))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 1)
-                    .background(Capsule().fill(enabled ? Color.green.opacity(0.16) : Color.primary.opacity(0.10)))
-                    .foregroundStyle(enabled ? Color.green : .secondary)
-            }
-            .buttonStyle(.plain)
-            .disabled(!writable)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 7.5, weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
-        .opacity(enabled ? 1 : 0.5)
-        .onTapGesture {
-            if writable && enabled {
-                state.openFavoritePicker(provider: provider)
-            }
-        }
-    }
-
-    /// 来源分布（最近请求按来源聚合，model → modelTagMap.source 映射）
-    private var sourceDistRow: some View {
-        var srcCounts: [String: Int] = [:]
-        for r in state.recent.prefix(50) {
-            guard let key = Self.sourceKey(state.modelTagMap[r.model]?.source) else { continue }
-            srcCounts[key, default: 0] += 1
-        }
-        let total = srcCounts.values.reduce(0, +)
-        return Group {
-            if total > 0 {
-                HStack(spacing: 6) {
-                    Text(t("fav_dist"))
-                        .font(.system(size: 8.5))
-                        .foregroundStyle(.tertiary)
-                    ForEach(srcCounts.keys.sorted(), id: \.self) { key in
-                        HStack(spacing: 2) {
-                            tagPill(t(key), tint: Self.sourceTint(key.replacingOccurrences(of: "src_", with: "")) ?? .secondary, bg: (Self.sourceTint(key.replacingOccurrences(of: "src_", with: "")) ?? .secondary).opacity(0.14), help: "")
-                            Text("\(srcCounts[key] ?? 0)")
-                                .font(.system(size: 8.5))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-    }
-
-    /// provider 维度比较选择器（卡片内展开）：目录全量 + y-day/fail/ttft/price 四列
-    private func pickerCard(_ provider: String) -> some View {
+    /// 心选比较选择器（内联展开，评审 UX round 3：Favorites 并入 Providers 卡——
+    /// 默认折叠，点 provider 行展开；行直接铺进外层 LazyVStack，无嵌套滚动）
+    private func favPickerInline(_ provider: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Button {
@@ -729,27 +574,21 @@ public struct PanelView: View {
             let rows = state.favoritePickerRows
                 .filter { query.isEmpty || $0.model.lowercased().contains(query) }
                 .sorted { $0.model < $1.model }
-            ScrollView(.vertical, showsIndicators: true) {
-                // LazyVStack（评审：非 Lazy 的 655 行 Button 每次渲染全量重建，
-                // 主线程百 ms 级、轮询叠加即"返回卡 2s"的元凶）
-                LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(rows) { row in
-                        Button {
-                            if row.favorite {
-                                state.removeFavorite(provider: provider, model: row.model)
-                            } else if let current = state.favorites[provider], current.count >= 3, let replaced = current.first {
-                                state.setFavorite(provider: provider, model: row.model, replace: replaced)
-                            } else {
-                                state.setFavorite(provider: provider, model: row.model)
-                            }
-                        } label: {
-                            pickerRowView(row)
-                        }
-                        .buttonStyle(.plain)
+            // 行直接铺进外层 LazyVStack（评审：无嵌套滚动、无独立卡片）
+            ForEach(rows) { row in
+                Button {
+                    if row.favorite {
+                        state.removeFavorite(provider: provider, model: row.model)
+                    } else if let current = state.favorites[provider], current.count >= 3, let replaced = current.first {
+                        state.setFavorite(provider: provider, model: row.model, replace: replaced)
+                    } else {
+                        state.setFavorite(provider: provider, model: row.model)
                     }
+                } label: {
+                    pickerRowView(row)
                 }
+                .buttonStyle(.plain)
             }
-            .frame(height: 96)
             // 标签图例（用户裁决：复用网关评估好的 能力×价位 档位，要有说明）
             Text(t("fav_legend"))
                 .font(.system(size: 8.5))
@@ -832,6 +671,11 @@ public struct PanelView: View {
                     LazyVStack(alignment: .leading, spacing: 6) {
                         ForEach(provs, id: \.id) { p in
                             providerRow(p)
+                            // 心选比较选择器：默认折叠，点行内联展开（外层滚动吸收，
+                            // 评审 UX round 3：Favorites 并入 Providers 卡）
+                            if state.routingMode == "favorites" && state.favoritePickerProvider == p.key {
+                                favPickerInline(p.key)
+                            }
                         }
                     }
                 }
@@ -973,29 +817,98 @@ public struct PanelView: View {
     /// ③ 标签（档位 / 模型数 / 免费 / 降级 / 去申请 key）
     @ViewBuilder
     private func providerRow(_ p: ProviderRow) -> some View {
-        HStack(spacing: 7) {
-            Circle()
-                .fill(p.enabled ? (p.available && !p.quotaExhausted ? Color.green : Color.orange) : Color.gray)
-                .frame(width: 5, height: 5)
-            VStack(alignment: .leading, spacing: 1) {
-                // ① 名称 + 状态（三选一，**右对齐**：配额进度/余额/窗口警告贴右边缘）
-                HStack(spacing: 5) {
-                    Text(p.key)
-                        .font(.system(size: 11, weight: .medium))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                    Spacer(minLength: 4)
-                    providerStateInline(p)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(p.enabled ? (p.available && !p.quotaExhausted ? Color.green : Color.orange) : Color.gray)
+                    .frame(width: 5, height: 5)
+                VStack(alignment: .leading, spacing: 1) {
+                    // ① 名称 + 状态（三选一，**右对齐**：配额进度/余额/窗口警告贴右边缘）
+                    HStack(spacing: 5) {
+                        Text(p.key)
+                            .font(.system(size: 11, weight: .medium))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                        Spacer(minLength: 4)
+                        // provider On/Off（评审 UX round 3：两种模式都存在都生效——
+                        // Off = 彻底不使用该 provider，网关级）
+                        favProviderToggle(p)
+                        providerStateInline(p)
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    // ② 数据
+                    providerMetricsLine(p)
+                    // ③ 标签
+                    providerLabelsLine(p)
                 }
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                // ② 数据
-                providerMetricsLine(p)
-                // ③ 标签
-                providerLabelsLine(p)
+                // 占满可用宽度：让第①行的 Spacer 把状态推到右边缘
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            // 占满可用宽度：让第①行的 Spacer 把状态推到右边缘
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // ④ 心选 subline（仅 favorites 模式）：竞争构成 + 未选提示 + 展开箭头
+            if state.routingMode == "favorites" && p.modelCount > 0 {
+                favSubline(p)
+            }
+        }
+    }
+
+    /// provider On/Off 胶囊开关（Off = 彻底不使用该 provider，网关级）
+    private func favProviderToggle(_ p: ProviderRow) -> some View {
+        let writable = !state.external
+        return Button {
+            state.setProviderDisabled(provider: p.key, disabled: p.enabled)
+        } label: {
+            Text(p.enabled ? t("fav_on") : t("fav_off"))
+                .font(.system(size: 8.5, weight: .semibold))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(p.enabled ? Color.green.opacity(0.16) : Color.primary.opacity(0.10)))
+                .foregroundStyle(p.enabled ? Color.green : .secondary)
+        }
+        .buttonStyle(.plain)
+        .disabled(!writable)
+        .help(writable ? t("fav_toggle_help") : t("external"))
+    }
+
+    /// 心选 subline：fav x/3（未选橙色提示）· top n · new n · rec n · free n · 展开箭头
+    @ViewBuilder
+    private func favSubline(_ p: ProviderRow) -> some View {
+        let c = state.scopeCounts[p.key]
+        let favs = state.favorites[p.key] ?? []
+        let expanded = state.favoritePickerProvider == p.key
+        HStack(spacing: 5) {
+            // 未选提示（用户裁决：未选择时要提示）或 fav 计数
+            if favs.isEmpty && p.enabled {
+                Text(t("fav_unpicked"))
+                    .font(.system(size: 8.5, weight: .medium))
+                    .foregroundStyle(.orange)
+            } else {
+                Text("fav \(favs.count)/3")
+                    .font(.system(size: 8.5))
+                    .monospacedDigit()
+                    .foregroundStyle(Color(red: 0.52, green: 0.80, blue: 0.09))
+            }
+            if let c {
+                Text("· top \(c.top) · new \(c.new) · rec \(c.rec) · free \(c.free)")
+                    .font(.system(size: 8.5))
+                    .monospacedDigit()
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 4)
+            // 展开箭头 = 打开该 provider 的比较选择器（默认折叠）
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 7.5, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if expanded {
+                state.closeFavoritePicker()
+            } else if !state.external && p.enabled {
+                state.openFavoritePicker(provider: p.key)
+            }
         }
     }
 

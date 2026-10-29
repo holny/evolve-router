@@ -314,6 +314,9 @@ public final class AppState: ObservableObject {
     @Published public var routingMode: String = "gateway"
     /// 全局心选清单（/api/routing-mode 下发）：provider → ≤3 个心选 model id
     @Published public var favorites: [String: [String]] = [:]
+    /// 心选范围构成（/api/routing-mode 下发）：provider → 竞争成员计数
+    /// （合并版 Providers 卡 subline 数据源；gateway 模式为空）
+    @Published public var scopeCounts: [String: ScopeCount] = [:]
     /// 心选变更的临时提示（同 priorityNotice 语义）
     @Published public var favoriteNotice: String?
     /// 打开的选择器对应的 provider（nil = 关闭；卡片内展开，不弹二级窗口）
@@ -356,6 +359,7 @@ public final class AppState: ObservableObject {
         var modelTagMap: [String: ModelTagInfo] = [:]
         var routingMode = "gateway"
         var favorites: [String: [String]] = [:]
+        var scopeCounts: [String: ScopeCount] = [:]
         var modelRows: [ModelRow] = []
         var requests = 0
         var successRate = 0
@@ -395,6 +399,9 @@ public final class AppState: ObservableObject {
         upd(\.softPct, pending.softPct)
         upd(\.modelCooling, pending.modelCooling)
         upd(\.modelTagMap, pending.modelTagMap)
+        upd(\.routingMode, pending.routingMode)
+        upd(\.favorites, pending.favorites)
+        upd(\.scopeCounts, pending.scopeCounts)
         upd(\.routingMode, pending.routingMode)
         upd(\.favorites, pending.favorites)
         upd(\.modelRows, pending.modelRows)
@@ -573,7 +580,7 @@ public final class AppState: ObservableObject {
                 }
                 put(\.modelTagMap, \.modelTagMap, tm)
             }
-            // 心选路径（双路径开关 + 全局心选清单）：低频变化，随轮询直读快照
+            // 心选路径（双路径开关 + 全局心选清单 + 范围构成）：低频变化，随轮询直读快照
             if case (200, let rmData)? = try? await get("/api/routing-mode"),
                let rmObj = try? JSONSerialization.jsonObject(with: rmData) as? [String: Any] {
                 let mode = (rmObj["mode"] as? String) ?? "gateway"
@@ -583,8 +590,18 @@ public final class AppState: ObservableObject {
                         favs[p] = (v as? [String]) ?? []
                     }
                 }
+                var counts: [String: ScopeCount] = [:]
+                if let sObj = rmObj["scope"] as? [String: Any] {
+                    for (p, v) in sObj {
+                        guard let d = v as? [String: Any] else { continue }
+                        let n = { (k: String) -> Int in (d[k] as? Int) ?? Int((d[k] as? Double) ?? 0) }
+                        counts[p] = ScopeCount(fav: n("fav"), top: n("top"), new: n("new"),
+                                               rec: n("rec"), free: n("free"))
+                    }
+                }
                 put(\.routingMode, \.routingMode, mode)
                 put(\.favorites, \.favorites, favs)
+                put(\.scopeCounts, \.scopeCounts, counts)
             }
             var reqs = 0, ok = 0, toks = 0
             for (_, s) in models {
@@ -1077,6 +1094,23 @@ public final class AppState: ObservableObject {
             try? await Task.sleep(nanoseconds: 5_000_000_000)
             upd(\.favoriteNotice, nil)
         }
+    }
+}
+
+/// 选择器行：provider 目录全量 + 比较列（7 天消耗 / 缓存命中率 / 平均 TTFT /
+/// 网关评估好的 能力×价位 档位——用户裁决 2026-10-29，替代原昨日/失败率列）
+/// 心选范围构成计数（/api/routing-mode scope 字段）：provider 内参与竞争的
+/// 成员构成——fav/top/new/rec 为当选成员数，free 为直通车成员数
+public struct ScopeCount: Equatable {
+    public let fav: Int
+    public let top: Int
+    public let new: Int
+    public let rec: Int
+    public let free: Int
+
+    public init(fav: Int, top: Int, new: Int, rec: Int, free: Int) {
+        self.fav = fav; self.top = top; self.new = new
+        self.rec = rec; self.free = free
     }
 }
 

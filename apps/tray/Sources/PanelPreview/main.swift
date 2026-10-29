@@ -79,6 +79,11 @@ enum PanelPreview {
                 // MiniMax 有记录但清单为空 → 不触发；zhipuai 无记录 → 「+」空位行
             ]
             state.favoriteNotice = nil
+            state.scopeCounts = [
+                "opencode-go": ScopeCount(fav: 2, top: 3, new: 1, rec: 1, free: 2),
+                "deepseek": ScopeCount(fav: 1, top: 1, new: 1, rec: 0, free: 0),
+                "MiniMax": ScopeCount(fav: 0, top: 1, new: 0, rec: 1, free: 2),
+            ]
         }
         // 选择器展开种子（EV_PREVIEW_FAV_PICK=<provider>）：比较列/来源标签/
         // 免费标签/候选队列提示（EV_PREVIEW_FAV=1 需同时给）

@@ -858,15 +858,57 @@ fn demote_other_pins(
     demoted
 }
 
-/// GET /api/routing-mode —— 当前路由路径模式 + 全局心选清单
-/// （托盘面板一次调用拿全量 favorites，逐 provider 拉取只在选择器打开时）
+/// GET /api/routing-mode —— 当前路由路径模式 + 全局心选清单 + 范围构成计数
+/// （托盘一次调用拿全量；scope = 每 provider 参与竞争的成员构成，
+/// 合并版 Providers 卡 subline 数据源）
 pub async fn api_routing_mode_get(State(st): State<AppState>) -> Response {
     let ov = crate::state::effective_overrides(&st);
     let mut favorites: Vec<(String, Vec<String>)> =
         ov.favorites.iter().map(|(p, v)| (p.clone(), v.clone())).collect();
     favorites.sort_by(|a, b| a.0.cmp(&b.0));
     let favorites: std::collections::BTreeMap<String, Vec<String>> = favorites.into_iter().collect();
-    (axum::Json(json!({"mode": ov.routing_mode.as_str(), "favorites": favorites}))).into_response()
+
+    // 范围构成：fav/top/new/rec 来自范围选举的标签，free = 直通车成员数
+    // （仅 Favorites 路径有"心选范围"概念；gateway 模式回空对象）
+    let scope_json = if ov.routing_mode == crate::state::RoutingModeCfg::Favorites {
+        let (ids, tag_map) = favorite_scope_selection(&st);
+        let snap = st.engine.catalog_snapshot();
+        let provider_of: std::collections::HashMap<&str, &str> = snap
+            .iter()
+            .map(|m| (m.id.as_str(), m.provider.as_str()))
+            .collect();
+        let mut scope: std::collections::BTreeMap<&str, [u64; 5]> = std::collections::BTreeMap::new();
+        for id in &ids {
+            if let Some(prov) = provider_of.get(id.as_str()) {
+                let slot = &mut scope.entry(prov).or_insert([0; 5]);
+                match tag_map.get(id) {
+                    Some(evolve_core::scope::SourceTag::Fav) => slot[0] += 1,
+                    Some(evolve_core::scope::SourceTag::Top) => slot[1] += 1,
+                    Some(evolve_core::scope::SourceTag::New) => slot[2] += 1,
+                    Some(evolve_core::scope::SourceTag::Rec) => slot[3] += 1,
+                    None => {}
+                }
+            }
+        }
+        for m in snap.iter().filter(|m| m.is_free()) {
+            *scope.entry(m.provider.as_str()).or_insert([0; 5]).last_mut().unwrap() += 1;
+        }
+        let scope: std::collections::BTreeMap<String, Value> = scope
+            .into_iter()
+            .map(|(p, c)| {
+                let total: u64 = c.iter().sum();
+                (
+                    p.to_string(),
+                    json!({"fav": c[0], "top": c[1], "new": c[2], "rec": c[3], "free": c[4], "total": total}),
+                )
+            })
+            .collect();
+        Value::Object(scope.into_iter().collect())
+    } else {
+        json!({})
+    };
+
+    (axum::Json(json!({"mode": ov.routing_mode.as_str(), "favorites": favorites, "scope": scope_json}))).into_response()
 }
 
 /// PUT /api/routing-mode {"mode": "gateway"|"favorites"} —— 双路径热切换

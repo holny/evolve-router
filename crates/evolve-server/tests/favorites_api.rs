@@ -260,6 +260,30 @@ async fn routing_mode_get_carries_favorites_map() {
     let (_, body) = send(app, get("/api/routing-mode")).await;
     assert_eq!(body["mode"], "gateway");
     assert_eq!(body["favorites"][PROVIDER], json!(["mini"]), "tray needs the global favorites map in one call");
+    // gateway 模式：scope 为空对象（范围构成只属于 Favorites 路径）
+    assert_eq!(body["scope"], json!({}));
+}
+
+/// 评审 UX round 3：favorites 模式下 scope 计数按 provider 出列
+/// （合并版 Providers 卡 subline：fav/top/new/rec/free/total）
+#[tokio::test]
+async fn routing_mode_get_scope_counts_in_favorites_mode() {
+    let (cfg, _) = config_with_seeded_favorites(&["mini"]);
+    let app = build_router(build_state(cfg));
+    let (s, _) = send(app.clone(), req("PUT", "/api/routing-mode", json!({"mode": "favorites"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, body) = send(app, get("/api/routing-mode")).await;
+    let scope = &body["scope"][PROVIDER];
+    assert!(scope.is_object(), "scope counts must exist in favorites mode: {}", body["scope"]);
+    assert_eq!(scope["fav"].as_u64().unwrap(), 1, "seeded favorite elected");
+    for k in ["top", "new", "rec", "free", "total"] {
+        assert!(scope[k].is_number(), "scope.{k} must be a number: {}", scope);
+    }
+    assert_eq!(
+        scope["total"].as_u64().unwrap(),
+        ["fav", "top", "new", "rec", "free"].iter().map(|k| scope[*k].as_u64().unwrap_or(0)).sum::<u64>(),
+        "total = sum of members"
+    );
 }
 
 /// 评审 L10：remove 落空（provider 无心选记录）→ 404 且不得在 overrides
